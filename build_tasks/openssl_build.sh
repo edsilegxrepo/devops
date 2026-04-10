@@ -1,7 +1,7 @@
 #!/bin/bash
 # -----------------------------------------------------------------------------
 # OpenSSL Build Tool (openssl_build.sh)
-# v1.1.6xg  2026/04/07  XdG
+# v1.1.7xg  2026/04/09  XdG
 #
 # OBJECTIVE:
 # Provide a unified, automated script for building OpenSSL from source in three 
@@ -49,7 +49,7 @@ set -o errexit
 set -o nounset
 
 # --- Global Logic Variables ---
-VERSION_INPUT=""       # Target version to build (e.g., 3.6.1)
+VERSION_INPUT=""       # Target version to build (e.g., 3.6.2)
 BUILD_MODE_INPUT=""    # Build strategy: 'RPM', 'ARCHIVE', or 'ALL'
 ACTION_INPUT=""        # Targeted phase: 'build' or 'install' (RPM/ALL modes only)
 OPENSSL_BASE="${OPENSSL_BASE:-}" # Installation prefix (Inherited from environment or auto-calculated)
@@ -65,8 +65,8 @@ OPENSSL_VERSION_BASE="" # Major version (e.g. 3)
 SOURCES_BASE=""        # Source download location
 BUILD_LOG=""           # Build log path (Archive mode only)
 OPENSSL_URL=""         # Upstream download URL (Populated for ARCHIVE/ALL modes)
-OPENSSL_INSTALL_BASE="" # Unpacked source directory (e.g. openssl-3.6.1)
-OPENSSL_INSTALL_ARCH="" # Filename of source tarball (e.g. openssl-3.6.1.tar.gz)
+OPENSSL_INSTALL_BASE="" # Unpacked source directory (e.g. openssl-3.6.2)
+OPENSSL_INSTALL_ARCH="" # Filename of source tarball (e.g. openssl-3.6.2.tar.gz)
 OPENSSL_BIN_ARCH=""     # Final binary archive name (Archive mode only)
 
 # --- Constant Layout & environment Variables ---
@@ -86,6 +86,7 @@ DEFAULT_ARCH_TAG="$(uname -m)"      # Dynamic architecture detection for archive
 DISTRIB_INFO_FILE="/etc/distrib"    # File containing distribution ID
 LD_SO_CONF_ROOT="etc/ld.so.conf.d"  # System linker configuration directory
 OPENSSL_SRC_URL_BASE="https://www.openssl.org/source" # Upstream source location
+CACERT_SRC_URL="https://curl.se/ca/cacert.pem"        # Upstream ca-bundle
 
 # --- Helper Functions ---
 
@@ -118,14 +119,14 @@ Description:
       .tar.xz archive during the 'install' phase.
 
 Arguments:
-  --version=X.Y.Z      The OpenSSL version to build (e.g., 3.6.1).
+  --version=X.Y.Z      The OpenSSL version to build (e.g., 3.6.2).
   --build-mode=MODE    The build mode, either 'RPM', 'ARCHIVE', or 'ALL'.
   --action=ACTION      (RPM/ALL Mode only) Action to perform: 'build' or 'install'.
   -h, --help           Display this help message and exit.
 
 Example:
-  $(basename "$0") --version=3.6.1 --build-mode=ARCHIVE
-  $(basename "$0") --version=3.6.1 --build-mode=RPM --action=build
+  $(basename "$0") --version=3.6.2 --build-mode=ARCHIVE
+  $(basename "$0") --version=3.6.2 --build-mode=RPM --action=build
 EOF
   exit 0
 }
@@ -173,7 +174,7 @@ parse_args() {
 # validate_input: Performs sanity checks on CLI arguments for structural safety
 validate_input() {
   if [[ ! "$VERSION_INPUT" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
-    die 1 "--version=X.Y[.Z] must be specified (e.g. 3.6.1)."
+    die 1 "--version=X.Y[.Z] must be specified (e.g. 3.6.2)."
   fi
 
   if [[ "$BUILD_MODE_INPUT" != "RPM" ]] && [[ "$BUILD_MODE_INPUT" != "ARCHIVE" ]] && [[ "$BUILD_MODE_INPUT" != "ALL" ]]; then
@@ -202,14 +203,14 @@ check_prerequisites() {
 # This function is the "brain" of the script, determining where files are
 # downloaded, where they are staged, and how they are tagged for isolation.
 setup_build_env() {
-  # Version Deconstruction: Splits 3.6.1 into major/minor components
+  # Version Deconstruction: Splits 3.6.2 into major/minor components
   OPENSSL_VERSION_BASE=$(echo "$VERSION_INPUT" | cut -d. -f1) # Expected: 3
   local v_maj
   local v_min
   v_maj=$(echo "$VERSION_INPUT" | cut -d. -f2)
   v_min=$(echo "$VERSION_INPUT" | cut -d. -f3)
 
-  # Construct tags used for isolated path naming (e.g. 3.6.1 -> 36)
+  # Construct tags used for isolated path naming (e.g. 3.6.2 -> 36)
   local openssl_v_major="${OPENSSL_VERSION_BASE}.${v_maj}"
   OPENSSL_VERSION="${openssl_v_major}${v_min:+.${v_min}}"
   OPENSSL_TAG="${openssl_v_major//./}"
@@ -246,7 +247,7 @@ setup_build_env() {
 
     SOURCES_BASE="${src_base}/SOURCES"
     if [[ ! -d "$SOURCES_BASE" ]]; then die 3 "Source directory ($SOURCES_BASE) is missing."; fi
-    
+
     # In ALL mode, we might override the OPENSSL_BASE if it wasn't inherited
     if [[ -z "${OPENSSL_BASE:-}" ]]; then
       OPENSSL_BASE="${target_base}/openssl"
@@ -281,7 +282,7 @@ prepare_sources() {
   cd "${SOURCES_BASE}"
   rm -rf "${OPENSSL_INSTALL_BASE}"
 
-  wget -qN "${OPENSSL_URL}"
+  wget -qN "${OPENSSL_URL}" "${CACERT_SRC_URL}"
   tar -zxf "${OPENSSL_INSTALL_ARCH}"
   if [ $? -eq 0 ] && [[ "$*" =~ "--purge"  ]];then
     rm -f "${OPENSSL_INSTALL_ARCH}"
@@ -414,6 +415,12 @@ apply_post_install() {
     patchelf --set-rpath "${4}" "$3"
   ' -- "${OPENSSL_VERSION_BASE}" "${OPENSSL_SONAME}" "{}" "${OPENSSL_BASE}/${LIBDIR}"
 
+  # Populate cacerts as reference ca-bundle
+  pushd ".${OPENSSL_BASE}" &>/dev/null
+    install -p -m 644 ${SOURCES_BASE}/cacert.pem ./${TLSDIR}/cert.pem
+    ln -sf ../cert.pem ./${TLSDIR}/certs/ca-bundle.crt
+    ls -l ./${TLSDIR}/{cert.pem,certs/ca-bundle.crt}
+  popd &>/dev/null
 }
 
 # packaging: Creates the final distribution tarball (Archive and ALL modes)

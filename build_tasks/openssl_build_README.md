@@ -177,3 +177,25 @@ To ensure smooth installation of isolated packages, the accompanying spec file m
 
 > **POST-BUILD STRIPPING vs. LINK-TIME STRIPPING TECHNICAL NOTE**:
 > Manual stripping with `strip` or `objcopy` failed because those tools post-process a finished ELF binary, recalculating section offsets and re-indexing the string tables to remove symbols. When combined with `-Wl,-Bsymbolic` and custom `RPATHs`, this process often misaligns the **Symbol Versioning Table** (`.gnu.version`), causing the dynamic loader to read null bytes instead of version strings—leading to the `undefined symbol: , version` crash. By using **`-Wl,-s`** during compilation, the linker generates the ELF structure without a symbol table from the start. This "atomic" creation ensures that the internal bindings, versioning tags, and relocation data are perfectly aligned and structurally optimized by the only tool that fully understands the binary's architecture, resulting in a smaller, hardened, and functionally intact artifact.
+
+---
+
+## 9. Implementation of CA-Bundle
+
+To ensure the isolated OpenSSL build is fully functional for TLS verification without relying on host-system certificate stores, the script implements an automated CA-Bundle deployment.
+
+### 9.1 Data Acquisition
+The script retrieves the curated `cacert.pem` bundle from the [curl.se](https://curl.se/ca/cacert.pem) upstream repository. This occurs during the `prepare_sources` phase in **ARCHIVE** mode. For **RPM** mode, this file should be provided as a secondary source within the spec file pipeline to maintain offline build reproducibility.
+
+### 9.2 Path Hierarchy & Symbolism
+The bundle is installed into the isolated prefix to maintain strict environment decoupling:
+
+| Component | Path | Description |
+| :--- | :--- | :--- |
+| **Primary Bundle** | `${OPENSSL_BASE}/${TLSDIR}/cert.pem` | The physical source file containing the trusted CA roots. |
+| **Legacy Symlink** | `${OPENSSL_BASE}/${TLSDIR}/certs/ca-bundle.crt` | A relative symlink pointing to `../cert.pem` for compatibility with applications expecting a `.crt` extension. |
+
+### 9.3 Technical Rationale
+By default, OpenSSL looks for its configuration and certificates in the directory defined by `--openssldir` (mapped to `${OPENSSL_BASE}/${TLSDIR}` in this script). Without a manual bundle injection:
+- The isolated `openssl` binary would fail to verify peer certificates unless the user manually passed `-CAfile`.
+- Relying on the system-wide `/etc/pki/tls/cert.pem` would break the "Side-by-Side" isolation objective and potentially cause failures in minimal containers or environments with outdated root certificates.
