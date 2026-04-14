@@ -1,10 +1,28 @@
 #!/bin/bash
-
-# -------------------------------------
-#  /var/opt/apps/system/python_env.inc
-#  v1.0.3xg  2025/10/14  XDG
-# -------------------------------------
-# python job executor, with enforcing correct environment
+# -----------------------------------------------------------------------------
+# Python Environment Initializer (python_env.inc)
+# v1.0.4xg  2026/04/14  XdG
+#
+# OBJECTIVE:
+# Provides a reusable library for Bash scripts to initialize and manage isolated
+# Python environments. It dynamically calculates paths for multi-version Python
+# installations (e.g., 3.12, 3.13) and different threading models (GIL vs. Free-threaded).
+#
+# CORE COMPONENTS:
+# - Path Calculation: Dynamically constructs PYTHONHOME, PYTHONPATH, and LD_LIBRARY_PATH.
+# - Environment Validation: Verifies presence of binaries and library directories.
+# - State Management: Provides pyEnvInit and pyEnvReset to toggle environment variables.
+#
+# DATA FLOW:
+# [Caller script] -> source python_env.inc [VERSION] [MODEL]
+#                       |
+#                       +-- Global variables set (PYTHON_ID, PYTHON_MODEL)
+#                       +-- Function call (pyEnvInit)
+#                       +-- Environment exported (PYTHONPATH, PATH, etc.)
+#
+# USAGE:
+#   source python_env.inc "3.13" "mt" --env-load
+# -----------------------------------------------------------------------------
 
 # ----- System Environment -----
 source /opt/scripts/settings.sh

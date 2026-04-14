@@ -1,10 +1,27 @@
 #!/bin/bash
-
-# -----------------------------------------
-#  /var/opt/apps/system/python_jobexec.sh
-#  v1.0.3xg  2025/10/14  XDG
-# -----------------------------------------
-# python job executor, with enforcing correct environment
+# -----------------------------------------------------------------------------
+# Python Job Executor (python_jobexec.sh)
+# v1.0.4xg  2026/04/14  XdG
+#
+# OBJECTIVE:
+# Provides a robust entry point for executing Python scripts within a strictly
+# controlled and isolated environment. It orchestrates environment setup,
+# argument parsing, and final script invocation.
+#
+# CORE COMPONENTS:
+# - Environment Sourcing: Leverages python_env.inc for environment isolation.
+# - Argument Dispatcher: Separates script metadata (version, model, path) from
+#   the target script's own parameters.
+# - Validation: Ensures target scripts and Python runtimes are valid before execution.
+#
+# DATA FLOW:
+# [Caller] -> python_jobexec.sh [METADATA ARGS] [JOB ARGS]
+#               |
+#               +-- Parse version/model/path
+#               +-- Source python_env.inc (Init PATH, PYTHONPATH, etc.)
+#               +-- Invoke $PYTHON $PY_JOB_PATH [JOB ARGS]
+#
+# -----------------------------------------------------------------------------
 
 # ----- System Environment -----
 source /opt/scripts/settings.sh
