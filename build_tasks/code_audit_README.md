@@ -110,7 +110,10 @@ The utility orchestrates a specialized collection of industry-standard tools. Be
 | Tool | Purpose | Detection Scope |
 | :--- | :--- | :--- |
 | **gofmt / gofumpt**| Code Formatting | Enforces standard Go style; `gofumpt` adds stricter, opinionated rules for senior-level consistency. |
-| **golangci-lint** | Meta-Linter Orchestrator | A high-performance runner that aggregates results from dozens of internal Go linters. |
+| **golangci-lint** | Meta-Linter Orchestrator | A high-performance runner that aggregates results from dozens of internal Go linters (see below for details). |
+| **nilaway** | Safety (Panic Detection) | Specially designed by Uber to find potential `nil` pointer dereferences before they cause panics. |
+| **gosec** | Security Audit | Scans for SQLi, hard-coded credentials, unsafe cryptography, and insecure permissions. |
+| **govulncheck** | Vulnerability Scanner | The official Go tool for finding known vulnerabilities in your module's dependency graph. |
 
 #### Bundled Go Linters (via `golangci-lint`)
 | Linter | Focus | Detection Scope |
@@ -124,12 +127,6 @@ The utility orchestrates a specialized collection of industry-standard tools. Be
 | **mnd (Magic Number)**| Constant Enforcement | Detects "magic numbers" (unnamed numeric constants) which reduce code readability. |
 | **copyloopvar** | Safety Analysis | Detects loop variable capture by reference to prevent concurrency issues. |
 | **interfacebloat** | Interface Design | Flags interfaces with an excessive number of methods to enforce SRP. |
-
-| Tool | Purpose | Detection Scope |
-| :--- | :--- | :--- |
-| **nilaway** | Safety (Panic Detection) | Specially designed by Uber to find potential `nil` pointer dereferences before they cause panics. |
-| **gosec** | Security Audit | Scans for SQLi, hard-coded credentials, unsafe cryptography, and insecure permissions. |
-| **govulncheck** | Vulnerability Scanner | The official Go tool for finding known vulnerabilities in your module's dependency graph. |
 
 ### 3. General-Purpose Security Suite
 | Tool | Purpose | Detection Scope |
