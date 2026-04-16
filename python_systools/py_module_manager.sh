@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # -----------------------------------------------------------------------------
 #  python_systools/py_module_manager.sh
-#  v1.0.1  2026/04/15  Antigravity (Orchestrator)
+#  v1.0.1  2026/04/15  XdG
 # -----------------------------------------------------------------------------
 # OBJECTIVE:
 #   A modular, cross-platform utility to manage the lifecycle of Python packages.

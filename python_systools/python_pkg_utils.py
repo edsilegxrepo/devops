@@ -1,7 +1,9 @@
+#!/usr/bin/env python3
+# ----------------------------------------------
+# python_pkg_utils.py
+# v1.0.0xg  2025/12/08  XDG / MIS Center
+# ----------------------------------------------
 """
-python_pkg_utils.py
-v1.0.0xg  2025/12/08  XdG / MIS Center
-----------------------------------------------
 Overview:
 This module provides a centralized set of utility functions for Python package analysis and
 metadata resolution. It serves as a shared backend for various Python system tools, abstracting
@@ -26,21 +28,27 @@ import sys
 from pathlib import Path
 import site
 
+
 # Define a dummy class to gracefully handle the absence of the 'requests' library.
 # This prevents the entire script from failing if 'requests' is not installed,
 # allowing other non-network functionalities to proceed.
 class DummyRequests:  # pylint: disable=too-few-public-methods
     """A dummy class that mimics the `requests` library's interface for PyPI lookups."""
+
     @staticmethod
     def get(url, timeout):  # pylint: disable=unused-argument
         """Simulates a failed GET request, returning a 503 status code."""
+
         class DummyResponse:  # pylint: disable=too-few-public-methods,missing-class-docstring
             status_code = 503  # Service Unavailable
+
             @staticmethod
             def json():
                 """Returns a JSON object indicating the error."""
-                return {'info': {'version': 'Error: requests not installed'}}
+                return {"info": {"version": "Error: requests not installed"}}
+
         return DummyResponse()
+
 
 # Attempt to import the 'requests' library for network operations. If it fails,
 # substitute it with the DummyRequests class to ensure the script remains operational.
@@ -63,6 +71,7 @@ PYPI_JSON_URL = "https://pypi.org/pypi/{package_name}/json"
 # A global flag to enable or disable verbose debugging output for troubleshooting.
 DEBUG_MODE = False
 
+
 def set_debug_mode(enabled: bool):
     """
     Globally sets the debug mode for this module.
@@ -73,9 +82,11 @@ def set_debug_mode(enabled: bool):
     global DEBUG_MODE  # pylint: disable=global-statement
     DEBUG_MODE = enabled
 
+
 # ====================================================================
 # SHARED FUNCTIONS
 # ====================================================================
+
 
 def get_package_location_category(install_path):  # pylint: disable=too-many-return-statements,too-many-branches
     """
@@ -99,14 +110,14 @@ def get_package_location_category(install_path):  # pylint: disable=too-many-ret
     real_install_path = os.path.realpath(install_path)
 
     # 1. Custom: Check MODULEPATH (Priority 1)
-    module_path_env = os.environ.get('MODULEPATH')
+    module_path_env = os.environ.get("MODULEPATH")
     if module_path_env:
         for path in module_path_env.split(os.pathsep):
             if path and real_install_path.startswith(os.path.realpath(path)):
                 return "custom"
 
     # 2. Custom: Check PYTHONPATH (Priority 2)
-    pythonpath = os.environ.get('PYTHONPATH')
+    pythonpath = os.environ.get("PYTHONPATH")
     if pythonpath:
         for path in pythonpath.split(os.pathsep):
             if path and real_install_path.startswith(os.path.realpath(path)):
@@ -115,19 +126,24 @@ def get_package_location_category(install_path):  # pylint: disable=too-many-ret
     # 3. User: Check user's home directory site packages
     try:
         user_site = site.getusersitepackages()
-        user_paths = [user_site] if isinstance(user_site, str) else (user_site if user_site else [])
+        user_paths = (
+            [user_site]
+            if isinstance(user_site, str)
+            else (user_site if user_site else [])
+        )
         for path in user_paths:
             if real_install_path.startswith(os.path.realpath(path)):
                 return "user"
     except (AttributeError, TypeError):
         # Fallback to home dir check if site.getusersitepackages is problematic
-        home_dir = os.path.expanduser('~')
+        home_dir = os.path.expanduser("~")
         if real_install_path.startswith(home_dir):
             return "user"
 
     # 4. System: Check Virtual Environment (Treat as system/standard for this env)
-    if (hasattr(sys, 'real_prefix') or
-            (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix)):
+    if hasattr(sys, "real_prefix") or (
+        hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix
+    ):
         if real_install_path.startswith(os.path.realpath(sys.prefix)):
             return "system"
 
@@ -141,11 +157,12 @@ def get_package_location_category(install_path):  # pylint: disable=too-many-ret
 
     # 6. System: Check sys.path fallback for 'site-packages'
     for path in sys.path:
-        if path and ('site-packages' in path or 'dist-packages' in path):
+        if path and ("site-packages" in path or "dist-packages" in path):
             if real_install_path.startswith(os.path.realpath(path)):
                 return "system"
 
     return "unknown"
+
 
 def get_latest_version_from_pypi(package_name: str) -> str:
     """
@@ -167,7 +184,7 @@ def get_latest_version_from_pypi(package_name: str) -> str:
 
         if response.status_code == 200:
             data = response.json()
-            return data['info']['version']
+            return data["info"]["version"]
         if response.status_code == 404:
             return "Package not found on PyPI"
 
@@ -177,6 +194,7 @@ def get_latest_version_from_pypi(package_name: str) -> str:
         return "Error: Network failure"
     except Exception:  # pylint: disable=broad-exception-caught
         return "Error: Metadata parsing failure"
+
 
 def get_module_type(dist: importlib.metadata.Distribution) -> str:
     """
@@ -191,7 +209,7 @@ def get_module_type(dist: importlib.metadata.Distribution) -> str:
     Returns:
         str: A string indicating the module type, e.g., "purelib" or "platlib".
     """
-    compiled_extensions = ('.so', '.pyd', '.dll', '.dylib')
+    compiled_extensions = (".so", ".pyd", ".dll", ".dylib")
 
     if dist.files is None:
         return "Type Unknown (No File Listing)"
@@ -201,6 +219,7 @@ def get_module_type(dist: importlib.metadata.Distribution) -> str:
             return "platlib (Binary/Compiled C/C++)"
 
     return "purelib (Pure Python code)"
+
 
 def resolve_package_metadata(package_name: str) -> dict:  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     """
@@ -224,8 +243,12 @@ def resolve_package_metadata(package_name: str) -> dict:  # pylint: disable=too-
         print("\n--- DEBUG: Path Resolution Start ---")
 
     if sys.version_info < MIN_PYTHON_VERSION_TUPLE:
-        return {"error": (f"Python {MIN_PYTHON_VERSION_TUPLE[0]}.{MIN_PYTHON_VERSION_TUPLE[1]} "
-                          "or newer required for metadata handling.")}
+        return {
+            "error": (
+                f"Python {MIN_PYTHON_VERSION_TUPLE[0]}.{MIN_PYTHON_VERSION_TUPLE[1]} "
+                "or newer required for metadata handling."
+            )
+        }
 
     # --- 1. Get Distribution Metadata ---
     try:
@@ -237,24 +260,27 @@ def resolve_package_metadata(package_name: str) -> dict:  # pylint: disable=too-
         return {"error": f"Package '{package_name}' not found."}
 
     # --- 2. Determine Top-Level Module (TML) ---
-    top_level_text = dist.read_text('top_level.txt')
+    top_level_text = dist.read_text("top_level.txt")
 
     if top_level_text:
         # Use the first line as the primary TML.
         raw_tml = top_level_text.splitlines()[0].strip()
     else:
-        raw_tml = package_name.lower().replace('-', '_')
+        raw_tml = package_name.lower().replace("-", "_")
 
     # --- 2a. TML Heuristic Refinement ---
-    package_name_normalized = package_name.lower().replace('-', '_')
+    package_name_normalized = package_name.lower().replace("-", "_")
     top_level_module = raw_tml
 
     if not top_level_module:
         top_level_module = package_name_normalized
-    elif top_level_module.startswith('_') and top_level_module != package_name_normalized:
+    elif (
+        top_level_module.startswith("_") and top_level_module != package_name_normalized
+    ):
         top_level_module = package_name_normalized
-    elif (package_name_normalized.startswith(top_level_module) and
-          len(package_name_normalized) > len(top_level_module)):
+    elif package_name_normalized.startswith(top_level_module) and len(
+        package_name_normalized
+    ) > len(top_level_module):
         pass
     else:
         if not top_level_module or not importlib.util.find_spec(top_level_module):
@@ -268,10 +294,13 @@ def resolve_package_metadata(package_name: str) -> dict:  # pylint: disable=too-
             dist_info_folder_name = [
                 str(f).split(os.sep, maxsplit=1)[0]
                 for f in dist.files
-                if str(f).endswith('.dist-info') or str(f).endswith('.egg-info')
+                if str(f).endswith(".dist-info") or str(f).endswith(".egg-info")
             ][0]
-            dist_root = str(Path(os.path.abspath(str(dist.locate_file(
-                Path(dist_info_folder_name))))).parent)
+            dist_root = str(
+                Path(
+                    os.path.abspath(str(dist.locate_file(Path(dist_info_folder_name))))
+                ).parent
+            )
     except Exception:  # pylint: disable=broad-exception-caught
         dist_root = "Could not determine root via files."
 
@@ -309,13 +338,15 @@ def resolve_package_metadata(package_name: str) -> dict:  # pylint: disable=too-
     # --- 4a. Path Resolution Final Fallback ---
     if resolved_path == "Could not determine root via files.":
         try:
-            potential_root_path = str(Path(os.path.abspath(str(dist.locate_file(
-                Path(top_level_module))))).parent)
+            potential_root_path = str(
+                Path(
+                    os.path.abspath(str(dist.locate_file(Path(top_level_module))))
+                ).parent
+            )
             if Path(potential_root_path).is_dir():
                 resolved_path = potential_root_path
         except Exception as e:  # pylint: disable=broad-exception-caught
-            resolved_path = (f"Could not determine root via locate_file: "
-                             f"{str(e)}")
+            resolved_path = f"Could not determine root via locate_file: {str(e)}"
 
     if DEBUG_MODE:
         print(f"DEBUG FINAL: Resolved Path Before Return: {resolved_path}")
@@ -326,18 +357,18 @@ def resolve_package_metadata(package_name: str) -> dict:  # pylint: disable=too-
     module_type = get_module_type(dist)
     location_category = get_package_location_category(resolved_path)
 
-    requires_dist = metadata_dict.get('Requires-Dist')
+    requires_dist = metadata_dict.get("Requires-Dist")
 
     # Process License: Truncate at first newline or 65 chars
-    raw_license = metadata_dict.get('License', metadata_dict.get('Classifier', 'N/A'))
-    if raw_license and raw_license != 'N/A':
-        first_line = str(raw_license).split('\n', maxsplit=1)[0]
+    raw_license = metadata_dict.get("License", metadata_dict.get("Classifier", "N/A"))
+    if raw_license and raw_license != "N/A":
+        first_line = str(raw_license).split("\n", maxsplit=1)[0]
         if len(first_line) > 65:
             license_text = first_line[:65] + "..."
         else:
             license_text = first_line
     else:
-        license_text = 'N/A'
+        license_text = "N/A"
 
     return {
         "package_name": package_name,
@@ -347,13 +378,15 @@ def resolve_package_metadata(package_name: str) -> dict:  # pylint: disable=too-
         "latest_version": latest_version,
         "module_type": module_type,
         "location_category": location_category,
-
         # Verbose/Additional Fields
-        "metadata_summary": metadata_dict.get('Summary', 'N/A'),
-        "required_python_version": metadata_dict.get('Requires-Python', 'N/A'),
+        "metadata_summary": metadata_dict.get("Summary", "N/A"),
+        "required_python_version": metadata_dict.get("Requires-Python", "N/A"),
         "license": license_text,
-        "author": metadata_dict.get('Author', 'N/A'),
-        "homepage": metadata_dict.get('Home-page', 'N/A'),
-        "required_dependencies": (requires_dist if isinstance(requires_dist, list)
-                                  else ([requires_dist] if requires_dist else []))
+        "author": metadata_dict.get("Author", "N/A"),
+        "homepage": metadata_dict.get("Home-page", "N/A"),
+        "required_dependencies": (
+            requires_dist
+            if isinstance(requires_dist, list)
+            else ([requires_dist] if requires_dist else [])
+        ),
     }

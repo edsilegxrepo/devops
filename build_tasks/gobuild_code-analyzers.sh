@@ -1,9 +1,9 @@
 #!/bin/bash
-
 # --------------------------------------------------------------------------------
-#  e:/data/devel/build/code/private/devops/build_tasks/gobuild_code-analyzers.sh
+#  gobuild_code-analyzers.sh
 #  v1.1.3xg  2026/03/31  XDG
 # --------------------------------------------------------------------------------
+
 # Objectives:
 #   - Automated Build Pipeline: Provide a streamlined, reproducible process for building a curated suite of Go static analysis and development tools.
 #   - Unified Tooling: Maintain a consistent set of essential Go tools in a portable, pre-compiled format.

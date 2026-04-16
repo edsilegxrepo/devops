@@ -1,0 +1,49 @@
+--- PHASE 1: SYNTAX, STYLE AND TYPES ---
+[Python]
+--> Running Ruff Linter (Check Only)...
+All checks passed!
+
+--> Running Ruff Formatter (Check Only)...
+9 files already formatted
+
+--> Running Pyright Type Checker...
+e:\data\devel\build\code\private\devops\python_systools\inspect_python.py
+  e:\data\devel\build\code\private\devops\python_systools\inspect_python.py:251:16 - error: Import "Cython" could not be resolved (reportMissingImports)
+  e:\data\devel\build\code\private\devops\python_systools\inspect_python.py:261:16 - warning: Import "cffi" could not be resolved from source (reportMissingModuleSource)
+  e:\data\devel\build\code\private\devops\python_systools\inspect_python.py:286:14 - warning: Import "dateutil.relativedelta" could not be resolved from source (reportMissingModuleSource)
+  e:\data\devel\build\code\private\devops\python_systools\inspect_python.py:489:56 - error: Cannot access attribute "nogil" for class "_flags"
+    Attribute "nogil" is unknown (reportAttributeAccessIssue)
+2 errors, 2 warnings, 0 informations
+FAILED: Pyright Type Checker detected issues or failed to execute.
+
+--- PHASE 2: LOGIC, SAFETY AND COMPLEXITY ---
+--> Running Semgrep Scan...
+./code_audit.sh: line 37: semgrep: command not found
+FAILED: Semgrep Scan detected issues or failed to execute.
+
+--> Running Radon Complexity Analysis...
+./code_audit.sh: line 37: radon: command not found
+FAILED: Radon Complexity Analysis detected issues or failed to execute.
+
+--- PHASE 3: CODE CLEANUP (PYTHON) ---
+--> Running Vulture Dead Code Scan...
+./code_audit.sh: line 37: vulture: command not found
+FAILED: Vulture Dead Code Scan detected issues or failed to execute.
+
+--- PHASE 4: SECRETS DETECTION ---
+--> Running TruffleHog Secrets Scan...
+trufflehog.exe: error: unknown long flag '--threshold', try --help
+FAILED: TruffleHog Secrets Scan detected issues or failed to execute.
+
+--- PHASE 5: SUPPLY CHAIN (DEPENDENCY AND VULNERABILITY SCANNING) ---
+--> Running Grype Vulnerability Scan...
+[0000]  WARN no explicit name and version provided for directory source, deriving artifact ID from the given path (which is not ideal) from=syft
+No vulnerabilities found
+
+--> Running pip-audit...
+./code_audit.sh: line 37: pip-audit: command not found
+FAILED: pip-audit detected issues or failed to execute.
+
+---------------------------------------------------------
+AUDIT COMPLETE: One or more tools detected potential issues.
+---------------------------------------------------------

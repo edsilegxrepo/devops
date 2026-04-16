@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # ----------------------------------------------
 # check_crypto_symbols.py
-# v1.0.1xg  2025/12/09  XdG / MIS Center
+# v1.0.1xg  2025/12/09  XDG / MIS Center
 # ----------------------------------------------
 # Requirements: Python 3.10 or newer.
 
@@ -48,19 +48,19 @@ def get_library_version_string(libcrypto: ctypes.CDLL) -> str:
     """
     try:
         # OpenSSL 1.1.0+ uses OpenSSL_version
-        if hasattr(libcrypto, 'OpenSSL_version'):
+        if hasattr(libcrypto, "OpenSSL_version"):
             libcrypto.OpenSSL_version.restype = ctypes.c_char_p
             libcrypto.OpenSSL_version.argtypes = [ctypes.c_int]
             # OPENSSL_VERSION = 0
             ver = libcrypto.OpenSSL_version(0)
-            return ver.decode('utf-8')
+            return ver.decode("utf-8")
 
         # Older versions use SSLeay_version
-        if hasattr(libcrypto, 'SSLeay_version'):
+        if hasattr(libcrypto, "SSLeay_version"):
             libcrypto.SSLeay_version.restype = ctypes.c_char_p
             libcrypto.SSLeay_version.argtypes = [ctypes.c_int]
             ver = libcrypto.SSLeay_version(0)
-            return ver.decode('utf-8')
+            return ver.decode("utf-8")
 
         return "Unknown (Version symbols not found)"
     except Exception as e:  # pylint: disable=broad-exception-caught
@@ -78,7 +78,7 @@ def inspect_library(libcrypto_path: str) -> Dict[str, Any]:
         "loaded": False,
         "version": None,
         "symbols": {},
-        "error": None
+        "error": None,
     }
 
     # Security: Validate file existence before loading
@@ -96,7 +96,9 @@ def inspect_library(libcrypto_path: str) -> Dict[str, Any]:
 
         # Check for symbols
         result["symbols"][BLAKE2B_SYMBOL_NAME] = hasattr(libcrypto, BLAKE2B_SYMBOL_NAME)
-        result["symbols"][BLAKE2B512_SYMBOL_NAME] = hasattr(libcrypto, BLAKE2B512_SYMBOL_NAME)
+        result["symbols"][BLAKE2B512_SYMBOL_NAME] = hasattr(
+            libcrypto, BLAKE2B512_SYMBOL_NAME
+        )
 
         # Determine success: we primarily look for EVP_blake2b, but finding
         # either is 'some' success.
@@ -121,11 +123,7 @@ def check_hashlib_blake2b() -> Dict[str, Any]:
     Verify if Python's built-in hashlib module can successfully access
     the BLAKE2b implementation.
     """
-    result = {
-        "success": False,
-        "functional": False,
-        "error": None
-    }
+    result = {"success": False, "functional": False, "error": None}
 
     try:
         # Attempt to create a blake2b hash object
@@ -148,33 +146,33 @@ def print_text_report(results: Dict[str, Any]) -> None:
     print(f"Python Linked OpenSSL: {results['python_linked_openssl']}")
 
     # Library Check
-    lib_res = results['library_check']
+    lib_res = results["library_check"]
     print("\n--- Checking for OpenSSL symbols ---")
     print(f"Attempting to load library: {lib_res['path']}")
 
-    if lib_res['error']:
+    if lib_res["error"]:
         print(f"[FAIL] {lib_res['error']}")
-    elif lib_res['loaded']:
+    elif lib_res["loaded"]:
         print("Library loaded successfully.")
         print(f"Detected Library Version: {lib_res['version']}")
 
-        for sym, found in lib_res['symbols'].items():
+        for sym, found in lib_res["symbols"].items():
             status = "[PASS]" if found else "[FAIL]"
             msg = "found in" if found else "not found in"
             print(f"{status} Symbol '{sym}' {msg} the library.")
 
     # Hashlib Check
-    hash_res = results['hashlib_check']
+    hash_res = results["hashlib_check"]
     print("\n--- Checking hashlib behavior ---")
     print("hashlib module loaded successfully.")
 
-    if hash_res['functional']:
+    if hash_res["functional"]:
         print("[PASS] hashlib.blake2b() call succeeded.")
     else:
         print(f"[FAIL] {hash_res['error']}")
 
     # Overall Status
-    if results['overall_success']:
+    if results["overall_success"]:
         print("\nAll checks PASSED.")
     else:
         print("\nSome checks FAILED.")
@@ -190,13 +188,12 @@ def main() -> None:
         description="Check for specific OpenSSL symbols in a custom libcrypto library"
     )
     parser.add_argument(
-        "libcrypto_path",
-        help="Full path to the custom libcrypto library"
+        "libcrypto_path", help="Full path to the custom libcrypto library"
     )
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Output results in JSON format instead of plain text"
+        help="Output results in JSON format instead of plain text",
     )
     args = parser.parse_args()
 
@@ -205,7 +202,7 @@ def main() -> None:
         "python_linked_openssl": ssl.OPENSSL_VERSION,
         "library_check": {},
         "hashlib_check": {},
-        "overall_success": False
+        "overall_success": False,
     }
 
     # 1. Inspect Library
@@ -216,7 +213,9 @@ def main() -> None:
 
     # Determine Overall Success
     # Both library check and hashlib check must be successful
-    if results["library_check"].get("success") and results["hashlib_check"].get("success"):
+    if results["library_check"].get("success") and results["hashlib_check"].get(
+        "success"
+    ):
         results["overall_success"] = True
 
     # Output

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
+# ----------------------------------------------
+# python_pkg_parser.py
+# v1.0.2xg  2025/12/08  XDG / MIS Center
+# ----------------------------------------------
 """
-python_pkg_parser.py
-v1.0.2xg  2025/12/08  XdG / MIS Center
-----------------------------------------------
 Requirements: Python 3.10 or newer.
 
 OVERVIEW:
@@ -25,6 +26,7 @@ import importlib.util
 from importlib.metadata import version, PackageNotFoundError
 # For Python 3.8+ onwards, but we require 3.10+
 
+
 # --- Function to get standard library modules ---
 def get_stdlib_modules():
     """
@@ -33,13 +35,16 @@ def get_stdlib_modules():
     sys.stdlib_module_names.
     """
     # This check acts as a final safeguard, though main() performs the primary version check.
-    if not hasattr(sys, 'stdlib_module_names'):
+    if not hasattr(sys, "stdlib_module_names"):
         # This error should technically not be reached if the sys.version_info check in main()
         # passes.
-        raise RuntimeError("sys.stdlib_module_names is not available. "
-                           "This script's 'get_stdlib_modules' function requires Python 3.10 "
-                           "or newer.")
+        raise RuntimeError(
+            "sys.stdlib_module_names is not available. "
+            "This script's 'get_stdlib_modules' function requires Python 3.10 "
+            "or newer."
+        )
     return set(sys.stdlib_module_names)
+
 
 # --- Function to get module version ---
 def get_module_version(module_name):
@@ -53,7 +58,7 @@ def get_module_version(module_name):
     try:
         return version(module_name)
     except PackageNotFoundError:
-        pass # Not found by distribution name, proceed to next attempt
+        pass  # Not found by distribution name, proceed to next attempt
 
     # Attempt 2: Import the module and check for __version__ attribute
     # NOTE: Importing a module can have side effects. Use with caution.
@@ -65,27 +70,33 @@ def get_module_version(module_name):
             # Only import if not already loaded
             module = importlib.import_module(module_name)
 
-        if hasattr(module, '__version__'):
+        if hasattr(module, "__version__"):
             return module.__version__
     except ImportError:
         # Module cannot be imported at all in the current environment
         pass
     except Exception as e:  # pylint: disable=broad-exception-caught
         # Catch any other unexpected errors during import or attribute access
-        print(f"Warning: Could not get version for '{module_name}' via __version__ due to: {e}",
-              file=sys.stderr)
+        print(
+            f"Warning: Could not get version for '{module_name}' via __version__ due to: {e}",
+            file=sys.stderr,
+        )
 
-    return "N/A" # Version Not Available
+    return "N/A"  # Version Not Available
+
 
 # --- Function to find Python files recursively ---
 def find_python_files(root_dir):
     """Recursively finds all Python files in a directory."""
     python_files = []
-    for dirpath, _, filenames in os.walk(root_dir): # os.walk ensures recursive traversal
+    for dirpath, _, filenames in os.walk(
+        root_dir
+    ):  # os.walk ensures recursive traversal
         for f in filenames:
-            if f.endswith('.py'):
+            if f.endswith(".py"):
                 python_files.append(os.path.join(dirpath, f))
     return python_files
+
 
 # --- Function to extract imports from a single file ---
 def extract_imports(file_path, stdlib_modules):  # pylint: disable=too-many-nested-blocks
@@ -96,7 +107,7 @@ def extract_imports(file_path, stdlib_modules):  # pylint: disable=too-many-nest
     # pylint: disable=too-many-nested-blocks
     imports = set()
     # Use 'errors=ignore' for robustness against encoding issues in some files
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
         try:
             # Parse the file into an Abstract Syntax Tree (AST)
             # This is a safe way to analyze code without executing it.
@@ -107,7 +118,7 @@ def extract_imports(file_path, stdlib_modules):  # pylint: disable=too-many-nest
                 if isinstance(node, ast.Import):
                     for alias in node.names:
                         # Get 'module_name' from 'module_name.submodule'
-                        top_level_module = alias.name.split('.')[0]
+                        top_level_module = alias.name.split(".")[0]
                         if top_level_module not in stdlib_modules:
                             imports.add(top_level_module)
                 # Handle 'from module_name import something' or
@@ -119,7 +130,7 @@ def extract_imports(file_path, stdlib_modules):  # pylint: disable=too-many-nest
                         # Ensure module name exists (e.g., 'from . import x' might have
                         # node.module is None)
                         if node.module:
-                            top_level_module = node.module.split('.')[0]
+                            top_level_module = node.module.split(".")[0]
                             if top_level_module not in stdlib_modules:
                                 imports.add(top_level_module)
                     # Relative imports (node.level > 0) are typically internal to the project
@@ -129,13 +140,18 @@ def extract_imports(file_path, stdlib_modules):  # pylint: disable=too-many-nest
 
         except SyntaxError as e:
             # Log a warning if a file cannot be parsed due to a syntax error
-            print(f"Warning: Could not parse '{file_path}' due to SyntaxError: {e}",
-                  file=sys.stderr)
+            print(
+                f"Warning: Could not parse '{file_path}' due to SyntaxError: {e}",
+                file=sys.stderr,
+            )
         except Exception as e:  # pylint: disable=broad-exception-caught
             # Catch any other unexpected errors during parsing
-            print(f"Warning: An unexpected error occurred while parsing '{file_path}': {e}",
-                  file=sys.stderr)
+            print(
+                f"Warning: An unexpected error occurred while parsing '{file_path}': {e}",
+                file=sys.stderr,
+            )
     return imports
+
 
 # --- Main execution function ---
 def main():  # pylint: disable=too-many-branches
@@ -146,9 +162,11 @@ def main():  # pylint: disable=too-many-branches
     # --- Strict Runtime Version Check ---
     # Ensure the script is run with Python 3.10 or newer.
     if sys.version_info < (3, 10):
-        print(f"Error: This script requires Python 3.10 or newer to run correctly. "
-              f"You are currently running Python {sys.version.split(' ', maxsplit=1)[0]}.",
-              file=sys.stderr)
+        print(
+            f"Error: This script requires Python 3.10 or newer to run correctly. "
+            f"You are currently running Python {sys.version.split(' ', maxsplit=1)[0]}.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     # Initialize the standard library modules set AFTER the version check
@@ -163,12 +181,14 @@ def main():  # pylint: disable=too-many-branches
     root_directory = sys.argv[1]
     # Validate the provided directory
     if not os.path.isdir(root_directory):
-        print(f"Error: '{root_directory}' is not a valid directory or does not exist.",
-              file=sys.stderr)
+        print(
+            f"Error: '{root_directory}' is not a valid directory or does not exist.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     # Data structures to hold the results
-    all_external_modules = set() # A set of all unique external modules found
+    all_external_modules = set()  # A set of all unique external modules found
     # A dictionary mapping files to their external modules
     file_external_dependencies = defaultdict(set)
 
@@ -180,13 +200,17 @@ def main():  # pylint: disable=too-many-branches
     for py_file in python_files:
         # Extract external imports from the current file
         modules_in_file = extract_imports(py_file, standard_lib_modules)
-        all_external_modules.update(modules_in_file) # Add to the master set of all external modules
+        all_external_modules.update(
+            modules_in_file
+        )  # Add to the master set of all external modules
         if modules_in_file:
             # Store file-specific external dependencies
             file_external_dependencies[py_file] = modules_in_file
 
     # --- Output Summary of All Unique External Modules with Versions ---
-    print("\n--- Summary of All Unique Top-Level External/Third-Party Modules (with versions) ---")
+    print(
+        "\n--- Summary of All Unique Top-Level External/Third-Party Modules (with versions) ---"
+    )
     if not all_external_modules:
         print("No external/third-party modules found in the scanned directory.")
     else:
@@ -209,6 +233,7 @@ def main():  # pylint: disable=too-many-branches
                 for module_name in sorted(list(file_external_dependencies[py_file])):
                     version_str = get_module_version(module_name)
                     print(f"  - {module_name}=={version_str}")
+
 
 if __name__ == "__main__":
     main()

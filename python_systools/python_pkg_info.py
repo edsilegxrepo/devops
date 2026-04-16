@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # ----------------------------------------------
 # python_pkg_info.py
-# v1.0.0xg  2025/12/08  XdG / MIS Center
+# v1.0.0xg  2025/12/08  XDG / MIS Center
 # ----------------------------------------------
-#
 """
 Objective:
     This script provides a reliable and detailed inspection of an installed Python package.
@@ -32,7 +31,10 @@ from python_pkg_utils import resolve_package_metadata, set_debug_mode
 
 # --- Command-Line Entry Point (Handles Display) ---
 
-def display_results(metadata: dict, json_output: bool, quiet_mode: bool, verbose_mode: bool):
+
+def display_results(
+    metadata: dict, json_output: bool, quiet_mode: bool, verbose_mode: bool
+):
     """
     Prints the structured metadata dictionary either as formatted text or JSON.
 
@@ -47,7 +49,7 @@ def display_results(metadata: dict, json_output: bool, quiet_mode: bool, verbose
         verbose_mode: If True, include extra details in text output.
     """
     # If the metadata dictionary contains an error, print it to stderr and exit.
-    if 'error' in metadata:
+    if "error" in metadata:
         sys.stderr.write(f"ERROR: {metadata['error']}\n")
         return
 
@@ -55,8 +57,12 @@ def display_results(metadata: dict, json_output: bool, quiet_mode: bool, verbose
     if json_output:
         if not verbose_mode:
             standard_keys = [
-                "package_name", "import_name", "exact_path",
-                "current_version", "latest_version", "module_type"
+                "package_name",
+                "import_name",
+                "exact_path",
+                "current_version",
+                "latest_version",
+                "module_type",
             ]
             output_data = {k: metadata[k] for k in standard_keys if k in metadata}
         else:
@@ -108,38 +114,38 @@ def main():
 
     # Set up the command-line argument parser.
     parser = argparse.ArgumentParser(
-        description=("Locate the exact installation folder and retrieve metadata "
-                     "for a Python package.")
+        description=(
+            "Locate the exact installation folder and retrieve metadata "
+            "for a Python package."
+        )
     )
 
     # Define all the command-line arguments the script accepts.
     parser.add_argument(
-        '--package',
+        "--package",
         type=str,
         required=True,
-        help="The name of the package as listed by 'pip list'."
+        help="The name of the package as listed by 'pip list'.",
     )
 
     # Optional arguments for output control
     parser.add_argument(
-        '--json',
-        action='store_true',
-        help='Output the results in JSON format.'
+        "--json", action="store_true", help="Output the results in JSON format."
     )
     parser.add_argument(
-        '--quiet',
-        action='store_true',
-        help='Suppress introductory messages and separator lines in text output.'
+        "--quiet",
+        action="store_true",
+        help="Suppress introductory messages and separator lines in text output.",
     )
     parser.add_argument(
-        '--verbose',
-        action='store_true',
-        help='Display detailed dependency, licensing, and author information.'
+        "--verbose",
+        action="store_true",
+        help="Display detailed dependency, licensing, and author information.",
     )
     parser.add_argument(
-        '--debug',
-        action='store_true',
-        help='Display detailed path resolution debugging information.'
+        "--debug",
+        action="store_true",
+        help="Display detailed path resolution debugging information.",
     )
 
     if len(sys.argv) == 1:
@@ -156,6 +162,7 @@ def main():
 
     metadata = resolve_package_metadata(args.package)
     display_results(metadata, args.json, args.quiet, args.verbose)
+
 
 if __name__ == "__main__":
     main()
