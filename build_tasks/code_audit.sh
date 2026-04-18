@@ -97,7 +97,7 @@ setup_environment() {
     # 1. COMMON CONFIGURATION
     CONF_SEARCH_DEPTH=3                 # Max depth for heuristic language detection.
     CONF_GENERAL_TARGET="."             # Target pattern for workspace-wide tools.
-    CURL_OPTS="-sSfL"                   # Silent, fail-on-error, follow-redirects logic.
+    CURL_OPTS=(-sSfL)                   # Silent, fail-on-error, follow-redirects logic.
 
     # 2. COMMON SECURITY & SAFETY TOOLS
     CONF_SEMGREP_CONFIG="auto"          # Rule set selection for Semgrep.
@@ -123,7 +123,7 @@ setup_environment() {
 
     # 4. LANGUAGE-SPECIFIC: GOLANG
     CONF_GOLANG_TARGET="."              # Target pattern for Go tools (normalized for Windows portability).
-    GO_OPTS='-ldflags="-s -w" -trimpath -buildmode=pie' # Hardened build flags for Go installations.
+    GO_OPTS=(-ldflags="-s -w" -trimpath -buildmode=pie) # Hardened build flags for Go installations.
     CONF_GOFUMPT_FLAGS="-extra"         # Extensions for strict Go formatting.
     CONF_GOLANGCI_FLAGS="--no-config"    # Forced clean state for the meta-linter.
     CONF_NILAWAY_FLAGS="./..."           # Target pattern for NilAway panic detection.
@@ -585,10 +585,14 @@ run_phase_1_quality() {
         echo "[Bash]"
         # ShellCheck: Industry-standard linter for catching common shell bugs and anti-patterns.
         # We use find to ensure recursive discovery within the configured depth.
-        run_audit_tool "ShellCheck (Lint)" find "$CONF_BASH_TARGET" -maxdepth "$CONF_SEARCH_DEPTH" -name "*.sh" -exec shellcheck $CONF_SHELLCHECK_FLAGS {} +
+        run_audit_tool "ShellCheck (Lint)" find "$CONF_BASH_TARGET" -maxdepth "$CONF_SEARCH_DEPTH" -name "*.sh" -exec shellcheck "$CONF_SHELLCHECK_FLAGS" {} +
         
         # shfmt: Enforces a consistent coding style across Bash scripts (check-only default).
-        run_audit_tool "shfmt (Check Only)" find "$CONF_BASH_TARGET" -maxdepth "$CONF_SEARCH_DEPTH" -name "*.sh" -exec shfmt $CONF_SHFMT_FLAGS {} +
+        if [ "$PROCESS_FIX" = true ]; then
+            run_audit_tool "shfmt (Fix Mode)" find "$CONF_BASH_TARGET" -maxdepth "$CONF_SEARCH_DEPTH" -name "*.sh" -exec shfmt "$CONF_SHFMT_FLAGS" -w {} +
+        else
+            run_audit_tool "shfmt (Check Only)" find "$CONF_BASH_TARGET" -maxdepth "$CONF_SEARCH_DEPTH" -name "*.sh" -exec shfmt "$CONF_SHFMT_FLAGS" -d {} +
+        fi
     fi
 }
 
@@ -813,8 +817,7 @@ is_local_tool() {
 bootstrap_uv() {
     if ! command -v uv >/dev/null 2>&1; then
         echo "--> [Bootstrap] Installing 'uv' into user context..."
-        # shellcheck disable=SC2086
-        curl $CURL_OPTS https://astral.sh/uv/install.sh | sh
+        curl "${CURL_OPTS[@]}" https://astral.sh/uv/install.sh | sh
         # Ensure uv is in the current execution path immediately after install
         export PATH="${HOME}/.local/bin:${PATH}"
     fi
@@ -844,8 +847,7 @@ install_python_tool() {
 install_golang_tool() {
     local url="$1"
     echo "--> [Install] Golang tool: $url"
-    # shellcheck disable=SC2086
-    go install $GO_OPTS "${url}@latest"
+    go install "${GO_OPTS[@]}" "${url}@latest"
 }
 
 install_nodejs_tool() {
@@ -861,8 +863,7 @@ install_script_tool() {
     local label="$1"
     local url="$2"
     echo "--> [Install/Update] $label via official script..."
-    # shellcheck disable=SC2086
-    curl $CURL_OPTS "$url" | sh -s -- -b "$CONF_USER_BIN"
+    curl "${CURL_OPTS[@]}" "$url" | sh -s -- -b "$CONF_USER_BIN"
 }
 
 # Helper: Validates that an installation or update request has a valid scope.
