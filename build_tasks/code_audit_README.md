@@ -79,12 +79,12 @@ The utility relies on a suite of specialized binaries. Their presence can be ver
 | Ecosystem | Tool(s) Required | Use Case |
 | :--- | :--- | :--- |
 | **Python** | `ruff`, `pyright`, `radon`, `vulture`, `pip-audit`, `bandit` | Syntax, Types, Complexity, Dead Code, Vulns, Security |
-| **Golang** | `go`, `gofumpt`, `golangci-lint`, `govulncheck`, `gosec`, `nilaway` | Formatting, Safety, Lints, Security, Vulns |
+| **Golang** | `go`, `gofumpt`, `golangci-lint`, `govulncheck`, `gosec`, `nilaway`, `nilness`, `go fix` | Formatting, Safety, Lints, Security, Vulns, Modernization |
 | **Node.js** | `oxlint`, `oxfmt`, `biome`, `npm`, `node` | Linting, Formatting, Registry Security |
 | **Bash**    | `shellcheck`, `shfmt` | Linting, Formatting, Common Bug Detection |
 | **Security** | `semgrep`, `trufflehog`, `grype`, `ast-grep` | Static analysis, Secrets, Supply Chain, Structural Search |
 | **Deep Scan**| `syft`, `trivy` | SBOM Generation, Configuration Scanning, Holistic SCA |
-| **Installer** | `uv`, `npm`, `go` | Bootstrap tools into user-context without sudo. |
+| **Installer** | `uv`, `npm`, `go`, `curl / sh` | Bootstrap tools into user-context without sudo. |
 
 ## Command Line Arguments
 
@@ -138,6 +138,7 @@ The utility orchestrates a specialized collection of industry-standard tools. Be
 | **gosec** | Security Scanner | Core security analyzer that identifies insecure Go coding patterns (e.g., weak crypto, SQLi). | Core |
 | **govulncheck** | Vulnerability Scan | Core dependency auditor that cross-references the official Go vulnerability database. | Core |
 | **nilaway** | Safety (Panic Detection) | Specially designed by Uber to find potential `nil` pointer dereferences before they cause panics. | Inspection |
+| **nilness** | Logic Analysis | Precise analysis for detecting potential nil comparisons and pointer misuse. | Extended |
 | **go fix** | Modernization | Modernizes legacy Go code patterns to align with current language standards. | Extended |
 
 #### Bundled Go Linters (via `golangci-lint`)
@@ -152,9 +153,9 @@ The utility orchestrates a specialized collection of industry-standard tools. Be
 | **mnd (Magic Number)**| Constant Enforcement | Detects "magic numbers" (unnamed numeric constants) which reduce code readability. | Extended |
 | **copyloopvar** | Safety Analysis | Detects loop variable capture by reference to prevent concurrency issues. | Extended |
 | **interfacebloat** | Interface Design | Flags interfaces with an excessive number of methods to enforce SRP. | Extended |
-| **bodyclose** | Resource Safety | [Extended] Checks whether HTTP response bodies are closed to prevent resource leaks. | Extended |
-| **nilerr** | Safety Analysis | [Extended] Finds code that returns nil instead of an error variable in a 'if err != nil' block. | Extended |
-| **nilnil** | Logic Analysis | [Extended] Detects simultaneous return of both nil error and nil value for functions returning (T, error). | Extended |
+| **bodyclose** | Resource Safety | Checks whether HTTP response bodies are closed to prevent resource leaks. | Extended |
+| **nilerr** | Safety Analysis | Finds code that returns nil instead of an error variable in a 'if err != nil' block. | Extended |
+| **nilnil** | Logic Analysis | Detects simultaneous return of both nil error and nil value for functions returning (T, error). | Extended |
 
 ### 3. Node.js-Specific Suite
 | Tool | Purpose | Detection Scope | Audit Tier |
@@ -344,16 +345,19 @@ RESULT: PASS
 
 This section provides a detailed recap of the logic, conditions, and operational flows governing automated tool procurement within the pipeline.
 
+> [!NOTE]  
+> **Direct Binary Procurement**: For complex, heavyweight binaries (e.g., TruffleHog, Trivy, Grype, Syft), the pipeline utilizes official `curl / sh` installation scripts to procure pre-compiled binaries directly from their respective repositories. This strategy avoids the high resource overhead and performance impact of on-the-fly recompilation, ensuring rapid audit initialization.
+
 ### 1. The Installation Engine (`--install` / `--install-only`)
 The primary purpose of the installation engine is to provision a functional audit environment from scratch without manual intervention.
 
 *   **Target Population**: **Undetected tools only**.
 *   **Trigger Condition**: The system executes a `! command -v <tool>` check. If the binary is found anywhere in the active `PATH` (system or user), the installation is skipped to maintain environmental stability.
 *   **Operational Flow**:
-    1.  Resolve requested scope (e.g., `--python`, `--auto`).
-    2.  Check for binary presence.
-    3.  If missing, bootstrap appropriate manager (`uv`, `npm`, `go`).
-    4.  Install binary into user-context path (`~/.local/bin`, `~/.npm-global`).
+    1. Resolve requested scope (e.g., `--python`, `--auto`).
+    2. Check for binary presence.
+    3. If missing, bootstrap appropriate manager (`uv`, `npm`, `go`) or utilize official `curl / sh` scripts for binary archives.
+    4. Install binary into user-context path (`~/.local/bin`, `~/.npm-global`).
 *   **Behavioral Difference**:
     - **`--install`**: Authenticates/installs missing tools and **continues** to execute the audit phases.
     - **`--install-only`**: Performs the staging operation and **terminates** immediately with status 0.
@@ -382,6 +386,7 @@ The update engine is designed for maintenance, allowing users to refresh their l
         - **Python**: `uv tool install --upgrade`
         - **Node.js**: `npm install -g package@latest`
         - **Go**: `go install package@latest`
+        - **Binary Scripts**: Re-execution of official `curl / sh` installers for latest archives.
 *   **Behavioral Difference**:
     - **`--update`**: Refreshes local tools and **continues** to execute the audit phases.
     - **`--update-only`**: Performs the maintenance refresh and **terminates** immediately.
