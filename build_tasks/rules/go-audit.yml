@@ -1,0 +1,35 @@
+# ast-grep Golang Audit Ruleset (Phase 5)
+# Optimized for high-performance security and structural audits
+# Use: ast-grep scan --config go-audit.yml
+
+rules:
+  - id: go-swallowed-error
+    language: go
+    rule:
+      pattern: "if err != nil { return nil }"
+    message: "HIGH: Error is checked but returned as nil. The caller will think it succeeded."
+    severity: error
+
+  - id: go-empty-error-block
+    language: go
+    rule:
+      pattern: "if err != nil { }"
+    message: "CRITICAL: Error is ignored with an empty block."
+    severity: error
+
+  - id: go-missing-error-wrap
+    language: go
+    rule:
+      all:
+        - pattern: fmt.Errorf($STR, err)
+        - not:
+            pattern: fmt.Errorf($STR, %w, $$$)
+    message: "MEDIUM: Error is not wrapped with %w. Higher-level callers cannot unwrap the root cause."
+    severity: warning
+
+  - id: go-loop-variable-closure
+    language: go
+    rule:
+      pattern: "for $V := range $LIST { go func() { $$$ $V $$$ }() }"
+    message: "HIGH: Loop variable $V captured by goroutine closure. Use an argument or local shadow."
+    severity: warning

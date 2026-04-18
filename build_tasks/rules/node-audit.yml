@@ -1,0 +1,36 @@
+# ast-grep NodeJS Audit Ruleset (Phase 5)
+# Optimized for high-performance security and structural audits
+# Use: ast-grep scan --config node-audit.yml
+
+rules:
+  - id: node-command-injection
+    language: javascript
+    rule:
+      any:
+        - pattern: "child_process.exec($CMD, $$$)"
+        - pattern: "child_process.execSync($CMD, $$$)"
+    message: "CRITICAL: exec allows shell injection. Use execFile or spawn instead."
+    severity: error
+
+  - id: node-eval-usage
+    language: javascript
+    rule:
+      pattern: "eval($$$)"
+    message: "CRITICAL: eval() is extremely dangerous and allows arbitrary JS execution."
+    severity: error
+
+  - id: node-sync-io
+    language: javascript
+    rule:
+      any:
+        - pattern: "fs.readFileSync($$$)"
+        - pattern: "fs.writeFileSync($$$)"
+    message: "MEDIUM: Synchronous I/O blocks the event loop. Use fs.promises or async/await."
+    severity: warning
+
+  - id: node-proto-pollution
+    language: javascript
+    rule:
+      pattern: "$OBJ.__proto__ = $$$"
+    message: "HIGH: Direct access to __proto__ can lead to Prototype Pollution vulnerabilities."
+    severity: error

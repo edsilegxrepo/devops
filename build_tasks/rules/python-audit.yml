@@ -1,0 +1,48 @@
+# ast-grep Python Audit Ruleset (Phase 5)
+# Optimized for high-performance security and structural audits
+# Use: ast-grep scan --config python-audit.yml
+
+rules:
+  - id: python-shell-injection
+    language: python
+    rule:
+      pattern: subprocess.$FUNC($$$, shell=True, $$$)
+    message: "CRITICAL: shell=True allows OS command injection. Use a list of arguments instead."
+    severity: error
+
+  - id: python-dynamic-exec
+    language: python
+    rule:
+      any:
+        - pattern: eval($$$)
+        - pattern: exec($$$)
+    message: "CRITICAL: eval/exec allows arbitrary code execution."
+    severity: error
+
+  - id: python-swallowed-exception
+    language: python
+    rule:
+      any:
+        - pattern: "try: $$$ except: $$$"
+        - pattern: "try: $$$ except Exception: pass"
+    message: "HIGH: Bare except or 'pass' detected. This hides bugs."
+    severity: warning
+
+  - id: python-mutable-default
+    language: python
+    rule:
+      any:
+        - pattern: "def $F($$$, $A = [], $$$): $$$"
+        - pattern: "def $F($$$, $A = {}, $$$): $$$"
+    message: "MEDIUM: Mutable default argument creates shared state across calls."
+    severity: warning
+
+  - id: python-windows-encoding
+    language: python
+    rule:
+      all:
+        - pattern: open($FILE, $MODE)
+        - not:
+            pattern: open($FILE, $MODE, encoding=$ENC, $$$)
+    message: "LOW: Missing encoding='utf-8'. On Windows, this causes 'charmap' errors."
+    severity: hint

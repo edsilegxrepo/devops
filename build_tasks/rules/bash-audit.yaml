@@ -1,0 +1,77 @@
+# ast-grep Bash Audit Ruleset (Phase 5)
+# Optimized for high-performance security and structural audits
+# Use: ast-grep scan --config bash-audit.yml
+
+rules:
+  # --- CRITICAL SECURITY & INJECTION ---
+  - id: bash-curl-to-shell
+    language: bash
+    rule:
+      any:
+        - pattern: curl $$$ | bash
+        - pattern: wget $$$ | bash
+        - pattern: curl $$$ | sh
+        - pattern: wget $$$ | sh
+    message: "CRITICAL: Piping network data directly to a shell is a major supply chain risk. Download, verify, and then execute."
+    severity: error
+
+  - id: bash-unsafe-eval
+    language: bash
+    rule:
+      pattern: eval $$$
+    message: "CRITICAL: eval allows arbitrary code execution. Use arrays, functions, or indirect expansion instead."
+    severity: error
+
+  - id: bash-command-injection-variable
+    language: bash
+    rule:
+      pattern: "$COMMAND `$VARIABLE`"
+    message: "HIGH: Backtick command substitution with an unvalidated variable can lead to injection."
+    severity: error
+
+  # --- EXECUTION SAFETY ---
+  - id: bash-unquoted-path
+    language: bash
+    rule:
+      pattern: cd $DIR
+    message: "MEDIUM: Unquoted variable in 'cd'. This will fail or behave unpredictably if the path contains spaces."
+    severity: warning
+
+  - id: bash-missing-set-pipefail
+    language: bash
+    rule:
+      all:
+        - pattern: "set -e"
+        - not:
+            pattern: "set -eo pipefail"
+    message: "MEDIUM: 'set -e' is present but 'pipefail' is missing. Pipeline failures will be ignored, leading to silent errors."
+    severity: warning
+
+  - id: bash-dangerous-rm
+    language: bash
+    rule:
+      pattern: rm -rf /$VAR
+    message: "CRITICAL: Dangerous recursive delete from root. If $VAR is empty, this could wipe the entire drive."
+    severity: error
+
+  # --- LOGIC & PERFORMANCE ---
+  - id: bash-useless-cat
+    language: bash
+    rule:
+      pattern: cat $FILE | grep $PATTERN
+    message: "LOW: Useless use of cat. Use 'grep $PATTERN $FILE' for better performance and resource usage."
+    severity: hint
+
+  - id: bash-unhandled-command-failure
+    language: bash
+    rule:
+      pattern: "$CMD || echo $MSG"
+    message: "LOW: Logging a failure with 'echo' without exiting or handling the error properly."
+    severity: hint
+
+  - id: bash-hardcoded-temp-path
+    language: bash
+    rule:
+      pattern: "/tmp/$FILE"
+    message: "MEDIUM: Hardcoded /tmp path is susceptible to race conditions and symlink attacks. Use mktemp instead."
+    severity: warning
