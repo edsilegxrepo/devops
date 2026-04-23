@@ -1,5 +1,8 @@
 #!/bin/bash
-
+# -----------------------------------------------------------------------------
+# Unit test suite for root_audit.sh (root_audit_test.sh)
+# v1.0.0xg  2026/04/23  XDG
+#
 # ==============================================================================
 # SCRIPT: root_audit_test.sh
 # OBJECTIVE: Comprehensive Unit Testing for the root_audit.sh utility.

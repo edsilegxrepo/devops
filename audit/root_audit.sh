@@ -1,5 +1,8 @@
 #!/bin/bash
-
+# -----------------------------------------------------------------------------
+# Audit and Remediate account security (root_audit.sh)
+# v1.0.0xg  2026/04/23  XDG
+#
 # ==============================================================================
 # SCRIPT: root_audit.sh
 # OBJECTIVE: Audit and Remediate root account security for RHEL 9+ and Ubuntu 24.04+.
