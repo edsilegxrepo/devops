@@ -1,7 +1,7 @@
 # Go Build Pipeline: Code Analyzers
 
 ## Application Overview and Objectives
-The **Go Build Pipeline for Code Analyzers** is an automated shell-based build system designed to compile, cross-compile, and package a curated suite of 20 essential Go development and static analysis tools.
+The **Go Build Pipeline for Code Analyzers** is an automated shell-based build system designed to compile, cross-compile, and package a curated suite of 21 essential Go development and static analysis tools.
 
 ### Core Objectives:
 *   **Automated Build Management**: Streamline the process of fetching, updating, and compiling multiple disparate tool repositories into a unified distribution.
@@ -24,7 +24,27 @@ Tool functions are executed within subshells `(...)`. This ensures that environm
 By routing C-compilation through Zig (`zig cc`), the script bypasses traditional cross-compilation headaches. It targets `x86_64-linux-musl` for Linux to ensure binaries run on any distribution without specific GLIBC versions.
 
 ### 4. Process-Based Parallelism
-The script uses standard Bash job control. It backgrounds every tool build, stores their Process IDs (PIDs), and uses a monitoring loop to track completion and report exit statuses in real-time.
+The script uses standard Bash job control. It backgrounds every tool build, stores their Process IDs (PIDs), and uses a monitoring loop with `wait -n` to track completion. The loop is specifically designed to capture sub-task failure statuses without triggering a global script exit.
+
+### 5. Absolute Binary Tracking
+The orchestrator implements a **Location-Independent Tracking System**. Instead of relying on heuristic directory searches, every build engine (`codeBuild` and `codeInstall`) exports an absolute `PKG_BIN_PATH` upon successful compilation. This ensures that downstream functions (`pkgVersion`, `generateArchive`) always find the correct binary regardless of repository nesting depth (e.g., `gopls`).
+
+### 6. Cross-Platform Environment Detection
+The orchestrator is fully compatible with both **Cygwin** and **MSYS2/Git-Bash**. It dynamically detects the host environment and resolves the correct Windows drive prefixing:
+- **Cygwin**: Uses `/cygdrive/` (e.g., `/cygdrive/c/`).
+- **MSYS2**: Uses native roots (e.g., `/c/`).
+
+This dynamic resolution ensures that hardcoded paths remain functional regardless of the POSIX layer being used on Windows.
+
+### 7. Cygwin-Windows Interoperability
+To support reliable metadata extraction, the script utilizes `cygpath -w` when communicating with the Windows Go toolchain. This prevents "File Not Found" errors that occur when passing POSIX-style paths to native Windows binaries.
+
+### 8. Bash Strict Mode & Hardening
+To ensure enterprise-grade reliability, the script implements "Bash Strict Mode" (`set -euo pipefail`). This enforces immediate abortion on unhandled errors and ensures that failures in parallel subshells are correctly detected.
+
+### 9. Defensive Variable Management
+*   **Immutability**: Critical configuration constants (paths, compiler strings) are declared as `readonly` to prevent accidental mutation during the parallel execution phase.
+*   **Safe Expansion**: All variable accesses use defensive expansion (e.g., `${VAR:-}`) to maintain stability under `nounset` conditions, especially for optional function arguments and environment metadata.
 
 ---
 
@@ -39,8 +59,8 @@ graph TD
     Clean -- No --> ActionType
 
     subgraph ExecutionPhase ["Execution Phase (Parallel vs Single)"]
-        ActionType{all or single?}
-        ActionType -- all --> LaunchAll[Launch all build functions in background]
+        ActionType{build_all or single?}
+        ActionType -- build_all --> LaunchAll[Launch all build functions in background]
         ActionType -- single --> LaunchOne[Execute specific build function]
         
         LaunchAll --> Monitor[PID Monitoring Loop]
@@ -53,8 +73,8 @@ graph TD
 
     Archive --> Move[Move to DISTRIB_BASE]
     Move --> Cleanup[Purge Temp Workspace]
-    Monitor --> Results[Report Success/Failure]
-    Results --> End([Conclusion])
+    Monitor --> Results[Report Success/Failure & Counts]
+    Results --> End([Conclusion: Exit with Failure Count])
 ```
 
 ### Data Sequence
@@ -68,28 +88,35 @@ graph TD
 ## Go Utilities Details
 The following table provides a high-level summary of the tools included in this pipeline:
 
-| Tool (20) | Repo URL | Short Description | Recommended Command |
+| Tool (21) | Repo URL | Short Description | Recommended Command |
 | :--- | :--- | :--- | :--- |
+| **TYPE: FORMATTING & STYLE (4)** | | | |
 | **gofumpt** | github.com/mvdan/gofumpt | Stricter, more opinionated Go formatter | `gofumpt -w -extra .` |
-| **govulncheck** | github.com/golang/vuln | Official vulnerability scanner for Go code | `govulncheck ./...` |
+| **gocritic** | github.com/go-critic/go-critic | Finds stylistic and performance micro-bugs | `gocritic check ./...` |
+| **goconst** | github.com/jgautheron/goconst | Finds repeated strings to make constants | `goconst -min-occurrences 3 ./...` |
+| **go-mnd** | github.com/tommy-muehle/go-mnd | Detects magic numbers (unnamed constants) | `mnd ./...` |
+| **TYPE: STATIC ANALYSIS & LINTING (7)** | | | |
 | **golangci-lint** | github.com/golangci/golangci-lint | Fast, parallel runner for dozens of linters | `golangci-lint run ./...` |
 | **staticcheck** | github.com/dominikh/go-tools | Advanced static analysis with all checks | `staticcheck ./...` |
-| **gopls** | go.googlesource.com/tools | Official Go Language Server (IDE logic) | `gopls check ./...` |
-| **delve (dlv)** | github.com/go-delve/delve | The standard debugger for Go | `dlv debug ./main.go` |
-| **gocyclo** | github.com/fzipp/gocyclo | Measures cyclomatic complexity | `gocyclo -over 15 .` |
-| **goconst** | github.com/jgautheron/goconst | Finds repeated strings for constants | `goconst -min-occurrences 3 ./...` |
-| **interfacebloat** | github.com/sashamelentyev/interfacebloat | Flags interfaces with too many methods | `interfacebloat -max 5 ./...` |
 | **nilaway** | github.com/uber-go/nilaway | Advanced static nil-panic detector | `nilaway ./...` |
-| **gosec** | github.com/securego/gosec | Source code security problem inspector | `gosec ./...` |
-| **go.rice** | github.com/GeertJohan/go.rice | Embeds static assets into Go binaries | `rice embed-go` |
-| **go-mnd** | github.com/tommy-muehle/go-mnd | Detects magic numbers | `mnd ./...` |
-| **gocritic** | github.com/go-critic/go-critic | Finds style/performance micro-bugs | `gocritic check ./...` |
-| **impl** | github.com/josharian/impl | Generates method stubs for interfaces | `impl 'r *Receiver' io.Reader` |
-| **go-callvis** | github.com/ondrajz/go-callvis | Interactive graph visualization | `go-callvis ./...` |
-| **benchstat** | github.com/golang/perf | Computes stats about benchmarks | `benchstat old.txt new.txt` |
-| **mockery** | github.com/vektra/mockery | Generates type-safe mocks for interfaces | `mockery --all` |
+| **nilness** | golang.org/x/tools | Detects potential nil-pointer dereferences | `nilness ./...` |
+| **gocyclo** | github.com/fzipp/gocyclo | Measures cyclomatic complexity of functions | `gocyclo -over 15 .` |
+| **interfacebloat** | github.com/sashamelentyev/interfacebloat | Flags interfaces with too many methods | `interfacebloat -max 5 ./...` |
 | **copyloopvar** | github.com/karamaru-alpha/copyloopvar | Detects loop variable pointer issues | `copyloopvar ./...` |
-| **goleak** | github.com/uber-go/goleak | Detects Goroutine leaks in tests | (Library Use Only) |
+| **TYPE: SECURITY & VULNERABILITY (2)** | | | |
+| **govulncheck** | github.com/golang/vuln | Official vulnerability scanner for Go code | `govulncheck ./...` |
+| **gosec** | github.com/securego/gosec | Inspects source code for security problems | `gosec ./...` |
+| **TYPE: TESTING & PERFORMANCE (3)** | | | |
+| **mockery** | github.com/vektra/mockery | Generates type-safe mocks for interfaces | `mockery --all` |
+| **goleak** | github.com/uber-go/goleak | Verifies no Goroutines are leaked in tests | (Library Use Only) |
+| **benchstat** | github.com/golang/perf | Computes statistics about Go benchmarks | `benchstat old.txt new.txt` |
+| **TYPE: DEVELOPMENT & VISUALIZATION (4)** | | | |
+| **gopls** | go.googlesource.com/tools | Official Go Language Server (IDE logic) | `gopls check ./...` |
+| **delve (dlv)** | github.com/go-delve/delve | The standard debugger for the Go language | `dlv debug ./main.go` |
+| **go-callvis** | github.com/ondrajz/go-callvis | Interactive graph visualization of Go code | `go-callvis ./...` |
+| **impl** | github.com/josharian/impl | Generates method stubs for interfaces | `impl 'r *Receiver' io.Reader` |
+| **TYPE: ASSET MANAGEMENT (1)** | | | |
+| **go.rice** | github.com/GeertJohan/go.rice | Embeds static assets into Go binaries | `rice embed-go` |
 
 ---
 
@@ -155,65 +182,71 @@ The following table provides a high-level summary of the tools included in this 
 *   **Functionality**: Leverages sophisticated data flow and escape analysis to determine if a pointer can ever be nil at a specific call site across package boundaries.
 *   **How to use**: Run `nilaway ./...` to perform a comprehensive nil-safety audit.
 
-### 11. gosec
+### 11. nilness
+*   **Objectives**: Statically detect potential nil-pointer dereferences in Go code.
+*   **Core Components**: `nilness` analyzer (part of `golang.org/x/tools`).
+*   **Functionality**: Inspects code paths to find instances where a nil value is unconditionally dereferenced. It is a precise, low-noise analyzer that is part of the standard Go analysis suite.
+*   **How to use**: Run `nilness ./...` to check for nil dereferences.
+
+### 12. gosec
 *   **Objectives**: Automate security-focused code audits to catch common vulnerabilities early.
 *   **Core Components**: `gosec` binary.
 *   **Functionality**: Scans for specific security anti-patterns such as hardcoded credentials, weak TLS configurations, SQL injection points, and unsafe permission settings.
 *   **How to use**: Run `gosec ./...` to generate a security finding report.
 
-### 12. go.rice (rice)
+### 13. go.rice (rice)
 *   **Objectives**: Simplify application deployment by embedding static assets into the final binary.
 *   **Core Components**: `rice` binary.
 *   **Functionality**: Packs folders containing HTML, CSS, JavaScript, or templates into a specialized Go file that is compiled into your application, allowing for true single-binary distribution.
 *   **How to use**: Run `rice embed-go` in your project's asset directory before running `go build`.
 
-### 13. go-mnd (mnd)
+### 14. go-mnd (mnd)
 *   **Objectives**: Eliminate "magic numbers" to improve code self-documentation.
 *   **Core Components**: `mnd` binary.
 *   **Functionality**: Detects raw numerical constants (e.g., `86400`) and encourages developers to give them descriptive names (e.g., `SecondsPerDay`) to improve readability.
 *   **How to use**: Run `mnd ./...` to find unnamed numerical literals.
 
-### 14. gocritic
+### 15. gocritic
 *   **Objectives**: Provide highly detailed suggestions for stylistic, performance, and correctness micro-improvements.
 *   **Core Components**: `gocritic` binary.
 *   **Functionality**: Offers a collection of "critics" that look for subtle issues not covered by standard linters, such as inefficient loop patterns or redundant type conversions.
 *   **How to use**: Run `gocritic check ./...` to receive a list of actionable advice.
 
-### 15. impl
+### 16. impl
 *   **Objectives**: Speed up development by automating interface implementation boilerplate.
 *   **Core Components**: `impl` binary.
 *   **Functionality**: Given a receiver name and an interface name (e.g., `io.Reader`), it generates the correct method signatures directly into your code or stdout.
 *   **How to use**: Run `impl 'r *MyType' io.ReadWriteCloser` to instantly generate all three required method stubs.
 
-### 16. go-callvis
+### 17. go-callvis
 *   **Objectives**: Visualize the internal structure and call graphs of Go programs.
 *   **Core Components**: `go-callvis` binary.
 *   **Functionality**: Analyzes call relationships and generates a graphical representation (using Graphviz) that helps developers understand package coupling and deep function chains.
 *   **How to use**: Run `go-callvis ./...` to generate a live visualization or a static image file.
 
-### 17. benchstat
+### 18. benchstat
 *   **Objectives**: Perform statistically sound comparisons of Go benchmarks.
 *   **Core Components**: `benchstat` binary.
 *   **Functionality**: Compares the output of `go test -bench` from two different runs (e.g., master vs. feature branch) and determines if a performance delta is statistically significant or just noise.
 *   **How to use**: Run `benchstat old_bench.txt new_bench.txt` to see the performance percentage change.
 
-### 18. mockery
+### 19. mockery
 *   **Objectives**: Automate the generation of type-safe mocks for Go interfaces.
-- **Core Components**: `mockery` binary.
-- **Functionality**: Scans your Go source code and generates implementations of your interfaces that can be used in unit tests to simulate external dependencies.
-- **How to use**: Run `mockery --all` to generate mocks for all interfaces in the current directory.
+*   **Core Components**: `mockery` binary.
+*   **Functionality**: Scans your Go source code and generates implementations of your interfaces that can be used in unit tests to simulate external dependencies.
+*   **How to use**: Run `mockery --all` to generate mocks for all interfaces in the current directory.
 
-### 19. copyloopvar
+### 20. copyloopvar
 *   **Objectives**: Prevent common concurrency bugs by detecting loop variable capture issues.
-- **Core Components**: `copyloopvar` binary.
-- **Functionality**: Identifies places in your code where a reference to a loop variable is taken (e.g., in a goroutine or closure), which often leads to unexpected behavior in older Go versions or complex logic.
-- **How to use**: Run `copyloopvar ./...` to scan your project.
+*   **Core Components**: `copyloopvar` binary.
+*   **Functionality**: Identifies places in your code where a reference to a loop variable is taken (e.g., in a goroutine or closure), which often leads to unexpected behavior in older Go versions or complex logic.
+*   **How to use**: Run `copyloopvar ./...` to scan your project.
 
-### 20. goleak
+### 21. goleak
 *   **Objectives**: Verify that no Goroutines are leaked during test execution.
-- **Core Components**: Integration reference (Library only).
-- **Functionality**: Unlike the other tools, `goleak` is not a standalone binary but a library you import into your `_test.go` files to check for leaked goroutines after tests finish.
-- **How to use**: Add `defer goleak.VerifyNone(t)` to your test functions or use it in `TestMain`.
+*   **Core Components**: Integration reference (Library only).
+*   **Functionality**: Unlike the other tools, `goleak` is not a standalone binary but a library you import into your `_test.go` files to check for leaked goroutines after tests finish.
+*   **How to use**: Add `defer goleak.VerifyNone(t)` to your test functions or use it in `TestMain`.
 
 ---
 
@@ -223,11 +256,12 @@ The following table provides a high-level summary of the tools included in this 
 | :--- | :--- | :--- |
 | **Runtime** | `bash` | Script execution environment. |
 | **Compiler** | `go` | Primary Go toolchain (1.20+ recommended). |
+| **Workspace** | `GOPATH` | Must be defined in the environment for `go install` operations. |
 | **Cross-Compiler** | `zig` | C compiler for statically linked CGO builds. |
 | **Version Control**| `git` | Repository cloning and version metadata. |
 | **Utilities** | `tar`, `xz` | Packaging and compression. |
 | **Utilities** | `nproc` | CPU core detection for build optimization. |
-| **Environment** | `Cygwin/MSYS` | Required for running on Windows systems. |
+| **Environment** | `Cygwin` or `MSYS2/Git-Bash` | Required for running on Windows systems. |
 
 ---
 
@@ -237,8 +271,11 @@ The following table provides a high-level summary of the tools included in this 
 | :--- | :--- | :--- | :--- |
 | `--help` | Displays the help menu and list of available targets. | Flag | N/A |
 | `--clean-cache` | Clears the Zig global cache and Go build cache before building. | Flag | N/A |
-| `all` | Compiles all 20 targets concurrently in parallel mode. | Target | N/A |
-| `build_<name>` | Build a specific tool (e.g., `build_gofumpt`, `build_delve`). | Target | N/A |
+| `--purge-distrib` | Deletes distribution subdirectories for the selected build target(s). | Flag | N/A |
+| `--report-distrib` | Generates a formatted table of all currently compiled binaries. | Flag | N/A |
+| `--scope=<list>` | Restricts maintenance to a comma-separated list (e.g.: `gosec,golangci-lint`) or wildcard pattern (e.g., `go*`) of packages. | Option | N/A |
+| `build_all` | Compiles all 21 targets concurrently in parallel mode. | Target | N/A |
+| `build_<name>` | Build a specific tool (e.g., `build_gofumpt`, `build_nilaway`). | Target | N/A |
 
 ---
 
@@ -246,7 +283,7 @@ The following table provides a high-level summary of the tools included in this 
 
 ### 1. Build the entire suite in parallel
 ```bash
-./gobuild_code-analyzers.sh all
+./gobuild_code-analyzers.sh build_all
 ```
 
 ### 2. Build a specific tool (e.g., Staticcheck)
@@ -256,10 +293,57 @@ The following table provides a high-level summary of the tools included in this 
 
 ### 3. Fresh build with cache cleanup
 ```bash
-./gobuild_code-analyzers.sh --clean-cache all
+./gobuild_code-analyzers.sh --clean-cache build_all
 ```
 
+### 4. Purge distribution and rebuild a specific tool
+```bash
+./gobuild_code-analyzers.sh --purge-distrib build_gosec
+```
+
+### 5. Generate a comprehensive distribution report
+```bash
+./gobuild_code-analyzers.sh --report-distrib
+```
+
+### 6. Targeted Maintenance using --scope (Wildcard Support)
+The `--scope` flag allows you to run maintenance tasks on a specific subset of tools without triggering a build. It supports standard shell wildcards (`*`), enabling you to target groups of tools easily.
+
+> [!NOTE]
+> When using wildcards, ensure the scope string is quoted (e.g., `--scope="go*"`) to prevent the shell from expanding the pattern against local files.
+
+*   **Report specific tools with wildcards**:
+    ```bash
+    ./gobuild_code-analyzers.sh --report-distrib --scope="go*,nil*"
+    ```
+*   **Purge specific tool distribution**:
+    ```bash
+    ./gobuild_code-analyzers.sh --purge-distrib --scope=staticcheck
+    ```
+*   **Combined maintenance**:
+    ```bash
+    ./gobuild_code-analyzers.sh --purge-distrib --report-distrib --scope=gopls,mockery
+    ```
+
 ---
-### 4. Viewing results
-After completion, the archives will be located in:
+
+## Viewing Results
+After completion, the script provides a comprehensive summary:
+`All builds finished in Xm Ys. Success: <N>, Failures: <M>, Status: PASS/FAIL`
+
+The archives will be located in:
 `<INSTALL_BASE>\distrib/<package_name>/<package>-<version>_<os>-amd64.tar.xz`
+
+The script's exit code will be equal to the number of failed builds (0 for total success).
+
+---
+
+## Logging and Diagnostics
+When running in parallel mode (`build_all`), the script redirects individual tool output to log files to maintain a clean console interface.
+
+*   **Log Location**: `/tmp/logs/golang/build_<tool_name>.log`
+*   **Real-time Monitoring**: You can tail logs during a build to debug specific tool failures:
+    ```bash
+    tail -f /tmp/logs/golang/build_gopls.log
+    ```
+*   **Failure Analysis**: If a build fails with `Status: 127` or `Status: 1`, check the log for specific Go compiler errors, network timeouts during `git clone`, or pathing issues.
