@@ -3,7 +3,7 @@
     IISDelegationValidate.ps1 - Verifies the IIS management delegation for a specific group.
 
 .DESCRIPTION
-    This script performs a multi-point audit to ensure that the delegation set by IISDelegationSet.ps1 
+    This script performs a multi-point audit to ensure that the delegation set by IISDelegationSet.ps1
     is active and functional. It is intended to be run in the context of a delegated group member.
     The script performs:
     1. Privilege Audit: Warns if run as Administrator (standard user context is preferred for validation).
@@ -20,7 +20,7 @@
     .\IISDelegationValidate.ps1 -GroupName "CORP\IIS_Managers"
 #>
 param (
-    [Parameter(Mandatory=$true)]
+    [Parameter(Mandatory = $true)]
     [string]$GroupName
 )
 
@@ -54,7 +54,7 @@ if (-not $groupFound) {
     Write-Warning "Current user '$($currentUser.Name)' does not appear to be a member of group '$GroupName'. Verification results may fail."
 }
 
-Write-Host "--- Verifying IIS Permissions for $GroupName ---" -ForegroundColor Cyan
+Write-Output "--- Verifying IIS Permissions for $GroupName ---"
 Import-Module WebAdministration
 $Results = @()
 
@@ -76,12 +76,12 @@ foreach ($Svc in @("W3SVC", "WAS")) {
 # --- FUNCTIONALITY: Registry ACL Check ---
 # Explicitly checks the Access Control List for the GroupName entry with appropriate rights.
 $RegPath = "HKLM:\SOFTWARE\Microsoft\InetStp"
-try { 
+try {
     $Acl = Get-Acl $RegPath -ErrorAction Stop
     $hasAcl = $Acl.Access | Where-Object { $_.IdentityReference -like "*$GroupName*" -and $_.RegistryRights -match "FullControl|Modify" }
-    $Results += [PSCustomObject]@{ Test = "Registry ACL Check"; Status = if($hasAcl) {"Pass"} else {"Fail (ACL Missing)"} }
-} catch { 
-    $Results += [PSCustomObject]@{ Test = "Registry Path Access"; Status = "Fail: $($_.Exception.Message)" } 
+    $Results += [PSCustomObject]@{ Test = "Registry ACL Check"; Status = if ($hasAcl) { "Pass" } else { "Fail (ACL Missing)" } }
+} catch {
+    $Results += [PSCustomObject]@{ Test = "Registry Path Access"; Status = "Fail: $($_.Exception.Message)" }
 }
 
 # --- FUNCTIONALITY: NTFS ACL Check ---
@@ -91,7 +91,7 @@ foreach ($Path in $Paths) {
     if (Test-Path $Path) {
         $Acl = Get-Acl $Path
         $hasAcl = $Acl.Access | Where-Object { $_.IdentityReference -like "*$GroupName*" -and $_.FileSystemRights -match "Modify|FullControl" }
-        $Results += [PSCustomObject]@{ Test = "NTFS ACL Check ($($Path.Split('\')[-1]))"; Status = if($hasAcl) {"Pass"} else {"Fail (ACL Missing)"} }
+        $Results += [PSCustomObject]@{ Test = "NTFS ACL Check ($($Path.Split('\')[-1]))"; Status = if ($hasAcl) { "Pass" } else { "Fail (ACL Missing)" } }
     } else {
         $Results += [PSCustomObject]@{ Test = "Path Existence ($Path)"; Status = "Fail (Not Found)" }
     }
@@ -105,13 +105,13 @@ try {
     $currentAutoStart = $pool.autoStart
     Set-WebConfigurationProperty -Filter "/system.applicationHost/applicationPools/add[@name='DefaultAppPool']" -Name "autoStart" -Value $currentAutoStart -ErrorAction Stop
     $Results += [PSCustomObject]@{ Test = "IIS Config Commit (AppPools)"; Status = "Pass" }
-    
+
     # 4.2. Site Test (Default Web Site)
     $site = Get-Item "IIS:\Sites\Default Web Site" -ErrorAction Stop
     $currentLog = $site.logFile.directory
     Set-WebConfigurationProperty -Filter "/system.applicationHost/sites/site[@name='Default Web Site']/logFile" -Name "directory" -Value $currentLog -ErrorAction Stop
     $Results += [PSCustomObject]@{ Test = "IIS Config Commit (Sites)"; Status = "Pass" }
-    
+
     # 4.3. Nested Section Test (Authentication)
     $currentAuth = (Get-WebConfigurationProperty -Filter "system.webServer/security/authentication/anonymousAuthentication" -Name "enabled").Value
     Set-WebConfigurationProperty -Filter "/system.webServer/security/authentication/anonymousAuthentication" -Name "enabled" -Value $currentAuth -ErrorAction Stop
@@ -120,12 +120,12 @@ try {
     $Results += [PSCustomObject]@{ Test = "IIS Config Commit Test"; Status = "Fail: $($_.Exception.Message)" }
 }
 
-Write-Host "`nVerification Summary:" -ForegroundColor Gray
+Write-Output "`nVerification Summary:"
 $Results | Format-Table -AutoSize
 
 $allPass = ($Results | Where-Object { $_.Status -ne "Pass" }).Count -eq 0
 if ($allPass) {
-    Write-Host "--- Verification SUCCESSFUL ---" -ForegroundColor Green
+    Write-Output "--- Verification SUCCESSFUL ---"
 } else {
-    Write-Host "--- Verification FAILED ---" -ForegroundColor Red
+    Write-Output "--- Verification FAILED ---"
 }

@@ -33,38 +33,49 @@ A critical architectural safety feature is the `verify_sudo_users` function. It 
 
 ```mermaid
 graph TD
-    Start([Start Script]) --> Args[Parse CLI Arguments]
+    Start([Start Script]) --> PrivCheckEUID{EUID == 0?}
+    PrivCheckEUID -- No --> ExitErr[Exit 1: No Privileges]
+    PrivCheckEUID -- Yes --> PrivCheckSudo{sudo -l Parse}
+    PrivCheckSudo -- Fail --> ExitErr
+    PrivCheckSudo -- Pass --> Args[Parse CLI Arguments]
+    
     Args --> ArgsCheck{Arguments Valid?}
     ArgsCheck -- No --> Usage[Display Usage & Exit 1]
-    ArgsCheck -- Yes --> PrivCheck{EUID == 0?}
-    PrivCheck -- No --> ExitErr[Exit 1: No Privileges]
-    PrivCheck -- Yes --> SudoVerify{sudo -l Parse}
-    SudoVerify -- Fail --> ExitErr
-    SudoVerify -- Pass --> AuditSeq[Audit Sequence]
+    
+    ArgsCheck -- Yes --> ModeBranch{Mode?}
+    
+    ModeBranch -- "audit" --> AuditSeq
     
     subgraph Audit Sequence
         A1[Check Shadow for Password]
         A2[Check Shadow for Lock State]
         A3[Check effective SSHD Config]
         A4[Validate Hash Cryptography]
+        A5[Sudo Safety Check]
+        A1 --> A2 --> A3 --> A4 --> A5
     end
     
-    AuditSeq --> ModeCheck{Mode == 'remediate'?}
+    AuditSeq --> AuditRes{Audit Passed?}
+    AuditRes -- Yes --> Exit0([Exit 0: SUCCESS])
+    AuditRes -- No --> Exit1([Exit 1: FAILURE])
     
-    ModeCheck -- No --> AuditResult{Audit Passed?}
-    AuditResult -- Yes --> Exit0[Exit 0: PASS]
-    AuditResult -- No --> Exit1[Exit 1: FAIL]
+    ModeBranch -- "restore" --> RestoreFlow[Find Target Backup Suffix]
+    RestoreFlow --> RestoreFiles[Restore Shadow & SSH Config]
+    RestoreFiles --> RestoreRes{Restore Success?}
+    RestoreRes -- Yes --> Exit0
+    RestoreRes -- No --> Exit1
     
-    ModeCheck -- Yes --> AuditFailCheck{Audit Failed?}
-    AuditFailCheck -- No --> AlreadyClean[Exit 0: Already Clean]
+    ModeBranch -- "remediate" --> RemSilentAudit[Silent Audit Sequence]
+    RemSilentAudit --> RemNeed{Audit Failed?}
+    RemNeed -- No --> AlreadyClean([Exit 0: Already Clean])
     
-    AuditFailCheck -- Yes --> SudoSafety{Sudo Safety Check}
-    SudoSafety -- Fail --> SafetyAbort[Exit 1: Safety Abort]
+    RemNeed -- Yes --> SudoSafety{Sudo Safety Passed?}
+    SudoSafety -- Fail --> SafetyAbort([Exit 1: Safety Abort])
     
     SudoSafety -- Pass --> SimCheck{Simulate Mode?}
+    SimCheck -- Yes --> SimFlow([Explain Changes & Exit 0])
     
-    SimCheck -- Yes --> SimFlow[Explain Changes & Exit 0]
-    SimCheck -- No --> RemediateFlow[Remediation Flow]
+    SimCheck -- No --> RemFlow[Remediation Flow]
     
     subgraph Remediation Flow
         R1[Handle Immutable Flags]
@@ -72,11 +83,15 @@ graph TD
         R3[Update Shadow: Atomic Password/Lock]
         R4[Update SSHD: Atomic PermitRootLogin no]
         R5[Restore Attributes & Reload Services]
+        
+        R1 --> R2 --> R3 --> R4 --> R5
     end
     
-    RemediateFlow --> FinalAudit[Final Re-Audit]
-    FinalAudit -- Pass --> Finish0([Exit 0: SUCCESS])
-    FinalAudit -- Fail --> Finish1([Exit 1: FAILURE])
+    RemFlow --> R1
+    R5 --> FinalAudit[Final Re-Audit]
+    FinalAudit --> FinalRes{Audit Passed?}
+    FinalRes -- Yes --> Exit0
+    FinalRes -- No --> Exit1
 ```
 
 ## D- Exit Codes

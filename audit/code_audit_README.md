@@ -1,7 +1,7 @@
 # Code Audit Pipeline: Enterprise Quality & Security Audit Utility
 
 ## Core Objectives
-- **Syntactic & Stylistic Integrity**: Enforce consistent formatting and best practices across Python, Go, Node.js, and Bash ecosystems.
+- **Syntactic & Stylistic Integrity**: Enforce consistent formatting and best practices across Python, Go, Node.js, Bash, and PowerShell ecosystems.
 - **Comprehensive Reporting**: Execute all requested audit phases to completion, aggregating results into a final health status rather than terminating on the first error.
 - **Multi-tiered Orchestration**: Modular support for standard core checks, extended code quality, and deep supply chain analysis.
 - **Architectural Resilience**: Hardened execution environment designed for CI/CD runners and local developer environments.
@@ -34,9 +34,10 @@ The script implements a non-blocking execution model. Instead of terminating on 
 ### 6. Zero-Impact Policy (Remediation Control)
 By default, the audit has **zero impact** on source code. Toolsets are configured in "check-only" modes. Source code modifications (formatting fixes and auto-linting) only occur if the `--fix` flag is explicitly provided.
 
-### 7. Cross-Platform Path Normalization (Mixed Path Strategy)
-To ensure stability across **Cygwin, MSYS, and Linux**, the utility implements the 'Mixed Path' strategy. Absolute paths are normalized to use forward slashes with Windows drive letters (e.g., `E:/path/to/rules/`).
-- **Compatibility**: This format is natively understood by POSIX shells for logic tests and by Native Windows binaries for task execution, eliminating path-resolution errors (OS Error 3).
+### 7. Full Cross-Platform and Multi-Environment Support
+The orchestrator is explicitly designed for stability and native compatibility across **Cygwin**, **MSYS2 / Git-Bash**, and **Linux** environments.
+- **Dynamic Environment Isolation**: The script detects the active host ecosystem (`$IS_CYGWIN`, `$IS_MSYS`, or Linux). In Windows-based POSIX subsets, it performs rigorous `PATH` sanitization to prevent fatal conflicts (e.g., accidentally invoking MSYS binaries inside a Cygwin shell) while protecting necessary native Windows paths (like `C:\Windows\System32`).
+- **Mixed Path Normalization**: Absolute paths are universally normalized into a 'Mixed Path' format—utilizing forward slashes alongside Windows drive letters (e.g., `E:/path/to/rules/`). This specific format is natively understood by both POSIX shells for internal logic tests, and by Windows-native binaries (like `go.exe` or `python.exe`) for task execution, completely eliminating OS-level path-resolution errors.
 
 ## Data Flow and Control Logic
 
@@ -82,6 +83,7 @@ The utility relies on a suite of specialized binaries. Their presence can be ver
 | **Golang** | `go`, `gofumpt`, `golangci-lint`, `govulncheck`, `gosec`, `nilaway`, `nilness`, `go fix` | Formatting, Safety, Lints, Security, Vulns, Modernization |
 | **Node.js** | `oxlint`, `oxfmt`, `biome`, `npm`, `node` | Linting, Formatting, Registry Security |
 | **Bash**    | `shellcheck`, `shfmt` | Linting, Formatting, Common Bug Detection |
+| **PowerShell**| `pwsh`, `pslint.ps1` | Linting, Strict Analysis, Formatting |
 | **Security** | `semgrep`, `trufflehog`, `grype`, `ast-grep` | Static analysis, Secrets, Supply Chain, Structural Search |
 | **Deep Scan**| `syft`, `trivy` | SBOM Generation, Configuration Scanning, Holistic SCA |
 | **Installer** | `uv`, `npm`, `go`, `curl / sh` | Bootstrap tools into user-context without sudo. |
@@ -92,7 +94,7 @@ The utility relies on a suite of specialized binaries. Their presence can be ver
 | :--- | :--- | :--- | :--- |
 | `--path <dir>` | String | `.` | Target directory for the audit. Validates existence before switching. |
 | `--auto` | Flag | `false` | Enables heuristic autodetection of project language based on filesystem. |
-| `--detect` | Flag | `false` | Generates a diagnostic report of all installed/missing audit tools. |
+| `--detect` | Flag | `false` | Generates a diagnostic report of installed/missing audit tools. Can be global or scoped by class (e.g., `--detect --python`). |
 | `--extended` | Flag | `false` | Enables deep quality tools (e.g., Go Fix, extra Go linters, Radon). |
 | `--inspection` | Flag | `false` | Enables specialized deep-inspection tools (e.g., NilAway). |
 | `--extra-scan` | Flag | `false` | Enables heavy-duty security scanning (Syft SBOM, Trivy). |
@@ -102,6 +104,7 @@ The utility relies on a suite of specialized binaries. Their presence can be ver
 | `--golang` | Flag | `true`* | Isolates the audit to Go tools only. |
 | `--nodejs` | Flag | `true`* | Isolates the audit to Node.js tools only. |
 | `--bash`   | Flag | `true`* | Isolates the audit to Bash tools only. |
+| `--powershell`| Flag | `true`* | Isolates the audit to PowerShell tools only. |
 | `--general` | Flag | `true`* | Isolates the audit to general-purpose security tools only. |
 | `--run-quality` | Flag | `false` | Executes Phase 1 only (Quality, Style, Formatting). |
 | `--run-logic` | Flag | `false` | Executes Phase 2 only (Logic, Safety, Complexity). |
@@ -171,7 +174,13 @@ The utility orchestrates a specialized collection of industry-standard tools. Be
 | **ShellCheck** | Industry-standard Linter | Catches 90% of common shell bugs, including quoting issues and logical anti-patterns. | Core |
 | **shfmt** | Shell Formatter | Standardizes code appearance; ensures consistent indentation and shell syntax. | Core |
 
-### 5. General-Purpose Security Suite
+### 5. PowerShell-Specific Suite
+| Tool | Purpose | Detection Scope | Audit Tier |
+| :--- | :--- | :--- | :--- |
+| **pslint.ps1** | Custom PSScriptAnalyzer Wrapper | Executes strict linting and formatting via PowerShell's native AST engine. | Core |
+| **pwsh** | Cross-Platform Host | Ensures PowerShell scripts are evaluated identically on Cygwin, MSYS2, and Linux. | Engine |
+
+### 6. General-Purpose Security Suite
 | Tool | Purpose | Detection Scope | Audit Tier |
 | :--- | :--- | :--- | :--- |
 | **Semgrep** | Polyglot Static Analysis | Detects high-level dangerous patterns (XSS, SQLi, command injection) across multiple languages. | Core |
@@ -266,9 +275,13 @@ Users can run specific audit layers in isolation. Hitting any of these flags act
     ```
 
 ### 9. Environment Readiness Check
-Used during CI/CD runner setup to verify all dependencies are properly mapped.
+Used during CI/CD runner setup to verify all dependencies are properly mapped. By default, it runs globally across all categories, but it can also be isolated by language class.
 ```bash
+# Global diagnostic report of all supported tools
 ./code_audit.sh --detect
+
+# Scoped diagnostic report (Python tools only)
+./code_audit.sh --detect --python
 ```
 
 ## Unit Tests Implementation

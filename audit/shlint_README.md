@@ -21,36 +21,58 @@ The utility follows a **Fail-Fast Wrapper Architecture**, prioritizing validatio
 2.  **Modular Dependency Integration:** Instead of re-implementing formatting or linting logic, `shlint.sh` leverages industry-standard binaries (`shfmt` and `shellcheck`), focusing on the *orchestration* and *configuration* of these tools.
 3.  **Strict File Scoping:** To prevent accidental corruption of configuration files or binaries, the script enforces a `.sh` extension requirement, ensuring it only operates on intended shell scripts.
 4.  **Operational Simplicity:** Minimalist CLI design ensures zero learning curve for systems engineers while providing maximum utility.
+5.  **Multi-Target and Directory Support:** Dynamically handles single files, spaced lists of files, and recursive directory scanning out-of-the-box.
+6.  **Interpreter Safety:** Implements self-awareness (`shlint.sh` skips itself) to prevent runtime byte-offset crashes caused by in-place formatting during execution.
 
 ---
 
 ## Data Flow and Control Logic
 
-The operational flow follows a linear execution path with integrated guardrails. The process begins with environment/input validation and terminates after the secondary analysis tool returns its status.
+The operational flow uses a robust target loop that resolves arguments into actionable files, performs the formatting/linting operations, and aggregates failures into a global exit status.
 
 ### Mermaid Flow Diagram
 
 ```mermaid
 graph TD
-    A([Start]) --> B{Input: $1 provided?}
+    A([Start]) --> B{Input targets provided?}
     B -- No --> C[[Display Usage & Exit 1]]
-    B -- Yes --> D{File exists & non-empty?}
+    B -- Yes --> D[Initialize GLOBAL_EXIT=0]
     
-    D -- No --> C
-    D -- Yes --> E{Extension == .sh?}
+    D --> E[Iterate Targets]
+    E --> F{Is Target a Directory?}
     
-    E -- No --> F[[Log Extension Error & Exit 2]]
-    E -- Yes --> G[Execute shfmt]
+    F -- Yes --> G[Find *.sh files recursively]
+    G --> H[Process each file]
     
-    G --> H[shfmt writes changes to disk]
-    H --> I[Execute shellcheck -x]
+    F -- No --> I{Is Target a File?}
+    I -- Yes --> H
+    I -- No --> J[Log Warning & Skip]
     
-    I --> J{Shellcheck Result}
-    J --> K([Exit with Shellcheck Code])
+    H --> K{Extension == .sh?}
+    K -- No --> L[Log Warning & Skip]
+    K -- Yes --> M{Is file shlint.sh?}
+    
+    M -- Yes --> N[Log Warning & Skip]
+    M -- No --> O[Execute shfmt]
+    
+    O -- Fail --> P[Set GLOBAL_EXIT=2]
+    O -- Success --> Q[Execute shellcheck -x]
+    
+    Q -- Fail --> P
+    Q -- Success --> R{More targets/files?}
+    
+    J --> R
+    L --> R
+    N --> R
+    P --> R
+    
+    R -- Yes --> E
+    R -- No --> S([Exit GLOBAL_EXIT])
 ```
 
 ### Control Logic Details:
-*   **Validation Phase:** The script uses `[[ -s "$1" ]]` to verify existence and content, followed by a pattern match `[[ "$1" != *.sh ]]` for type safety.
+*   **Discovery Phase:** The script uses `find` to recursively locate `*.sh` scripts when a directory is passed, handling spaces safely via `print0`.
+*   **Validation Phase:** The script verifies existence and content via `[[ -s "$file" ]]`, confirms the extension, and explicitly prevents recursive self-formatting.
 *   **Mutation Phase:** `shfmt` is invoked with `-w` (write), applying specific organizational tokens:
     *   `-i 2`: 2-space indentation (Industry standard for readability).
     *   `-ci`: Indented case patterns for logical separation in switch blocks.
@@ -73,43 +95,46 @@ To maintain its operational capabilities, `shlint.sh` requires the following mod
 
 ## Command Line Arguments
 
-The script adheres to a standard UNIX-style single-argument interface.
+The script adheres to a standard UNIX-style multi-argument interface.
 
 | Argument | Type | Description | Default | Mandatory |
 | :--- | :--- | :--- | :--- | :--- |
-| `$1` | `String (Path)` | The absolute or relative path to the `.sh` file to be processed. | N/A | **Yes** |
+| `$@` | `String (Paths)` | Space-separated list of files or directories to process. | N/A | **Yes** |
 
 ### Exit Codes:
-*   **0**: Success. Script is formatted and passes linting.
-*   **1**: Usage/IO Error (File missing or empty).
-*   **2**: Type Error (Incorrect file extension).
+*   **0**: Success. All targeted scripts are formatted and pass linting.
+*   **1**: Usage Error (No targets provided).
+*   **2**: Validation Failure (Format/Lint error on one or more files).
 
 ---
 
 ## Detailed Examples
 
-### 1. Standard Execution
+### 1. Standard Execution (Single File)
 Automating the hygiene of a local script:
 ```bash
 ./shlint.sh my_database_backup.sh
 ```
 *Effect: `my_database_backup.sh` is reformatted to 2-space indentation and any logic errors are printed to stdout.*
 
-### 2. Validation Failure (Wrong Extension)
-Attempting to run against a non-shell file:
+### 2. Multi-File Execution
+Passing multiple explicit files at once:
 ```bash
-./shlint.sh README.md
-```
-*Output:*
-```text
-Error: File 'README.md' does not have a .sh extension.
+./shlint.sh deploy.sh build.sh test.sh
 ```
 
-### 3. CI/CD Integration (Pipeline)
+### 3. Directory Scanning
+Recursively formatting and linting an entire directory:
+```bash
+./shlint.sh ./src/scripts/
+```
+*Effect: Automatically locates and processes every `.sh` file within the directory structure.*
+
+### 4. CI/CD Integration (Pipeline)
 Incorporating into a build pipeline to block commits with poor hygiene:
 ```bash
 # In a shell executor block
-find . -name "*.sh" -exec ./shlint.sh {} +
+./shlint.sh .
 if [ $? -ne 0 ]; then
     echo "Hygiene check failed. Please fix script errors."
     exit 1

@@ -21,10 +21,10 @@
     .\IISDelegationUndo.ps1 -GroupName "CORP\IIS_Managers"
 #>
 param (
-    [Parameter(Mandatory=$true)]
+    [Parameter(Mandatory = $true)]
     [string]$GroupName,
 
-    [Parameter(Mandatory=$false)]
+    [Parameter(Mandatory = $false)]
     [string]$BackupLocation = "$env:TEMP\IISDelegation\backup"
 )
 
@@ -40,7 +40,7 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
 
 Import-Module WebAdministration
 
-Write-Host "--- Reverting IIS Delegation for $GroupName ---" -ForegroundColor Yellow
+Write-Output "--- Reverting IIS Delegation for $GroupName ---"
 
 # --- FUNCTIONALITY: Configuration Re-locking ---
 # Re-applies the 'Deny' override mode to lock down the global configuration.
@@ -65,12 +65,12 @@ $Sections = @(
 )
 
 foreach ($Section in $Sections) {
-    Write-Host "Locking section: $Section" -ForegroundColor Gray
+    Write-Output "Locking section: $Section"
     Add-WebConfigurationLock -Filter $Section -ErrorAction SilentlyContinue
-    
+
     # Reset overrideModeDefault to Deny
     $pathParts = $Section -split '/'
-    
+
     # Construct the filter based on the number of parts
     if ($pathParts.Count -eq 2) {
         $sectionGroup = $pathParts[0]
@@ -88,9 +88,9 @@ foreach ($Section in $Sections) {
         $sectionName = $pathParts[3]
         $Filter = "/configSections/sectionGroup[@name='$group1']/sectionGroup[@name='$group2']/sectionGroup[@name='$group3']/section[@name='$sectionName']"
     }
-    
+
     Set-WebConfigurationProperty -Filter $Filter -Name "overrideModeDefault" -Value "Deny" -ErrorAction SilentlyContinue
-    Write-Host "[SUCCESS] Locked and denied override for $Section" -ForegroundColor Green
+    Write-Output "[SUCCESS] Locked and denied override for $Section"
 }
 
 # --- FUNCTIONALITY: Service Security (SDDL) Reset ---
@@ -99,7 +99,7 @@ $DefaultSDDL = "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;B
 foreach ($Svc in @("W3SVC", "WAS")) {
     sc.exe sdset $Svc $DefaultSDDL | Out-Null
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "[SUCCESS] Reset $Svc service permissions to default." -ForegroundColor Green
+        Write-Output "[SUCCESS] Reset $Svc service permissions to default."
     } else {
         Write-Warning "Failed to reset $Svc service permissions."
     }
@@ -112,12 +112,12 @@ foreach ($Path in $Paths) {
     if (Test-Path $Path) {
         $Acl = Get-Acl $Path
         $Ar = $Acl.Access | Where-Object { $_.IdentityReference -like "*$GroupName*" }
-        if ($Ar) { 
+        if ($Ar) {
             $Acl.RemoveAccessRule($Ar)
             Set-Acl $Path $Acl
-            Write-Host "[SUCCESS] Removed $GroupName from $Path" -ForegroundColor Green
+            Write-Output "[SUCCESS] Removed $GroupName from $Path"
         } else {
-            Write-Host "$GroupName not found in ACL for $Path" -ForegroundColor Gray
+            Write-Output "$GroupName not found in ACL for $Path"
         }
     }
 }
@@ -128,20 +128,20 @@ $RegPath = "HKLM:\SOFTWARE\Microsoft\InetStp"
 if (Test-Path $RegPath) {
     $RegAcl = Get-Acl $RegPath
     $RegRule = $RegAcl.Access | Where-Object { $_.IdentityReference -like "*$GroupName*" }
-    if ($RegRule) { 
+    if ($RegRule) {
         $RegAcl.RemoveAccessRule($RegRule)
         Set-Acl $RegPath $RegAcl
-        Write-Host "[SUCCESS] Removed $GroupName from Registry" -ForegroundColor Green
+        Write-Output "[SUCCESS] Removed $GroupName from Registry"
     } else {
-        Write-Host "$GroupName not found in Registry ACL" -ForegroundColor Gray
+        Write-Output "$GroupName not found in Registry ACL"
     }
 }
 
 # --- FUNCTIONALITY: Cleanup Check ---
 if (Test-Path $BackupLocation) {
-    Write-Host "Backup location found at: $BackupLocation" -ForegroundColor Gray
-    Write-Host "Note: Backup files were NOT automatically deleted for safety. You can manually remove them if no longer needed." -ForegroundColor Gray
+    Write-Output "Backup location found at: $BackupLocation"
+    Write-Output "Note: Backup files were NOT automatically deleted for safety. You can manually remove them if no longer needed."
 }
 
-Write-Host "--- Undo Complete ---" -ForegroundColor Cyan
+Write-Output "--- Undo Complete ---"
 

@@ -15,17 +15,17 @@
     The Active Directory group name (e.g., "DOMAIN\Group") to delegate permissions to. Mandatory.
 
 .PARAMETER BackupLocation
-    The directory path where IIS configuration backups will be stored. 
+    The directory path where IIS configuration backups will be stored.
     Defaults to %TEMP%\IISDelegation\backup.
 
 .EXAMPLE
     .\IISDelegationSet.ps1 -GroupName "CORP\IIS_Managers"
 #>
 param (
-    [Parameter(Mandatory=$true)]
+    [Parameter(Mandatory = $true)]
     [string]$GroupName, # Example: "DOMAIN\GROUPNAME"
 
-    [Parameter(Mandatory=$false)]
+    [Parameter(Mandatory = $false)]
     [string]$BackupLocation = "$env:TEMP\IISDelegation\backup"
 )
 
@@ -41,28 +41,28 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
 
 Import-Module WebAdministration
 
-Write-Host "--- Starting Full IIS Delegation for $GroupName ---" -ForegroundColor Cyan
+Write-Output "--- Starting Full IIS Delegation for $GroupName ---"
 
 # --- FUNCTIONALITY: Backup Sequence ---
 # Data Flow: Source (%windir%\system32\inetsrv\config) -> Destination ($TimestampedBackup)
 $TimestampedBackup = Join-Path $BackupLocation "IIS_Config_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
-if (!(Test-Path $TimestampedBackup)) { 
-    New-Item -ItemType Directory -Path $TimestampedBackup -Force | Out-Null 
+if (!(Test-Path $TimestampedBackup)) {
+    New-Item -ItemType Directory -Path $TimestampedBackup -Force | Out-Null
 }
 Copy-Item "C:\Windows\System32\inetsrv\config\*" $TimestampedBackup -Recurse -Force
-Write-Host "[SUCCESS] Backups created at: $TimestampedBackup" -ForegroundColor Green
+Write-Output "[SUCCESS] Backups created at: $TimestampedBackup"
 
 # --- FUNCTIONALITY: NTFS Permissions ---
 # Grants 'Modify' rights to allow non-admins to write to the global configuration and initialize worker processes.
 $Paths = @("C:\Windows\System32\inetsrv\config", "C:\inetpub\temp\appPools")
 foreach ($Path in $Paths) {
     if (Test-Path $Path) {
-        Write-Host "Granting Modify access to: $Path" -ForegroundColor Gray
+        Write-Output "Granting Modify access to: $Path"
         $Acl = Get-Acl $Path
         $Ar = New-Object System.Security.AccessControl.FileSystemAccessRule($GroupName, "Modify", "ContainerInherit,ObjectInherit", "None", "Allow")
         $Acl.SetAccessRule($Ar)
         Set-Acl $Path $Acl
-        Write-Host "[SUCCESS] NTFS ACL applied to $Path" -ForegroundColor Green
+        Write-Output "[SUCCESS] NTFS ACL applied to $Path"
     } else {
         Write-Warning "Path not found: $Path"
     }
@@ -72,12 +72,12 @@ foreach ($Path in $Paths) {
 # Unlocks the IIS installation key required by the WebAdministration module and IIS management APIs.
 $RegPath = "HKLM:\SOFTWARE\Microsoft\InetStp"
 if (Test-Path $RegPath) {
-    Write-Host "Granting Full Control to Registry: $RegPath" -ForegroundColor Gray
+    Write-Output "Granting Full Control to Registry: $RegPath"
     $RegAcl = Get-Acl $RegPath
     $RegRule = New-Object System.Security.AccessControl.RegistryAccessRule($GroupName, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
     $RegAcl.SetAccessRule($RegRule)
     Set-Acl $RegPath $RegAcl
-    Write-Host "[SUCCESS] Registry ACL applied to $RegPath" -ForegroundColor Green
+    Write-Output "[SUCCESS] Registry ACL applied to $RegPath"
 }
 
 # --- FUNCTIONALITY: Service Security (SDDL) ---
@@ -91,12 +91,12 @@ foreach ($Service in @("W3SVC", "WAS")) {
         $NewSDDL = $CurrentSDDL + "(A;;RPWPCR;;;$GroupSID)"
         sc.exe sdset $Service $NewSDDL | Out-Null
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "[SUCCESS] Service $Service permissions updated for SID $GroupSID" -ForegroundColor Green
+            Write-Output "[SUCCESS] Service $Service permissions updated for SID $GroupSID"
         } else {
             Write-Error "Failed to update service permissions for $Service"
         }
     } else {
-        Write-Host "Service $Service already has permissions for $GroupName" -ForegroundColor Gray
+        Write-Output "Service $Service already has permissions for $GroupName"
     }
 }
 
@@ -124,9 +124,9 @@ $Sections = @(
 )
 
 foreach ($Section in $Sections) {
-    Write-Host "Unlocking section: $Section" -ForegroundColor Gray
+    Write-Output "Unlocking section: $Section"
     Remove-WebConfigurationLock -Filter $Section -ErrorAction SilentlyContinue
-    
+
     # Logic for constructing the XML filter for nested section groups.
     $pathParts = $Section -split '/'
     if ($pathParts.Count -eq 2) {
@@ -145,10 +145,10 @@ foreach ($Section in $Sections) {
         $sectionName = $pathParts[3]
         $Filter = "/configSections/sectionGroup[@name='$group1']/sectionGroup[@name='$group2']/sectionGroup[@name='$group3']/section[@name='$sectionName']"
     }
-    
+
     Set-WebConfigurationProperty -Filter $Filter -Name "overrideModeDefault" -Value "Allow" -ErrorAction SilentlyContinue
-    Write-Host "[SUCCESS] Unlocked and allowed override for $Section" -ForegroundColor Green
+    Write-Output "[SUCCESS] Unlocked and allowed override for $Section"
 }
 
-Write-Host "--- Delegation Complete ---" -ForegroundColor Cyan
+Write-Output "--- Delegation Complete ---"
 

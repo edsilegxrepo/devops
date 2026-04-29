@@ -6,7 +6,7 @@
     It captures:
     - Registry settings (HKCU\Software\Citrix\Receiver)
     - AuthManager tokens and identity cache (%AppData%\Citrix\AuthManager)
-    
+
     The tool ensures Citrix processes are terminated before restoration to prevent file locks.
 .PARAMETER Backup
     Switch to initiate the backup process. Must be used with -Path or defaults to Desktop.
@@ -60,16 +60,19 @@ if (-not $IsAdmin) {
 # --- Internal Helper: Cleanup ---
 # Objective: Ensure temporary staging areas are removed regardless of success or failure.
 function Remove-StagingDirectory {
+    [CmdletBinding(SupportsShouldProcess)]
     param([string]$Dir)
     if ($null -ne $Dir -and (Test-Path $Dir)) {
-        Write-Verbose "Cleaning up staging directory: $Dir"
-        Remove-Item $Dir -Recurse -Force -ErrorAction SilentlyContinue
+        if ($PSCmdlet.ShouldProcess($Dir, "Remove")) {
+            Write-Verbose "Cleaning up staging directory: $Dir"
+            Remove-Item $Dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
 # --- Core Action: Backup ---
 if ($Backup) {
-    Write-Host "[*] Action: Starting Backup..." -ForegroundColor Cyan
+    Write-Output "[*] Action: Starting Backup..."
     $TempStage = $null
     try {
         # Determine Destination
@@ -79,7 +82,7 @@ if ($Backup) {
             New-Item -ItemType Directory -Path $DestDir -Force -ErrorAction Stop | Out-Null
         }
         $FinalZipPath = Join-Path $DestDir $BackupFileName
-        
+
         # Prepare Staging Area
         $TempStage = Join-Path $env:TEMP "Citrix_Stage_$DateStamp"
         New-Item -ItemType Directory -Path $TempStage -Force -ErrorAction Stop | Out-Null
@@ -90,23 +93,23 @@ if ($Backup) {
         if ($LASTEXITCODE -ne 0) {
             throw "Registry export failed with exit code $LASTEXITCODE."
         }
-        Write-Host " [+] Exported Registry Settings." -ForegroundColor Gray
+        Write-Output " [+] Exported Registry Settings."
 
         # 2. Capture AuthManager Cache
         if (Test-Path $AuthPath) {
             Write-Verbose "Copying AuthManager from $AuthPath"
             $DestAuth = New-Item -ItemType Directory -Path (Join-Path $TempStage "AuthManager") -ErrorAction Stop
             Copy-Item -Path (Join-Path $AuthPath "*") -Destination $DestAuth -Recurse -Force -ErrorAction Stop
-            Write-Host " [+] Copied AuthManager Cache." -ForegroundColor Gray
+            Write-Output " [+] Copied AuthManager Cache."
         } else {
             Write-Warning "AuthManager cache not found at $AuthPath. Skipping."
         }
 
         # 3. Create Compressed Archive
-        Write-Host " [+] Compressing backup..." -ForegroundColor Gray
+        Write-Output " [+] Compressing backup..."
         Compress-Archive -Path (Join-Path $TempStage "*") -DestinationPath $FinalZipPath -Force -ErrorAction Stop
-        
-        Write-Host "[OK] Backup saved to: $FinalZipPath" -ForegroundColor Green
+
+        Write-Output "[OK] Backup saved to: $FinalZipPath"
     }
     catch {
         Write-Error "Backup failed: $($_.Exception.Message)"
@@ -119,7 +122,7 @@ if ($Backup) {
 
 # --- Core Action: Restore ---
 elseif ($Restore) {
-    Write-Host "[*] Action: Starting Restore from $Path" -ForegroundColor Yellow
+    Write-Output "[*] Action: Starting Restore from $Path"
     $TempRestore = $null
     try {
         # Input Validation
@@ -129,13 +132,13 @@ elseif ($Restore) {
 
         # 1. Terminate Citrix Processes
         # This is critical to release file locks on the AuthManager database.
-        Write-Host " [+] Terminating Citrix processes..." -ForegroundColor Gray
+        Write-Output " [+] Terminating Citrix processes..."
         $CitrixProcs = @("Receiver", "SelfService", "AuthManager", "Citrix*")
         $RunningProcs = Get-Process -Name $CitrixProcs -ErrorAction SilentlyContinue
         if ($RunningProcs) {
             Write-Verbose "Stopping processes: $($RunningProcs.Name -join ', ')"
             $RunningProcs | Stop-Process -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 3 
+            Start-Sleep -Seconds 3
         }
 
         # 2. Extract Archive to Temp
@@ -151,7 +154,7 @@ elseif ($Restore) {
             if ($LASTEXITCODE -ne 0) {
                 Write-Warning "Registry import failed with exit code $LASTEXITCODE."
             } else {
-                Write-Host " [+] Registry settings imported." -ForegroundColor Gray
+                Write-Output " [+] Registry settings imported."
             }
         }
 
@@ -159,26 +162,26 @@ elseif ($Restore) {
         $SourceAuth = Join-Path $TempRestore "AuthManager"
         if (Test-Path $SourceAuth) {
             Write-Verbose "Restoring AuthManager to $AppDataCitrix"
-            if (Test-Path $AuthPath) { 
+            if (Test-Path $AuthPath) {
                 Remove-Item $AuthPath -Recurse -Force -ErrorAction Stop
             }
             if (-not (Test-Path $AppDataCitrix)) {
                 New-Item -ItemType Directory -Path $AppDataCitrix -Force -ErrorAction Stop | Out-Null
             }
             Copy-Item -Path $SourceAuth -Destination $AppDataCitrix -Recurse -Force -ErrorAction Stop
-            Write-Host " [+] AuthManager cache restored." -ForegroundColor Gray
+            Write-Output " [+] AuthManager cache restored."
         }
 
         # 5. Relaunch Citrix Workspace
         $CitrixExe = "C:\Program Files (x86)\Citrix\ICA Client\SelfServicePlugin\SelfService.exe"
-        if (Test-Path $CitrixExe) { 
-            Start-Process $CitrixExe 
-            Write-Host " [+] Relaunching Citrix Workspace..." -ForegroundColor Gray
+        if (Test-Path $CitrixExe) {
+            Start-Process $CitrixExe
+            Write-Output " [+] Relaunching Citrix Workspace..."
         } else {
             Write-Warning "Citrix executable not found at $CitrixExe. Manual launch required."
         }
 
-        Write-Host "[OK] Restore Complete." -ForegroundColor Green
+        Write-Output "[OK] Restore Complete."
     }
     catch {
         Write-Error "Restore failed: $($_.Exception.Message)"
