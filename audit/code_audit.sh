@@ -140,7 +140,7 @@ setup_environment() {
     # 6. LANGUAGE-SPECIFIC: BASH
     CONF_BASH_TARGET="."                # Target pattern for Bash tools.
     CONF_SHELLCHECK_FLAGS="-x --severity=info" # Linter flags for common bug detection.
-    CONF_SHFMT_FLAGS="-i 4 -sr -d"      # Formatter flags (check-only).
+    CONF_SHFMT_FLAGS="-i 2 -ci -sr"     # Formatter flags (check-only).
 
     # 7. LOCAL INSTALLATION CONSTANTS (NON-SUDO)
     CONF_USER_BIN="${HOME}/.local/bin"
