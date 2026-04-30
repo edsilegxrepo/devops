@@ -40,6 +40,7 @@ Low-level system adjustments and service delegations.
 - `IISDelegationUndo.ps1`: Reverts IIS management delegation for a specific group.
 - `IISDelegationValidate.ps1`: Verifies the IIS management delegation for a specific group.
 - `set_nomodeset.sh`: Ensures consistent headless boot parameters across OS families.
+- `dnsmgr.ps1`: Robust, headless utility for Windows DNS server and search suffix management.
 - `winposix_update.ps1`: Automated, headless update utility for Cygwin and MSYS2 environments.
 
 ### 6. Python Engineering & Lifecycle (`/python_systools`)
