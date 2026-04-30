@@ -15,6 +15,8 @@ This repository is a centralized collection of DevOps scripts and utilities desi
 Hardened frameworks for system security and code quality assurance.
 - `code_audit.sh`: Multi-tiered, polyglot static analysis and security audit framework.
 - `root_audit.sh`: System-level security audit and remediation for the root account.
+- `pslint.ps1`: PowerShell Linter Wrapper for PSScriptAnalyzer (Audit and Auto-Fix).
+- `shlint.sh`: Bash script hygiene tool enforcing formatting (shfmt) and static analysis (shellcheck).
 
 ### 2. Build & Validation Tasks (`/build_tasks`)
 Automation for building, and validating core system components.
@@ -38,10 +40,12 @@ Low-level system adjustments and service delegations.
 - `IISDelegationUndo.ps1`: Reverts IIS management delegation for a specific group.
 - `IISDelegationValidate.ps1`: Verifies the IIS management delegation for a specific group.
 - `set_nomodeset.sh`: Ensures consistent headless boot parameters across OS families.
+- `winposix_update.ps1`: Automated, headless update utility for Cygwin and MSYS2 environments.
 
 ### 6. Python Engineering & Lifecycle (`/python_systools`)
 A comprehensive suite for managing multi-version Python environments and package health.
 - `python_build.sh`: Isolated, relocatable, and production-grade Python 3.13+ build orchestrator.
+- `python_buildenv.sh`: Centralized orchestration layer for Python RPM packaging and metadata synchronization.
 - `py_module_manager.sh`: Modular utility to manage Python package lifecycles (backup/restore/sync).
 - `inspect_python.py`: Quality Auditor for newly built Python binaries (Path isolation, ELF audit).
 - `python_sysdiags.py`: Comprehensive verification of Python interpreter build and OpenSSL linkage.

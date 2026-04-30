@@ -6,9 +6,10 @@
 
 ### **Functional Objectives:**
 - **Automated Lifecycle Management**: Executes system-wide updates for Cygwin and MSYS2 without requiring manual GUI interaction.
-- **Environment Isolation**: Guarantees that each update process operates within a sanitized `PATH` environment, eliminating the risk of binary collisions between competing runtimes.
+- **Fresh Environment Provisioning**: Supports automated, headless installation of new Cygwin and MSYS2 environments to custom paths.
+- **Global Variable Persistence**: Automatically populates and persists `CYGWIN_HOME` and `MSYS_HOME` in the Machine-level environment variables if missing.
+- **Environment Isolation**: Guarantees that each update process operates within a sanitized `PATH` environment, eliminating the risk of binary collisions.
 - **Transactional Logging**: Captures detailed execution logs for auditability and remote troubleshooting.
-- **Optimized Execution**: Implements intelligent output analysis to detect "nothing to do" states, reducing redundant processing cycles and network load.
 
 ---
 
@@ -17,10 +18,11 @@
 The architecture of WinPOSIX Update is centered around the concept of **Process-Level Isolation**.
 
 ### **Key Design Patterns:**
-- **Temporary Path Sanitization**: The script does not rely on the global system `PATH`. Instead, it dynamically constructs a "Clean Room" `PATH` for each update target, removing any directories that might contain conflicting binaries (e.g., removing MSYS2 paths when updating Cygwin).
-- **Headless GUI Suppression**: Utilizes `-WindowStyle Hidden` and unattended command-line flags (`--quiet-mode`, `--noconfirm`) to ensure the update process remains entirely in the background, making it suitable for scheduled tasks and remote management.
-- **Fail-Safe Argument Mapping**: Implements a manual argument mapping block to handle non-standard double-dash flags (`--update-all`), ensuring robust CLI behavior across different shell environments.
-- **State-Aware Retries**: Specifically for MSYS2, the script supports a multi-pass update logic, which is a requirement for pacman when core system components or the package manager itself are updated.
+- **Bootstrap-First Architecture**: For Cygwin, the script performs an intelligent version check via HTTP `HEAD` and automatically downloads the latest `setup-x86_64.exe` only when a newer version is available on the mirror.
+- **Dynamic Installer Discovery**: Fresh MSYS2 installations utilize the GitHub API to dynamically resolve and download the latest "base" SFX archive, ensuring a modern starting point.
+- **Temporary Path Sanitization**: To prevent critical runtime failures caused by DLL collisions and **tool name collisions** (e.g., conflicting versions of `grep`, `ls`, or `awk`), the script dynamically constructs a "Clean Room" `PATH` for each target. This ensures that a Cygwin update never "sees" an MSYS2 binary (and vice versa), guaranteeing that each process loads its specific, intended POSIX emulation DLL (`cygwin1.dll` vs `msys-2.0.dll`).
+- **Headless GUI Suppression**: Utilizes `-WindowStyle Hidden` and unattended command-line flags to ensure the process remains entirely in the background.
+- **State-Aware Retries**: Specifically for MSYS2, the script supports a multi-pass update logic for pacman runtime stability.
 
 ---
 
@@ -80,6 +82,10 @@ WinPOSIX Update requires the following components to be present on the host:
 | `--update-all` | `switch` | `$false` | Orchestrates updates for both Cygwin and MSYS2. |
 | `--update-cygwin`| `switch` | `$false` | Triggers the Cygwin update engine. |
 | `--update-msys`  | `switch` | `$false` | Triggers the MSYS2 update engine. |
+| `--install-cygwin`| `switch` | `$false` | Installs a fresh Cygwin environment (Errors if already present). |
+| `--install-msys` | `switch` | `$false` | Installs a fresh MSYS2 environment (Errors if already present). |
+| `--path`         | `string` | `$null`  | Explicit target directory for installation. |
+| `--info`         | `switch` | `$false` | Inspects and displays details about existing installations. |
 | `--LogPath`      | `string` | `$null`  | Destination path for the session log file. |
 | `--CygwinMirror` | `string` | `mirrors.kernel.org` | URL of the mirror to be used for Cygwin package downloads. |
 | `--help`         | `switch` | `$false` | Displays the help output and exits. |
@@ -114,8 +120,34 @@ Execute the pacman update sequence in the current console.
 .\os_sys\winposix_update.ps1 --update-msys
 ```
 
+### **Scenario E: Fresh Environment Installation**
+Install Cygwin to a custom directory.
+```powershell
+.\os_sys\winposix_update.ps1 --install-cygwin --path "C:\devel\cygwin"
+```
+
+### **Scenario F: Environment Inspection**
+Inspect existing installations and environment variables.
+```powershell
+.\os_sys\winposix_update.ps1 --info
+```
+
 ### **Scenario D: Scheduled Task Integration**
 Example command for a Windows Scheduled Task (Running as SYSTEM or Admin).
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File "C:\scripts\winposix_update.ps1" --update-all
 ```
+
+---
+
+## 7. Important Technical Notes
+
+### **Administrative Privileges**
+> [!IMPORTANT]
+> **Administrative rights are mandatory.** The script performs system-level modifications, including writing to protected directories (e.g., `C:\cygwin64`) and updating Machine-level environment variables. The script includes a built-in check and will exit with an error if executed without elevated privileges.
+
+### **Automatic Environment Variable Population**
+To ensure consistent environment discovery across the system, WinPOSIX Update manages **Machine-level** environment variables:
+- **Auto-Discovery**: If an existing installation is detected but the corresponding `CYGWIN_HOME` or `MSYS_HOME` variable is missing, the script will automatically populate it.
+- **Installation Persistence**: When performing a fresh installation (`--install-*`), the target path is immediately persisted to the system environment.
+- **PATH Integrity**: In accordance with best practices for environment isolation, the script **never** modifies the global system `PATH`. It only ensures the home directory variables are correctly positioned for external tool resolution.
