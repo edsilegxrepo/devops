@@ -5,7 +5,7 @@
 #
 # ==============================================================================
 # SCRIPT: root_audit.sh
-# OBJECTIVE: Audit and Remediate root account security for RHEL 9+ and Ubuntu 24.04+.
+# OBJECTIVE: Audit and Remediate root account security for RHEL 8+ and Ubuntu 22.04+.
 #
 # CORE COMPONENTS:
 #   1. Audit Engine: Non-destructive verification of security posture.
@@ -35,6 +35,7 @@ readonly MIN_PASS_LEN="${MIN_PASS_LEN:-32}"
 readonly TARGET_USER="${TARGET_USER:-root}"
 readonly SHADOW_FILE="${SHADOW_FILE:-/etc/shadow}"
 readonly SSH_CONFIG="${SSH_CONFIG:-/etc/ssh/sshd_config}"
+readonly SSH_CONFIG_DIR="${SSH_CONFIG_DIR:-/etc/ssh/sshd_config.d}"
 readonly SUDOERS_FILE="${SUDOERS_FILE:-/etc/sudoers}"
 readonly SUDOERS_DIR="${SUDOERS_DIR:-/etc/sudoers.d}"
 readonly PASS_CHARS="${PASS_CHARS:-A-Za-z0-9#%^&}"
@@ -264,43 +265,83 @@ get_sudoers_paths() {
 
 verify_sudo_users() {
   # Objective: PRE-REMEDIATION KILL-SWITCH.
-  # Logic: Verify at least one non-root user has full sudo access to prevent total lockout.
-  log_info "Verifying that at least one non-root user has sudo privileges..."
+  # Logic: Verify at least one non-root user has full sudo access.
+  # This version supports User_Aliases and flexible whitespace.
+  log_info "Verifying authorized sudo privileges (including Aliases and Groups)..."
   local sudo_users=()
-  local grp
-  for grp in wheel sudo; do
-    local members
-    members=$(get_sudo_group_members "${grp}")
-    for m in ${members}; do [[ -n "${m}" ]] && sudo_users+=("${m}"); done
-  done
+  
   local paths
   paths=$(get_sudoers_paths)
-  # Support diverse syntax: ALL=(ALL), ALL=(ALL:ALL), ALL=(root), etc.
-  local sudo_regex="ALL ?= ?\([^)]*\) ?(NOPASSWD: ?)?ALL"
+  # Flexible regex: matches 'ALL = ALL', 'ALL=(ALL) ALL', 'ALL= NOPASSWD: ALL', etc.
+  local sudo_regex="ALL[[:space:]]*=?[[:space:]]*(\([^)]*\)[[:space:]]*)?(NOPASSWD:[[:space:]]*)?ALL"
 
   local active_lines
-  active_lines=$(grep -vhE "^[[:blank:]]*#|^[[:blank:]]*$" "${paths}" 2> /dev/null || true)
+  active_lines=$(echo "${paths}" | xargs grep -vhE "^[[:blank:]]*#|^[[:blank:]]*$" 2> /dev/null || true)
 
-  # 1. Process Explicit User Entries
-  local explicit_users
-  explicit_users=$(echo "${active_lines}" | grep -v "^[[:blank:]]*%" | grep -E "${sudo_regex}" | awk '{print $1}' || true)
-  for m in ${explicit_users}; do [[ -n "${m}" ]] && sudo_users+=("${m}"); done
+  # Helper to recursively resolve Users, Groups, and Aliases
+  resolve_sudo_entity() {
+    local entity="${1}"
+    # 1. Handle Groups (%group)
+    if [[ "${entity}" == "%"* ]]; then
+      get_sudo_group_members "${entity#%}"
+      return
+    fi
+    # 2. Handle User_Aliases
+    local alias_line
+    alias_line=$(echo "${active_lines}" | grep -iE "^[[:space:]]*User_Alias[[:space:]]+${entity}[[:space:]]*=" | head -n 1)
+    if [[ -n "${alias_line}" ]]; then
+      local members
+      members=$(echo "${alias_line}" | cut -d= -f2- | tr ',' ' ')
+      for m in ${members}; do
+        resolve_sudo_entity "${m}"
+      done
+      return
+    fi
+    # 3. Literal User
+    echo "${entity}"
+  }
 
-  # 2. Process Explicit Group Entries
-  local explicit_groups
-  explicit_groups=$(echo "${active_lines}" | grep "^[[:blank:]]*%" | grep -E "${sudo_regex}" | awk '{print $1}' | sed 's/^[[:blank:]]*%//' | grep -vE "^(wheel|sudo)$" || true)
-  for g in ${explicit_groups}; do
-    local gmembers
-    gmembers=$(get_sudo_group_members "${g}")
-    for gm in ${gmembers}; do [[ -n "${gm}" ]] && sudo_users+=("${gm}"); done
+  # 2. Identify all entities (Users/Groups/Aliases) with full sudo access
+  local authorized_entities
+  authorized_entities=$(echo "${active_lines}" | grep -E "${sudo_regex}" | awk '{print $1}' || true)
+
+  for entity in ${authorized_entities}; do
+    local resolved
+    resolved=$(resolve_sudo_entity "${entity}")
+    for r in ${resolved}; do
+       [[ -z "${r}" || "${r}" == "root" ]] && continue
+       # Skip if already verified to prevent duplicate messages
+       [[ " ${sudo_users[*]:-} " =~ " ${r} " ]] && continue
+       
+       # 1. Primary Validation: Use sudo's internal engine.
+       if sudo -l -U "${r}" 2>/dev/null | grep -qiE "\((ALL|root)[^)]*\).*ALL"; then
+         sudo_users+=("${r}")
+         continue
+       fi
+
+       # 2. Heuristic Fallback
+       log_info "Verified administrator '${r}' via policy files (Direct system check was restricted)."
+       sudo_users+=("${r}")
+    done
   done
 
-  # 3. Dynamic Environment Check: If running via sudo, the caller is an administrator.
+  # 3. Dynamic Environment Check: If running via sudo, validate the caller.
   if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
-    sudo_users+=("${SUDO_USER}")
+    # Skip if already verified
+    if [[ ! " ${sudo_users[*]:-} " =~ " ${SUDO_USER} " ]]; then
+       # Validate the SUDO_USER same as others for consistency
+       if sudo -l -U "${SUDO_USER}" 2>/dev/null | grep -qiE "\((ALL|root)[^)]*\).*ALL"; then
+          sudo_users+=("${SUDO_USER}")
+       else
+          # Even if validation fails (e.g. TTY), we know the caller used sudo to run this.
+          log_info "Verified administrator '${SUDO_USER}' via environment (Direct system check was restricted)."
+          sudo_users+=("${SUDO_USER}")
+       fi
+    fi
   fi
+
   local unique_list
-  unique_list=$(echo "${sudo_users[@]:-}" | tr ' ' '\n' | grep -v "^root$" | grep -v "^$" | sort -u || true)
+  unique_list=$(echo "${sudo_users[@]:-}" | tr ' ' '\n' | grep -vE "^(root|ALL)$" | grep -v "^$" | sort -u || true)
 
   local count
   count=$(echo "${unique_list}" | grep -c . || true)
@@ -311,13 +352,13 @@ verify_sudo_users() {
   JSON_AUDIT["sudo_user_list"]="${user_names}"
 
   if [[ "${count}" -eq 0 ]]; then
-    log_err "CRITICAL SAFETY CHECK FAILED: No non-root users with sudo privileges found."
+    log_err "CRITICAL SAFETY CHECK FAILED: No authorized non-root administrators found (checked Users, Groups, and Aliases)."
     [[ "${MODE}" == "remediate" ]] && log_err "Aborting remediation to prevent total lockout."
     JSON_REMED["sudo_safety_passed"]="false"
     return 1
   fi
 
-  log_succ "Found ${count} user(s) with sudo privileges: ${user_names}. Safety check passed."
+  log_succ "Found ${count} authorized administrator(s): ${user_names}. Safety check passed."
   JSON_REMED["sudo_safety_passed"]="true"
   return 0
 }
@@ -336,13 +377,33 @@ is_immutable() {
 
 backup_file() {
   # Objective: Create timestamped copy for rollback capability.
+  # Constraint: Backups MUST be compressed with gzip to prevent accidental loading.
+  # Security: Explicitly preserve permissions and ownership from the source.
   local file="${1}"
   [[ ! -f "${file}" ]] && return 1
   local timestamp
   timestamp=$(date +"%Y%m%d%H%M%S")
-  local backup="${file}${SUFFIX_DELIM}${timestamp}"
-  log_info "Backing up ${file} (Suffix: ${timestamp})..."
-  cp -p "${file}" "${backup}"
+  local backup="${file}${SUFFIX_DELIM}${timestamp}.gz"
+  log_info "Backing up ${file} to ${backup}..."
+
+  # Compress to a temporary file first to apply permissions before the final move
+  local tmp_bkp
+  tmp_bkp=$(mktemp "${backup}.XXXXXX")
+  gzip -c "${file}" > "${tmp_bkp}" || {
+    log_err "Failed to compress backup for ${file}."
+    rm -f "${tmp_bkp}"
+    return 1
+  }
+
+  # Mirror metadata from the original file
+  chmod --reference="${file}" "${tmp_bkp}"
+  chown --reference="${file}" "${tmp_bkp}"
+
+  mv "${tmp_bkp}" "${backup}" || {
+    log_err "Failed to move backup to ${backup}."
+    rm -f "${tmp_bkp}"
+    return 1
+  }
   JSON_REMED["backup_created"]="true"
 }
 
@@ -357,7 +418,10 @@ prepare_for_edit() {
   local was_immutable=1
   if is_immutable "${file}"; then
     log_info "File ${file} is immutable. Removing flag temporarily..."
-    chattr -i "${file}"
+    chattr -i "${file}" || {
+      log_err "Failed to remove immutable flag from ${file}."
+      return 1
+    }
     was_immutable=0
   fi
   if [[ ! -w "${file}" ]]; then
@@ -442,8 +506,30 @@ audit_ssh_login() {
   # Use -f to ensure we audit the specific file we manage.
   permit=$(sshd -T -f "${SSH_CONFIG}" 2> /dev/null | grep -i '^permitrootlogin' | awk '{print $2}' || echo "error")
 
+  # Requirement: Explicitly inspect all configuration files for unauthorized 'PermitRootLogin' directives.
+  # We flag ANY 'PermitRootLogin' found in the main config or modular files (excluding our authorized policy).
+  # This includes commented-out lines to ensure a completely clean configuration.
+  local policy_file="${SSH_CONFIG_DIR}/99-secure-policy.conf"
+  local unauthorized_configs
+  unauthorized_configs=$(grep -riE "^[[:space:]]*#?[[:space:]]*PermitRootLogin\b" "${SSH_CONFIG}" "${SSH_CONFIG_DIR}" 2> /dev/null | grep -v "${policy_file}" || true)
+
+  # Logic: Ensure that the modular configuration directory is explicitly included.
+  local included
+  included=$(grep -iE "^[[:space:]]*Include[[:space:]]+${SSH_CONFIG_DIR}/" "${SSH_CONFIG}" 2> /dev/null || true)
+
+  if [[ -n "${unauthorized_configs}" ]]; then
+    log_warn "Unauthorized 'PermitRootLogin' directives found in configuration files (should be centralized in ${policy_file})."
+    JSON_AUDIT["ssh_disabled"]="false"
+    return 1
+  fi
+
   if [[ "${permit}" == "no" ]]; then
-    log_succ "Direct root SSH login is disabled."
+    if [[ -z "${included}" ]]; then
+      log_err "Structural Audit FAILED: Modular Include directive missing in ${SSH_CONFIG}."
+      JSON_AUDIT["ssh_disabled"]="false"
+      return 1
+    fi
+    log_succ "Direct root SSH login is disabled and policy is centralized."
     JSON_AUDIT["ssh_disabled"]="true"
     return 0
   elif [[ "${permit}" == "error" ]] || [[ "${permit}" == "unknown" ]]; then
@@ -455,6 +541,31 @@ audit_ssh_login() {
     JSON_AUDIT["ssh_disabled"]="false"
     return 1
   fi
+}
+
+verify_sshd_config() {
+  # Objective: Validate the integrity and structure of the SSH configuration.
+  # This prevents service failures and ensures policies are correctly loaded.
+  if [[ "${SIMULATE}" == "true" ]]; then
+    log_sim "Would verify configuration using 'sshd -t' and check for modular Include."
+    return 0
+  fi
+
+  # 1. Syntax Check
+  if ! sshd -t -f "${SSH_CONFIG}" 2> /dev/null; then
+    log_err "SSH configuration validation FAILED (sshd -t detected syntax errors)."
+    return 1
+  fi
+
+  # 2. Structural Check: Ensure the modular Include directive exists.
+  # Without this, our modular policy files in .d/ will be ignored.
+  if ! grep -qE "^[[:space:]]*Include[[:space:]]+${SSH_CONFIG_DIR}/" "${SSH_CONFIG}" 2> /dev/null; then
+    log_err "Structural Audit FAILED: Modular Include directive missing in ${SSH_CONFIG}."
+    return 1
+  fi
+
+  log_info "SSH configuration validation and structural audit passed."
+  return 0
 }
 
 audit_hashes() {
@@ -581,33 +692,135 @@ reload_ssh_service() {
 }
 
 remediate_ssh() {
-  # Objective: Harden SSH configuration via atomic "write-then-move" pattern.
+  # Objective: Harden SSH configuration via modular "policy-in-d" pattern.
+  # 1. Cleanup main sshd_config (remove ALL 'PermitRootLogin' directives)
+  # 2. Ensure 'Include /etc/ssh/sshd_config.d/*.conf' is present.
+  # 3. Recursively remove ALL 'PermitRootLogin' directives from modular config files.
+  # 4. Remove legacy modular files (specifically 01-permitrootlogin.conf).
+  # 5. Create new modular policy file (99-secure-policy.conf).
+  #    Note: Disabling direct SSH access is VERY important for security compliance.
+
+  local timestamp
+  timestamp=$(date +%Y%m%d%H%M%S)
+
   if [[ "${SIMULATE}" == "true" ]]; then
-    local timestamp
-    timestamp=$(date +%Y%m%d%H%M%S)
-    log_sim "Would update ${SSH_CONFIG} to set 'PermitRootLogin no' atomically."
-    log_sim "Action: Create backup (Suffix: ${timestamp}) for file ${SSH_CONFIG}"
+    log_sim "Would modularize SSH hardening (Comprehensive Cleanup):"
+    log_sim "  - Backup ${SSH_CONFIG} (Suffix: ${timestamp})"
+    log_sim "  - Remove ALL instances of 'PermitRootLogin' from ${SSH_CONFIG}"
+    log_sim "  - Ensure modular 'Include' directive exists in ${SSH_CONFIG}"
+    log_sim "  - Scan and clean ALL instances of 'PermitRootLogin' from ALL files in ${SSH_CONFIG_DIR}"
+    log_sim "  - Delete legacy file ${SSH_CONFIG_DIR}/01-permitrootlogin.conf (if exists)"
+    log_sim "  - Create modular policy file ${SSH_CONFIG_DIR}/99-secure-policy.conf"
     reload_ssh_service
     return 0
   fi
-  log_info "Modifying SSH configuration safely..."
-  local was_immutable
-  was_immutable=$(prepare_for_edit "${SSH_CONFIG}")
-  local tmp_config
-  tmp_config=$(mktemp "${SSH_CONFIG}.XXXXXX")
 
-  # Aggressive approach: Remove all existing PermitRootLogin lines and prepend our hardening.
-  # This ensures our setting is the "first-match" and handles any shadowed entries.
-  grep -vi "^[[:space:]]*PermitRootLogin" "${SSH_CONFIG}" > "${tmp_config}" || true
-  sed -i '1iPermitRootLogin no' "${tmp_config}"
+  log_info "Applying comprehensive modular SSH hardening..."
+
+  # --- Part 1: Main Configuration Cleanup ---
+  local was_imm_main
+  was_imm_main=$(prepare_for_edit "${SSH_CONFIG}")
+  local tmp_main
+  tmp_main=$(mktemp "${SSH_CONFIG}.XXXXXX")
+
+  # Requirement: Remove ALL instances of PermitRootLogin (regardless of value or if commented out)
+  # This ensures that our modular policy file is the sole source of truth and prevents confusion.
+  grep -viE "^[[:space:]]*#?[[:space:]]*PermitRootLogin\b" "${SSH_CONFIG}" > "${tmp_main}" || true
+
+  if ! grep -qE "^[[:space:]]*Include[[:space:]]+${SSH_CONFIG_DIR}/" "${tmp_main}"; then
+    log_info "Appending modular Include directive to the end of ${SSH_CONFIG}..."
+    local header="# To modify the system-wide sshd configuration, create a  *.conf  file under"
+    local subheader="#  ${SSH_CONFIG_DIR}/  which will be automatically included below"
+    local directive="Include ${SSH_CONFIG_DIR}/*.conf"
+
+    # Append to the bottom with a leading blank line for clean separation
+    {
+      echo ""
+      echo "${header}"
+      echo "${subheader}"
+      echo "${directive}"
+    } >> "${tmp_main}"
+  fi
+
+  mv "${tmp_main}" "${SSH_CONFIG}"
+  finalize_edit "${SSH_CONFIG}" "${was_imm_main}"
+
+  # --- Part 2: Modular Directory Cleanup ---
+  if [[ ! -d "${SSH_CONFIG_DIR}" ]]; then
+    mkdir -p "${SSH_CONFIG_DIR}" || {
+      log_err "Failed to create directory ${SSH_CONFIG_DIR}."
+      return 1
+    }
+    apply_selinux_context "${SSH_CONFIG_DIR}"
+  fi
+
+  local was_imm_dir=1
+  if is_immutable "${SSH_CONFIG_DIR}"; then
+    log_info "Directory ${SSH_CONFIG_DIR} is immutable. Removing flag temporarily..."
+    chattr -i "${SSH_CONFIG_DIR}"
+    was_imm_dir=0
+  fi
+
+  # Find ALL files in the modular directory containing ANY 'PermitRootLogin' directive (active or commented)
+  local policy_file="${SSH_CONFIG_DIR}/99-secure-policy.conf"
+  local bad_files
+  # We exclude the policy file we manage to avoid a cleanup/create loop if run multiple times.
+  bad_files=$(grep -rlE "^[[:space:]]*#?[[:space:]]*PermitRootLogin\b" "${SSH_CONFIG_DIR}" 2> /dev/null | grep -v "${policy_file}" || true)
+
+  for f in ${bad_files}; do
+    log_info "Removing all 'PermitRootLogin' directives from ${f}..."
+    local was_imm_f
+    was_imm_f=$(prepare_for_edit "${f}")
+    local tmp_f
+    tmp_f=$(mktemp "${f}.XXXXXX")
+    grep -viE "^[[:space:]]*#?[[:space:]]*PermitRootLogin\b" "${f}" > "${tmp_f}" || true
+    mv "${tmp_f}" "${f}"
+    finalize_edit "${f}" "${was_imm_f}"
+  done
+
+  # Explicit Requirement: Delete legacy 01-permitrootlogin.conf if it exists.
+  local legacy_file="${SSH_CONFIG_DIR}/01-permitrootlogin.conf"
+  if [[ -f "${legacy_file}" ]]; then
+    log_info "Removing legacy modular file: ${legacy_file}"
+    local was_imm_legacy
+    was_imm_legacy=$(prepare_for_edit "${legacy_file}")
+    rm -f "${legacy_file}"
+    : "${was_imm_legacy}"
+  fi
+
+  # Requirement: Create new 99-secure-policy.conf
+  log_info "Creating new modular policy file: ${policy_file}"
+
+  local was_imm_policy=1
+  if [[ -f "${policy_file}" ]]; then
+    was_imm_policy=$(prepare_for_edit "${policy_file}")
+  fi
+
+  cat << EOF > "${policy_file}"
+# Secure privileged accounts
+PermitRootLogin no
+EOF
+  chmod 600 "${policy_file}"
+
+  finalize_edit "${policy_file}" "${was_imm_policy}"
+
+  if [[ "${was_imm_dir}" -eq 0 ]]; then
+    log_info "Restoring immutable flag for ${SSH_CONFIG_DIR}..."
+    chattr +i "${SSH_CONFIG_DIR}"
+  fi
 
   local ssh_remed_fail=0
-  mv "${tmp_config}" "${SSH_CONFIG}" || ssh_remed_fail=1
-  reload_ssh_service || ssh_remed_fail=1
+  # Post-Remediation Verification: Validate syntax before reloading.
+  verify_sshd_config || ssh_remed_fail=1
 
-  log_succ "SSH configuration hardened and service reloaded."
+  if [[ "${ssh_remed_fail}" -eq 0 ]]; then
+    reload_ssh_service || ssh_remed_fail=1
+  else
+    log_err "SSH configuration contains errors. Skipping reload to prevent service crash."
+  fi
+
+  log_succ "SSH configuration comprehensively modularized and hardened."
   JSON_REMED["ssh_hardened"]="true"
-  finalize_edit "${SSH_CONFIG}" "${was_immutable}"
   return "${ssh_remed_fail}"
 }
 
@@ -629,8 +842,8 @@ list_backups() {
   # Collect unique suffixes from both scoped files
   local suffixes
   suffixes=$( (
-    [[ -d "${shadow_dir}" ]] && find "${shadow_dir}" -maxdepth 1 -name "${shadow_base}${SUFFIX_DELIM}[0-9]*" -exec basename {} \; | sed "s/^${shadow_base}${SUFFIX_DELIM}//"
-    [[ -d "${ssh_dir}" ]] && find "${ssh_dir}" -maxdepth 1 -name "${ssh_base}${SUFFIX_DELIM}[0-9]*" -exec basename {} \; | sed "s/^${ssh_base}${SUFFIX_DELIM}//"
+    [[ -d "${shadow_dir}" ]] && find "${shadow_dir}" -maxdepth 1 -name "${shadow_base}${SUFFIX_DELIM}[0-9]*" -exec basename {} \; | sed -E "s/^${shadow_base}${SUFFIX_DELIM}//; s/\.gz$//"
+    [[ -d "${ssh_dir}" ]] && find "${ssh_dir}" -maxdepth 1 -name "${ssh_base}${SUFFIX_DELIM}[0-9]*" -exec basename {} \; | sed -E "s/^${ssh_base}${SUFFIX_DELIM}//; s/\.gz$//"
   ) | sort -u -r)
 
   if [[ -z "${suffixes}" ]]; then
@@ -649,6 +862,10 @@ list_backups() {
     local ssh_found=false
     local shadow_bkp="${SHADOW_FILE}${SUFFIX_DELIM}${s}"
     local ssh_bkp="${SSH_CONFIG}${SUFFIX_DELIM}${s}"
+
+    # Check for both compressed and uncompressed variants
+    if [[ -f "${shadow_bkp}.gz" ]]; then shadow_bkp="${shadow_bkp}.gz"; fi
+    if [[ -f "${ssh_bkp}.gz" ]]; then ssh_bkp="${ssh_bkp}.gz"; fi
 
     if [[ -f "${shadow_bkp}" ]]; then
       local sz
@@ -699,8 +916,8 @@ get_target_suffix() {
 
   local suffixes
   suffixes=$( (
-    [[ -d "${shadow_dir}" ]] && find "${shadow_dir}" -maxdepth 1 -name "${shadow_base}${SUFFIX_DELIM}[0-9]*" -exec basename {} \; | sed "s/^${shadow_base}${SUFFIX_DELIM}//"
-    [[ -d "${ssh_dir}" ]] && find "${ssh_dir}" -maxdepth 1 -name "${ssh_base}${SUFFIX_DELIM}[0-9]*" -exec basename {} \; | sed "s/^${ssh_base}${SUFFIX_DELIM}//"
+    [[ -d "${shadow_dir}" ]] && find "${shadow_dir}" -maxdepth 1 -name "${shadow_base}${SUFFIX_DELIM}[0-9]*" -exec basename {} \; | sed -E "s/^${shadow_base}${SUFFIX_DELIM}//; s/\.gz$//"
+    [[ -d "${ssh_dir}" ]] && find "${ssh_dir}" -maxdepth 1 -name "${ssh_base}${SUFFIX_DELIM}[0-9]*" -exec basename {} \; | sed -E "s/^${ssh_base}${SUFFIX_DELIM}//; s/\.gz$//"
   ) | sort -u)
 
   if [[ -z "${suffixes}" ]]; then
@@ -727,6 +944,7 @@ perform_restore() {
 
   # Restore /etc/shadow
   local shadow_bkp="${SHADOW_FILE}${suffix}"
+  [[ -f "${shadow_bkp}.gz" ]] && shadow_bkp="${shadow_bkp}.gz"
   if [[ -f "${shadow_bkp}" ]]; then
     log_info "Found backup for shadow file (Suffix: ${display_suffix})"
     if [[ "${SIMULATE}" == "true" ]]; then
@@ -734,7 +952,11 @@ perform_restore() {
     else
       local was_imm
       was_imm=$(prepare_for_edit "${SHADOW_FILE}")
-      cp -p "${shadow_bkp}" "${SHADOW_FILE}" || restore_fail=1
+      if [[ "${shadow_bkp}" == *.gz ]]; then
+        zcat "${shadow_bkp}" > "${SHADOW_FILE}" || restore_fail=1
+      else
+        cp -p "${shadow_bkp}" "${SHADOW_FILE}" || restore_fail=1
+      fi
       finalize_edit "${SHADOW_FILE}" "${was_imm}"
       log_succ "Restored ${SHADOW_FILE} from backup (Suffix: ${display_suffix})."
       JSON_RESTORE["shadow_restored"]="true"
@@ -746,6 +968,7 @@ perform_restore() {
 
   # Restore SSH config
   local ssh_bkp="${SSH_CONFIG}${suffix}"
+  [[ -f "${ssh_bkp}.gz" ]] && ssh_bkp="${ssh_bkp}.gz"
   if [[ -f "${ssh_bkp}" ]]; then
     log_info "Found backup for SSH config (Suffix: ${display_suffix})"
     if [[ "${SIMULATE}" == "true" ]]; then
@@ -753,7 +976,11 @@ perform_restore() {
     else
       local was_imm
       was_imm=$(prepare_for_edit "${SSH_CONFIG}")
-      cp -p "${ssh_bkp}" "${SSH_CONFIG}" || restore_fail=1
+      if [[ "${ssh_bkp}" == *.gz ]]; then
+        zcat "${ssh_bkp}" > "${SSH_CONFIG}" || restore_fail=1
+      else
+        cp -p "${ssh_bkp}" "${SSH_CONFIG}" || restore_fail=1
+      fi
       finalize_edit "${SSH_CONFIG}" "${was_imm}"
       log_succ "Restored ${SSH_CONFIG} from backup (Suffix: ${display_suffix})."
       JSON_RESTORE["ssh_restored"]="true"

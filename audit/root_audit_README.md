@@ -1,12 +1,12 @@
 # Root Security Audit & Remediation (root_audit.sh)
 
 ## A- Application Overview and Objectives
-The `root_audit.sh` utility is a security orchestration script for RHEL 9+ or Ubuntu 24.04+ environments. Its primary objective is to enforce a rigorous security posture for the `root` account, aligning with modern CIS and STIG compliance requirements.
+The `root_audit.sh` utility is a security orchestration script for RHEL 8.2+ or Ubuntu 22.04+ environments. Its primary objective is to enforce a rigorous security posture for the `root` account, aligning with modern CIS and STIG compliance requirements.
 
 The application serves three primary functions:
-1.  **Security Audit**: A non-intrusive, read-only assessment of the root account's current state (password status, lock state, SSH accessibility, and specific cryptographic hash algorithms like Yescrypt or SHA-512).
-2.  **Automated Remediation**: A deterministic process to harden the root account by enforcing complex 32-character passwords, locking the account (including re-locking after password updates), and disabling direct SSH access.
-3.  **Configuration Restoration**: A reliable rollback mechanism to restore system configurations from timestamped backups created during remediation.
+1.  **Security Audit**: A non-intrusive, read-only assessment of the root account's current state (password status, lock state, SSH accessibility, and specific cryptographic hash algorithms like Yescrypt or SHA-512). It includes a **Structural Audit** to ensure security policies are correctly loaded.
+2.  **Automated Remediation**: A deterministic process to harden the root account by enforcing complex 32-character passwords, locking the account (including re-locking after password updates), and **disabling direct SSH access** by enforcing a **Modular SSH Security Policy**.
+3.  **Configuration Restoration**: A reliable rollback mechanism to restore system configurations from timestamped, compressed backups created during remediation.
 
 ## B- Architecture and Design Choices
 ### B1. Modular Functional Design
@@ -18,16 +18,25 @@ The script is architected as a collection of discrete, idempotent functions. Thi
 
 ### B2. Operational Safety & Atomicity
 Security tooling that modifies core system files like `/etc/shadow` or `/etc/sshd_config` must be fail-safe.
--   **Atomic Edits**: Modifications to configuration files use a `mktemp` -> `sed` -> `mv` pattern. The `mv` command ensures an atomic replacement, preventing system files from being left in a corrupted state if the script is interrupted.
--   **Automatic Backups**: Every file modification is preceded by a timestamped backup (`file<DELIM>YYYYMMDDhhmmss`) with preserved attributes (`cp -p`).
--   **Immutable Attribute Handling**: The script detects and handles the Linux `immutable` (`i`) attribute using `lsattr` and `chattr`, ensuring it can operate on systems hardened with filesystem-level locks.
--   **SELinux Context Preservation**: The utility is SELinux-aware. It automatically executes `restorecon` after file modifications on RHEL-family systems to ensure that core configuration files retain their mandatory security labels. This logic is a safe no-op on AppArmor-based systems (Ubuntu).
+-   **Atomic Edits**: Modifications to configuration files use a `mktemp` -> `grep/sed` -> `mv` pattern. The `mv` command ensures an atomic replacement, preventing system files from being left in a corrupted state if the script is interrupted.
+-   **Compressed Backups**: Every file modification is preceded by a timestamped, **gzip-compressed** backup (`file<DELIM>YYYYMMDDhhmmss.gz`). The utility uses `--reference` flags with `chmod` and `chown` to ensure that backups mirror the exact security metadata (permissions and ownership) of their sensitive source files (e.g., `/etc/shadow`).
+-   **Immutable Attribute Handling**: The script detects and handles the Linux `immutable` (`i`) attribute for both files and configuration directories (`/etc/ssh/sshd_config.d/`), ensuring it can operate on systems hardened with filesystem-level locks.
+-   **SELinux Context Preservation**: The utility is SELinux-aware. It automatically executes `restorecon` after file modifications and directory creation (e.g., modular SSH paths) to ensure that core configuration files retain their mandatory security labels.
+-   **Configuration Validation**: Before any service reload (e.g., `sshd`), the script executes a **Pre-Flight Validation** (`sshd -t`). If a syntax error or structural inconsistency is detected, the reload is aborted to prevent service failure.
 
 ### B3. Non-Interactive Orchestration
 Designed for execution via automation platforms (Ansible, Puppet, Salt) or service accounts, the script is fully non-interactive. It relies on deterministic CLI arguments and returns standard exit codes (0 for success/pass, non-zero for failure).
 
-### B4. Sudo Safety "Kill-Switch"
-A critical architectural safety feature is the `verify_sudo_users` function. It prevents administrative "brick" scenarios by aborting any destructive remediation (like locking root) if it cannot confirm the existence of at least one other non-root user with `sudo` privileges. To ensure total policy visibility, the script recursively scans the main `/etc/sudoers` file and all sub-policies within `/etc/sudoers.d/`.
+#### 4. Sudo Safety Kill-Switch (Multi-Tiered Defense)
+To prevent administrative lockout, the utility performs a multi-stage verification:
+1.  **Tier 1: OS-Native Validation**: Uses the system's own authorization engine via a privilege check. This is the primary source of truth.
+2.  **Tier 2: Recursive Discovery Engine**:
+    *   **Alias Resolution**: The engine recursively resolves `User_Alias` definitions. If it finds an alias in a rule, it looks up the alias definition and follows the chain until it identifies the literal users or groups.
+    *   **NSS-Aware Group Discovery**: It queries system groups (`wheel`, `sudo`) using `getent`. This ensures compatibility with centralized identity providers like LDAP, SSSD, and Active Directory (AD).
+    *   **Policy Traversal**: It performs a recursive scan of `/etc/sudoers` and all sub-policies in `/etc/sudoers.d/`, ensuring it sees the final effective policy regardless of file structure.
+    *   **Dialect Parsing**: Uses a flexible regex engine designed to handle diverse `sudoers` dialects, including varied whitespace, TAB characters, and optional syntax like `NOPASSWD:`.
+3.  **Tier 3: Heuristic Fallback**: If Tier 1 is restricted by environment security (e.g. strict `requiretty` or SELinux), the script trusts the findings of Tier 2, ensuring safety even in highly hardened environments.
+If no authorized administrator is verifiably found across these tiers, remediation is hard-aborted.
 
 ## C- Data Flow and Control Logic
 
@@ -49,10 +58,12 @@ graph TD
     subgraph Audit Sequence
         A1[Check Shadow for Password]
         A2[Check Shadow for Lock State]
-        A3[Check effective SSHD Config]
+        A3[Audit Effective SSH Config: sshd -T]
+        A3b[Structural Audit: Include Verification]
+        A3c[Aggressive Audit: Recursive Grep]
         A4[Validate Hash Cryptography]
         A5[Sudo Safety Check]
-        A1 --> A2 --> A3 --> A4 --> A5
+        A1 --> A2 --> A3 --> A3b --> A3c --> A4 --> A5
     end
     
     AuditSeq --> AuditRes{Audit Passed?}
@@ -78,13 +89,16 @@ graph TD
     SimCheck -- No --> RemFlow[Remediation Flow]
     
     subgraph Remediation Flow
-        R1[Handle Immutable Flags]
-        R2[Create Safety Backups]
+        R1[Handle Immutable Flags: Files & Dirs]
+        R2[Create Compressed Safety Backups]
         R3[Update Shadow: Atomic Password/Lock]
-        R4[Update SSHD: Atomic PermitRootLogin no]
+        R4[Clean SSHD: Remove all PermitRootLogin]
+        R4b[Modularize: Include & 99-secure-policy.conf]
+        R4c[Secure Policy: chmod 600]
+        R4d[Validate: sshd -t Verification]
         R5[Restore Attributes & Reload Services]
         
-        R1 --> R2 --> R3 --> R4 --> R5
+        R1 --> R2 --> R3 --> R4 --> R4b --> R4c --> R4d --> R5
     end
     
     RemFlow --> R1
@@ -111,8 +125,9 @@ The script utilizes standard Linux core utilities available on all RHEL/Ubuntu m
 -   **Shell**: `bash` (4.0+)
 -   **Core Utils**: `grep`, `sed`, `awk`, `cut`, `tr`, `find`, `mktemp`, `cp`, `mv`, `date`.
 -   **User Management**: `passwd`, `chpasswd`, `getent`.
--   **System Management**: `systemctl` (for SSHD reload), `sudo`, `script` (for TTY allocation).
--   **Security**: `lsattr`, `chattr` (for immutable flag handling), `sshd` (for `-T` config auditing).
+-   **System Management**: `systemctl` (for SSHD reload), `sudo`.
+-   **Security**: `lsattr`, `chattr` (for immutable flag handling), `sshd` (for `-T` config auditing and `-t` validation).
+-   **Compression**: `gzip`, `zcat` (for compressed backups and restoration).
 
 ## F- Command Line Arguments
 
@@ -217,20 +232,22 @@ script -q -c "sudo ./root_audit_test.sh" /dev/null
 ```
 *Note: The test suite creates a temporary workspace in `$TMPDIR/unitests/<uuid>` and performs an automatic cleanup upon completion.*
 
-### H2. Test Coverage Scenarios
-The suite covers **72 distinct validation points**, categorized as follows:
+### H2. Test Matrix: Covers 92 granular security scenarios.
+The suite covers **92 distinct validation points**, categorized as follows:
 
 | Category | Scenarios Covered |
 | :--- | :--- |
 | **Password Policy** | Exhaustive validation of length and complexity (uppercase, lowercase, digits, special characters) including rejection paths. |
 | **Attribute Handling** | Detection, temporary removal, and restoration of the `immutable` (i) flag during file operations. |
 | **File Safety** | Verification of timestamped backups (using `SUFFIX_DELIM`) and atomic state transitions. |
-| **Audit Engine** | Logic validation for detecting unlocked accounts, weak cryptographic hashes (MD5), and insecure SSH configurations. |
-| **SELinux Awareness** | Automatically restores security contexts using `restorecon` if SELinux is active. |
+| **Audit Engine** | Logic validation for detecting unlocked accounts, weak cryptographic hashes (MD5), and insecure SSH configurations. Includes **Structural Verification** (Include directive) and **Aggressive Cleanup Audits** (detecting shadowed `PermitRootLogin` entries). |
+| **Modular SSH** | Validation of policy centralization in `99-secure-policy.conf`, enforcement of `600` permissions, and recursive removal of unauthorized `PermitRootLogin` directives (including commented-out lines). |
+| **Config Validation** | Integration of `sshd -t` pre-flight checks to prevent reloading corrupted configurations. |
+| **SELinux Awareness** | Automatically restores security contexts using `restorecon` if SELinux is active, including for new modular directories. |
 | **Sudo Safety Kill-Switch** | Multi-path discovery simulation for administrators (groups and explicit entries) to prevent administrative lockout. |
 | **CLI Orchestration** | Comprehensive exit code validation for all modes, no-argument guards, and environment variable (`ROOT_PASSWORD`) injection. |
 | **JSON Mode** | Verification of schema integrity and machine-readable output for CI/CD integration. |
-| **Restore Logic** | Validation of rollback integrity, file content restoration, and missing backup handling. |
+| **Restore Logic** | Validation of rollback integrity for both uncompressed and **gzip-compressed** backups, ensuring metadata preservation. |
 | **Backup Discovery** | Automated identification of latest/oldest backups and tabular reporting of backup scope (shadow vs sshd_config). |
 | **Privilege Logic** | Strict enforcement of `EUID=0` requirements for both successful execution and graceful failure. |
 
@@ -357,3 +374,30 @@ sudo ./root_audit.sh --mode remediate --generate --simulate --json
   }
 }
 ```
+
+## L- Modular SSH Security Architecture
+
+The `root_audit.sh` utility implements a **Modular Configuration Pattern** for SSH, moving away from monolithic file editing to a centralized drop-in policy approach.
+
+### L1. System-Wide Sanitization
+During remediation, the script recursively scans `/etc/ssh/sshd_config` and all modular files in `/etc/ssh/sshd_config.d/`. It aggressively removes **all** instances of the `PermitRootLogin` directive—including those that are commented out—to ensure no rogue or legacy settings can shadow the primary security policy.
+
+### L2. Centralized Policy Management
+The authoritative security policy is centralized in a dedicated file:
+- **Path**: `/etc/ssh/sshd_config.d/99-secure-policy.conf`
+- **Content**: `PermitRootLogin no`
+- **Permissions**: `600` (`-rw-------`) to ensure restricted access.
+
+### L3. Mandatory Structural Auditing
+To ensure the centralized policy is actually enforced by the SSH daemon, the script performs a mandatory **Structural Audit**:
+- **Include Directive**: The script verifies that `Include /etc/ssh/sshd_config.d/*.conf` is present in the main `sshd_config`. 
+- **Hard Failure**: If the `Include` directive is missing in either `audit` or `remediate` mode, the script returns a **Structural Audit FAILED** error. This prevents "silent failures" where a policy file exists but is not being loaded.
+
+### L4. Pre-Flight Configuration Validation
+Before reloading the SSH service to apply changes, the utility executes `sshd -t` to validate the entire configuration hierarchy. If any syntax errors or structural issues are detected, the reload is aborted to prevent a service crash or administrative lockout.
+
+## M- Troubleshooting Sudo Safety Warnings
+If you see the message `Verified administrator 'user' via policy files (Direct system check was restricted)`, it indicates the following:
+*   **The Cause**: Your system has a security policy (like `Defaults requiretty`) that prevents the script from performing a "live" privilege lookup because it is running in a non-interactive environment (e.g., automation, background process).
+*   **The Resilience**: The script detected this restriction and automatically switched to its **Discovery Engine** to manually verify the `/etc/sudoers` policy files.
+*   **The Result**: The verification is successful and safe. The message is purely informative to let you know that the "Heuristic Fallback" was utilized to guarantee administrative continuity.*   **The Recommendation**: To enable the most precise (Tier 1) validation and avoid this warning, execute the script within a pseudo-TTY. For remote execution, use the `ssh -t` flag; for automated local execution, use a terminal allocator like `script -q -c "sudo ./root_audit.sh ..." /dev/null`.

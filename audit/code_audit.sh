@@ -1,7 +1,7 @@
 #!/bin/bash
 # -----------------------------------------------------------------------------
 # Code Audit Pipeline (code_audit.sh)
-# v1.1.1xg  2026/04/17  XDG
+# v1.1.2xg  2026/05/01  XDG
 #
 # -----------------------------------------------------------------------------
 # OBJECTIVE:
@@ -137,13 +137,11 @@ setup_environment() {
   CONF_RADON_FLAGS="-a -nc"  # Flags for complexity analysis.
 
   # 4. LANGUAGE-SPECIFIC: GOLANG
-  CONF_GOLANG_TARGET="."                              # Target pattern for Go tools (normalized for Windows portability).
+  CONF_GOLANG_TARGET_CDN="."                          # Target pattern for Go tools - current directory root only
+  CONF_GOLANG_TARGET_CDR="./..."                      # Target pattern for Go tools - current directory and all of its subdirectories, recursively
   GO_OPTS=(-ldflags="-s -w" -trimpath -buildmode=pie) # Hardened build flags for Go installations.
-  CONF_GOFUMPT_FLAGS="-extra"                         # Extensions for strict Go formatting.
-  CONF_GOLANGCI_FLAGS="--no-config"                   # Forced clean state for the meta-linter.
-  CONF_NILAWAY_FLAGS="./..."                          # Target pattern for NilAway panic detection.
-  CONF_NILNESS_FLAGS="./..."                          # Target pattern for Nilness precise analysis.
-  CONF_GOVULNCHECK_TARGET="./..."                     # Target pattern for dependency vulnerability checks.
+  CONF_GOFUMPT_FLAGS="-l"                             # Go formatter gofumpt - List files to reformat
+  CONF_GOLANGCI_FLAGS="--no-config"                   # Go Aggregate Linter golangci-lint - Forced clean state for the meta-linter.
 
   # 5. LANGUAGE-SPECIFIC: NODE.JS
   CONF_NODEJS_TARGET="."                       # Target pattern for Node.js tools.
@@ -775,33 +773,36 @@ run_phase_1_quality() {
 
   if [ "$PROCESS_GOLANG" = true ]; then
     echo "[Golang]"
+	# gofumpt: Stricter, more opinionated Go formatter.
+	# -l: list affected files, -w: write changes, -extra: enable extra rules (group_params,clothe_returns,...)
+	if [ "$PROCESS_EXTENDED" = true ]; then
+	  CONF_GOFUMPT_FLAGS="${CONF_GOFUMPT_FLAGS} -extra"
+	fi
     if [ "$PROCESS_FIX" = true ]; then
-      # gofumpt: Stricter, more opinionated Go formatter.
-      # We use -l to list affected files and -w to write changes.
-      run_audit_tool "Gofumpt (Fix)" gofumpt -l -w "$CONF_GOLANG_TARGET"
+	  # Commit reformatting to source files
+      run_audit_tool "Gofumpt (Fix)" gofumpt ${CONF_GOFUMPT_FLAGS} -w $CONF_GOLANG_TARGET_CDN
     else
       # Default mode: List non-compliant files without modifying the source.
-      run_audit_tool "Gofumpt (Check Only)" gofumpt -l "$CONF_GOLANG_TARGET"
+      run_audit_tool "Gofumpt (Check Only)" gofumpt ${CONF_GOFUMPT_FLAGS} $CONF_GOLANG_TARGET_CDN
     fi
 
     # golangci-lint: High-performance orchestrator for Go linters.
     # Aggregates results from dozens of internal and community-standard Go linters.
     local EXT_LINTERS=""
-    local FIX_FLAG=""
-    [ "$PROCESS_FIX" = true ] && FIX_FLAG="--fix"
+    local GOLANGCI_FIX_FLAG=""
+    [ "$PROCESS_FIX" = true ] && GOLANGCI_FIX_FLAG="--fix"
     if [ "$PROCESS_EXTENDED" = true ]; then
       # Extended mode: adds linters for complexity, magic numbers, and stylistic edge cases.
       EXT_LINTERS="--enable=gocritic,goconst,mnd,interfacebloat,gocyclo,copyloopvar,bodyclose,nilerr,nilnil"
 
       # go fix: Modernizes legacy Go code patterns.
       if [ "$PROCESS_FIX" = true ]; then
-        run_audit_tool "Go Fix (Fix Mode)" go fix ./...
+        run_audit_tool "Go Fix (Fix Mode)" go fix $CONF_GOLANG_TARGET_CDR
       else
-        run_audit_tool "Go Fix (Check Only)" go fix -diff ./...
+        run_audit_tool "Go Fix (Check Only)" go fix -diff $CONF_GOLANG_TARGET_CDR
       fi
     fi
-
-    run_audit_tool "GolangCI Meta-Linter" golangci-lint run "$EXT_LINTERS" "$FIX_FLAG" "$CONF_GOLANGCI_FLAGS" "$CONF_GOLANG_TARGET"
+    run_audit_tool "GolangCI Meta-Linter" golangci-lint run "$EXT_LINTERS" "$CONF_GOLANGCI_FLAGS" "$GOLANGCI_FIX_FLAG" $CONF_GOLANG_TARGET_CDR
   fi
 
   if [ "$PROCESS_NODEJS" = true ]; then
@@ -908,18 +909,18 @@ run_phase_2_logic() {
 
   if [ "$PROCESS_GOLANG" = true ]; then
     # gosec: Specialized security scanner catching Go-specific vulnerabilities and unsafe patterns.
-    run_audit_tool "Gosec Security Scan" gosec "$CONF_GOLANG_TARGET"
+    run_audit_tool "Gosec Security Scan" gosec $CONF_GOLANG_TARGET_CDR
 
     if [ "$PROCESS_INSPECTION" = true ]; then
       # NilAway: Deep static analysis for detecting potential nil-pointer dereferences (panics).
       # Requires a valid Go environment and target pattern.
-      run_audit_tool "NilAway Panic Detection" nilaway $CONF_NILAWAY_FLAGS
+      run_audit_tool "NilAway Panic Detection" nilaway $CONF_GOLANG_TARGET_CDR
     fi
 
     if [ "$PROCESS_EXTENDED" = true ]; then
       # Nilness: Precise analysis for detecting potential nil comparisons and pointer misuse.
       # Executed in Phase 2 alongside deep safety tools.
-      run_audit_tool "Nilness Logic Scan" nilness $CONF_NILNESS_FLAGS
+      run_audit_tool "Nilness Logic Scan" nilness $CONF_GOLANG_TARGET_CDR
     fi
   fi
 }
@@ -1029,7 +1030,7 @@ run_phase_5_supply_chain() {
 
   if [ "$PROCESS_GOLANG" = true ]; then
     # govulncheck: Official Google tool for scanning the Go vulnerability database.
-    run_audit_tool "GoVulnCheck" govulncheck "$CONF_GOLANG_TARGET"
+    run_audit_tool "GoVulnCheck" govulncheck $CONF_GOLANG_TARGET_CDR
   fi
 
   if [ "$PROCESS_EXTRA_SCAN" = true ]; then

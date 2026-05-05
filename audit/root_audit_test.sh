@@ -11,7 +11,7 @@
 #   1. Isolated Workspace Manager: Creates ephemeral, sandboxed environments.
 #   2. Mock Engine: Overrides system utilities (getent, chpasswd, sshd, etc.).
 #   3. Assertion Library: Standardized true/false/exit-code validation.
-#   4. Test Matrix: Covers 36 high-level security scenarios.
+#   4. Test Matrix: Covers 96 granular security scenarios.
 #
 # FUNCTIONALITY:
 #   - Validates password complexity policies.
@@ -49,7 +49,13 @@ WORKSPACE="${TMPDIR}/unitests/$(uuidgen)"
 mkdir -p "${WORKSPACE}/sudoers.d"
 
 # Cleanup on exit: Automatic removal of the sandboxed workspace.
-trap '[[ "${DEBUG:-false}" == "true" ]] || rm -rf "${WORKSPACE}"' EXIT
+trap '[[ "${DEBUG:-false}" == "true" ]] || rm -rf "${WORKSPACE:?}"' EXIT
+
+MOCK_SUDOERS_DIR="${WORKSPACE}/sudoers.d"
+mkdir -p "${MOCK_SUDOERS_DIR}"
+
+MOCK_SSH_CONFIG_DIR="${WORKSPACE}/ssh_config.d"
+mkdir -p "${MOCK_SSH_CONFIG_DIR}"
 
 SCRIPT_PATH="$(dirname "$0")/root_audit.sh"
 
@@ -67,6 +73,10 @@ MOCK_SSH_CONFIG="${WORKSPACE}/ssh_config"
 MOCK_SHADOW="${WORKSPACE}/shadow"
 MOCK_SUDOERS="${WORKSPACE}/sudoers"
 touch "${MOCK_SSH_CONFIG}" "${MOCK_SHADOW}" "${MOCK_SUDOERS}"
+# Default authorized administrator for success scenarios
+echo "%wheel ALL=(ALL) ALL" > "${MOCK_SUDOERS}"
+MOCK_SUDO_GRP="true"
+MOCK_SSHD_PERMIT="no"
 
 # --- Assertion Library ---
 
@@ -138,16 +148,32 @@ systemctl() { return 0; }
 date() { echo "20260423140000"; }
 chattr() { echo "MOCK chattr" >&2; }
 sshd() {
-  # Mock sshd -T output.
+  # Mock sshd -T output and -t validation.
+  if [[ "${1}" == "-t" ]]; then
+    return "${MOCK_SSHD_T_FAIL:-0}"
+  fi
   # Tests can override this by redefining the function locally.
   echo "permitrootlogin ${MOCK_SSHD_PERMIT:-no}"
 }
 sudo() {
   if [[ "${1}" == "-l" ]]; then
+    # If -U is provided, we simulate looking up a specific user's privileges
+    if [[ "${2}" == "-U" ]]; then
+       # For testing, we assume 'testuser', 'builder', 'adminuser', 'explicituser' are valid admins
+       case "${3}" in
+         testuser|builder|adminuser|explicituser|envuser|indenteduser)
+           echo "(ALL : ALL) ALL"
+           return 0
+           ;;
+         *)
+           echo "User ${3} is not allowed to run sudo on this host."
+           return 1
+           ;;
+       esac
+    fi
     echo "${MOCK_SUDO_L_OUT:-(ALL : ALL) ALL}"
     return "${MOCK_SUDO_L_FAIL:-0}"
   fi
-  # Pass-through for other sudo calls is not needed as script runs as root.
   return 0
 }
 lsattr() {
@@ -164,6 +190,15 @@ cat << EOF > "${WORKSPACE}/bin/restorecon"
 #!/bin/bash
 echo "MOCK restorecon \$*" >&2
 EOF
+script() {
+  if [[ "${MOCK_SCRIPT_FAIL:-}" == "true" ]]; then return 1; fi
+  # If it's a sudo -l call, we echo the mock output
+  if [[ "$*" == *"-l -U"* ]]; then
+     echo "${MOCK_SUDO_L_OUT:-(ALL : ALL) ALL}"
+  fi
+  return 0
+}
+export -f script
 chmod +x "${WORKSPACE}/bin/selinuxenabled" "${WORKSPACE}/bin/restorecon"
 export PATH="${WORKSPACE}/bin:${PATH}"
 
@@ -192,12 +227,14 @@ getent() {
 
 # Override environment for the script: Points the target utility to our mock sandbox.
 export SSH_CONFIG="${MOCK_SSH_CONFIG}"
+export SSH_CONFIG_DIR="${MOCK_SSH_CONFIG_DIR}"
 export SHADOW_FILE="${MOCK_SHADOW}"
 export SUDOERS_FILE="${MOCK_SUDOERS}"
 export SUDOERS_DIR="${WORKSPACE}/sudoers.d"
 
 # Source the target script: Loads functions into the current shell for testing.
 source "${SCRIPT_PATH}"
+export -f sudo getent systemctl sshd check_root get_sudoers_paths get_sudo_group_members log_info log_warn log_err log_succ log_sim print_divider script
 set +e
 
 # Security Bypass: Redefine check_root to allow tests to run as non-root users.
@@ -223,9 +260,10 @@ assert_false "validate_password 'NoSpecialChars1234567890123456789'" "Policy: Re
 echo -e "\nTesting Filesystem Safety:"
 MOCK_IMMUTABLE="true"
 assert_true "is_immutable '${MOCK_SHADOW}'" "Safety: Detects immutable flag"
-WAS_IMM=$(prepare_for_edit "${MOCK_SSH_CONFIG}" 2> /dev/null)
-assert_true "[[ ${WAS_IMM} -eq 0 ]]" "Safety: prepare_for_edit returns expected state"
-assert_true "[[ -f ${MOCK_SSH_CONFIG}.20260423140000 ]]" "Safety: Backup file created"
+MOCK_TIMESTAMP="20260423140000"
+prepare_for_edit "${MOCK_SSH_CONFIG}" > /dev/null
+assert_true "[[ -f ${MOCK_SSH_CONFIG}.${MOCK_TIMESTAMP}.gz ]]" "Safety: Backup file created (compressed)"
+MOCK_IMMUTABLE="false"
 
 # 3. Sudo Safety Check: Lockout prevention validation.
 echo -e "\nTesting Sudo Access Verification:"
@@ -237,6 +275,9 @@ assert_true "verify_sudo_users" "Safety: Detects admin via sudo group"
 MOCK_SUDO_GRP="false"
 echo "explicituser ALL=(root) ALL" > "${MOCK_SUDOERS}"
 assert_true "verify_sudo_users" "Safety: Detects admin via custom ALL=(root) entry"
+echo "adminuser ALL=(root) ALL" > "${MOCK_SUDOERS_DIR}/custom"
+assert_true "verify_sudo_users" "Safety: Detects admin via custom entry in sudoers.d (Multi-file paths)"
+rm -f "${MOCK_SUDOERS_DIR}/custom"
 echo "	indenteduser ALL=(ALL) ALL" > "${MOCK_SUDOERS}"
 assert_true "verify_sudo_users" "Safety: Detects admin via TAB-indented entry"
 echo " %primarygrp ALL=(ALL) ALL" > "${MOCK_SUDOERS}"
@@ -248,6 +289,9 @@ export SUDO_USER="calluser"
 assert_true "verify_sudo_users" "Safety: Detects admin via SUDO_USER environment variable"
 unset SUDO_USER
 assert_false "verify_sudo_users" "Safety: Fails safely when no administrators found"
+# Restore authorized state for subsequent tests
+echo "%wheel ALL=(ALL) ALL" > "${MOCK_SUDOERS}"
+MOCK_SUDO_GRP="true"
 
 # 4. Audit Detection Logic: Security state reporting validation.
 echo -e "\nTesting Audit Detection Logic:"
@@ -277,28 +321,49 @@ assert_true "audit_unlocked" "Audit: Detects locked account"
 MOCK_SHADOW_FIELD="\$1\$weak"
 echo "root:${MOCK_SHADOW_FIELD}:19000:0:99999:7:::" > "${MOCK_SHADOW}"
 assert_false "audit_hashes" "Audit: Correctly flags weak MD5 hash"
-sshd() { echo "permitrootlogin yes"; }
+
+# Audit Detection Logic: Positive/Negative confirmation.
+echo -e "\nTesting Audit Detection Logic:"
+MOCK_SSHD_PERMIT="no"
+# Initial state must have Include to pass structural audit
+echo "Include ${MOCK_SSH_CONFIG_DIR}/" > "${MOCK_SSH_CONFIG}"
+assert_exit "audit_ssh_login" 0 "Audit: Confirms disabled root SSH access (with Include)"
+
+# Audit: Flags enabled root SSH access
+MOCK_SSHD_PERMIT="yes"
 assert_false "audit_ssh_login" "Audit: Flags enabled root SSH access"
-sshd() { echo "permitrootlogin no"; }
-assert_true "audit_ssh_login" "Audit: Confirms disabled root SSH access"
+
+# Audit: Confirms disabled root SSH access (with Include)
+MOCK_SSHD_PERMIT="no"
+echo "Include ${MOCK_SSH_CONFIG_DIR}/" > "${MOCK_SSH_CONFIG}"
+assert_exit "audit_ssh_login" 0 "Audit: Confirms disabled root SSH access"
+
+# Audit: Fails gracefully on sshd error
 sshd() { return 1; }
 assert_false "audit_ssh_login" "Audit: Fails gracefully on sshd error"
+# Restore sshd mock
+sshd() {
+  if [[ "${1}" == "-t" ]]; then return "${MOCK_SSHD_T_FAIL:-0}"; fi
+  echo "permitrootlogin ${MOCK_SSHD_PERMIT:-no}"
+}
 
 # Finding Count Validation: Ensure final recap reports the correct number of findings.
 MOCK_SHADOW_FIELD="!\$1\$weak" # Hash is weak (+1), SSH enabled (+1), Locked (0) -> Total 2
 echo "root:${MOCK_SHADOW_FIELD}:19000:0:99999:7:::" > "${MOCK_SHADOW}"
-sshd() { echo "permitrootlogin yes"; }
+MOCK_SSHD_PERMIT="yes"
+# No Include ensures SSH Audit failure
+echo "no include" > "${MOCK_SSH_CONFIG}"
 MOCK_WHEEL="true"
 main --mode audit > "${WORKSPACE}/audit_count_out" 2>&1 || true
 assert_true "grep -qi 'Audit FAILED (2 findings)' ${WORKSPACE}/audit_count_out" "Audit: Final recap reports correct number of findings (2)"
 
-# 4. Operational Flows: Selective remediation triggers.
+# 5. CLI & Operational Flows: Aggregate results.
 echo -e "\nTesting CLI & Operational Flows:"
 MOCK_EUID=0
-MOCK_SHADOW_FIELD="!\$6\$stronghash"
-echo "root:${MOCK_SHADOW_FIELD}:19000:0:99999:7:::" > "${MOCK_SHADOW}"
-sshd() { echo "permitrootlogin no"; }
 MOCK_WHEEL="true"
+MOCK_SSHD_PERMIT="no"
+echo "Include ${MOCK_SSH_CONFIG_DIR}/" > "${MOCK_SSH_CONFIG}"
+echo "root:!${TARGET_HASH:-\$6\$strong}:19000:0:99999:7:::" > "${MOCK_SHADOW}"
 assert_exit "main --mode audit" 0 "CLI: Audit pass (Clean system)"
 assert_exit "main" 1 "CLI: Fails with no arguments (Usage enforced)"
 assert_exit "main --mode audit --generate" 1 "CLI: Blocks restricted flags in audit mode"
@@ -306,7 +371,7 @@ assert_exit "main --mode audit --generate" 1 "CLI: Blocks restricted flags in au
 # Selective Remediation: Only requires password if broken.
 MOCK_SHADOW_FIELD="!\$6\$stronghash"
 echo "root:${MOCK_SHADOW_FIELD}:19000:0:99999:7:::" > "${MOCK_SHADOW}"
-sshd() { echo "permitrootlogin no"; }
+MOCK_SSHD_PERMIT="no"
 MOCK_WHEEL="true"
 assert_exit "main --mode remediate" 0 "Selective: Proceeds without password if current is strong"
 
@@ -345,41 +410,41 @@ MOCK_IMMUTABLE="true"
 JSON_OUT_IMM=$(main --mode audit --json 2> /dev/null || true)
 assert_true "echo '${JSON_OUT_IMM}' | grep -qi '\"immutable\": true'" "JSON: Correctly reports immutable true"
 
-# 6. Restore Mode Logic: Rollback validation.
-echo -e "\nTesting Restore Mode Discovery:"
+# 6. Restore Mode & Backup Discovery
+echo -e "\nTesting Restore Mode Discovery (Gzip):"
 # Ensure clean state for discovery
-rm -f "${MOCK_SHADOW}."* "${MOCK_SSH_CONFIG}."*
+rm -f "${MOCK_SHADOW:?}"* "${MOCK_SSH_CONFIG:?}"*
 
-# Setup multiple backups
-# suffix 1: oldest
+# Setup multiple backups (mixed legacy and compressed)
+# suffix 1: oldest (Gzip)
 MOCK_TIMESTAMP="20260420000000"
-echo "old-content" > "${MOCK_SHADOW}.${MOCK_TIMESTAMP}"
-echo "old-ssh" > "${MOCK_SSH_CONFIG}.${MOCK_TIMESTAMP}"
+echo "old-content" | gzip > "${MOCK_SHADOW}.${MOCK_TIMESTAMP}.gz"
+echo "old-ssh" | gzip > "${MOCK_SSH_CONFIG}.${MOCK_TIMESTAMP}.gz"
 
-# suffix 2: middle (shadow only)
+# suffix 2: middle (shadow only, legacy uncompressed)
 MOCK_TIMESTAMP="20260421000000"
 echo "mid-content" > "${MOCK_SHADOW}.${MOCK_TIMESTAMP}"
 
-# suffix 3: latest
+# suffix 3: latest (Gzip)
 MOCK_TIMESTAMP="20260422000000"
-echo "new-content" > "${MOCK_SHADOW}.${MOCK_TIMESTAMP}"
-echo "new-ssh" > "${MOCK_SSH_CONFIG}.${MOCK_TIMESTAMP}"
+echo "new-content" | gzip > "${MOCK_SHADOW}.${MOCK_TIMESTAMP}.gz"
+echo "new-ssh" | gzip > "${MOCK_SSH_CONFIG}.${MOCK_TIMESTAMP}.gz"
 
 # Verification: List Backups
 # Use grep -E to be flexible with whitespace
 assert_true "main --mode restore --list-backups | grep -E '20260422000000.*shadow sshd_config'" "Discovery: Correctly reports combined scope and latest suffix"
 assert_true "main --mode restore --list-backups | grep -E '20260420000000.*shadow sshd_config'" "Discovery: Correctly reports oldest suffix"
-assert_true "main --mode restore --list-backups | grep -E '20260421000000.*shadow[[:space:]]*\|'" "Discovery: Correctly reports partial scope"
+assert_true "main --mode restore --list-backups | grep -E '20260421000000.*shadow[[:space:]]*\|'" "Discovery: Correctly reports partial scope (legacy)"
 
 # Verification: Latest selection
 assert_exit "main --mode restore --latest --simulate" 0 "Discovery: Automatically identifies latest suffix"
 main --mode restore --latest > /dev/null 2>&1 || true
-assert_true "grep -q 'new-content' ${MOCK_SHADOW}" "Discovery: Latest restore selects correct content"
+assert_true "grep -q 'new-content' ${MOCK_SHADOW}" "Discovery: Latest restore selects and decompresses correct content"
 
 # Verification: Oldest selection
 assert_exit "main --mode restore --oldest --simulate" 0 "Discovery: Automatically identifies oldest suffix"
 main --mode restore --oldest > /dev/null 2>&1 || true
-assert_true "grep -q 'old-content' ${MOCK_SHADOW}" "Discovery: Oldest restore selects correct content"
+assert_true "grep -q 'old-content' ${MOCK_SHADOW}" "Discovery: Oldest restore selects and decompresses correct content"
 
 # Verification: Mode Enforcement
 assert_exit "main --list-backups" 1 "Discovery: Rejects --list-backups without --mode restore"
@@ -389,7 +454,7 @@ assert_exit "main --oldest" 1 "Discovery: Rejects --oldest without --mode restor
 # Verification: Empty discovery
 chattr -i "${MOCK_SHADOW}" 2> /dev/null || true
 chattr -i "${MOCK_SSH_CONFIG}" 2> /dev/null || true
-rm -f "${MOCK_SHADOW}."* "${MOCK_SSH_CONFIG}."*
+rm -f "${MOCK_SHADOW:?}"* "${MOCK_SSH_CONFIG:?}"*
 assert_true "main --mode restore --list-backups 2>&1 | grep -qi 'no backups found'" "Discovery: Gracefully handles empty backup set"
 assert_exit "main --mode restore --latest" 1 "Discovery: Fails when --latest requested on empty set"
 
@@ -444,10 +509,32 @@ assert_exit "main --mode audit" 1 "Security: Rejects if sudo -l lacks full privi
 
 # For the passing tests, we must ensure audit itself passes too.
 run_full_audit() { return 0; }
+echo "explicituser ALL=(ALL) ALL" > "${MOCK_SUDOERS}"
+MOCK_SUDO_GRP="true"
+MOCK_SUDO_L_FAIL=0
 MOCK_SUDO_L_OUT="(ALL : ALL) ALL" # Restoration of full access
 assert_exit "main --mode audit" 0 "Security: Accepts full (ALL : ALL) ALL privileges"
 MOCK_SUDO_L_OUT="(ALL) ALL" # Fuzzy check for (ALL) ALL
 assert_exit "main --mode audit" 0 "Security: Accepts fuzzy (ALL) ALL privileges"
+
+# TTY Resilience and Fallback Tests (New)
+MOCK_SUDO_L_OUT="(root) NOPASSWD: ALL" # RHEL Dialect
+assert_exit "main --mode audit" 0 "Security: Accepts RHEL (root) NOPASSWD: ALL format"
+
+MOCK_SCRIPT_FAIL="true"
+MOCK_SUDO_GRP="true" # Fallback to group discovery
+assert_exit "main --mode audit" 0 "Security: Fallback to group discovery when TTY blocked"
+
+MOCK_SUDO_GRP="false" # All system checks fail, trust Alias discovery
+echo "User_Alias ADMINS = explicituser" > "${MOCK_SUDOERS}"
+echo "ADMINS ALL=(ALL) ALL" >> "${MOCK_SUDOERS}"
+assert_exit "main --mode audit" 0 "Security: Fallback to Alias discovery trust"
+
+MOCK_SCRIPT_FAIL="false"
+MOCK_SUDO_L_OUT="(ALL) ALL"
+SUDO_USER="explicituser"
+assert_exit "main --mode audit" 0 "Security: De-duplicates redundant verification logs"
+unset SUDO_USER
 
 MOCK_EUID=1000
 assert_exit "main --mode audit" 1 "Security: Rejects non-root execution (EUID check)"
@@ -489,15 +576,99 @@ export MOCK_SELINUX="false"
 echo "root:\$1\$weak:19000:0:99999:7:::" > "${MOCK_SHADOW}"
 assert_false "main --mode remediate --generate 2>&1 | grep -qi 'SELinux'" "SELinux: Skips context when disabled"
 
-# Final Result Reporting
-echo -e "\n--- Test Summary ---"
-echo "Passed: ${TESTS_PASSED}"
-echo "Failed: ${TESTS_FAILED}"
+# 9. Modular SSH Hardening Logic
+echo -e "\nTesting Modular SSH Hardening:"
+# Reset mocks
+MOCK_SSHD_T_FAIL=0
+MOCK_SSHD_PERMIT="no"
+mkdir -p "${MOCK_SSH_CONFIG_DIR}"
+echo "Include ${MOCK_SSH_CONFIG_DIR}/*.conf" > "${MOCK_SSH_CONFIG}"
+echo "other config" >> "${MOCK_SSH_CONFIG}"
+rm -rf "${MOCK_SSH_CONFIG_DIR:?}"/*
 
-if [[ ${TESTS_FAILED} -eq 0 ]]; then
-  echo -e "\n${GREEN}FULL-SPECTRUM TEST SUCCESS${NC}"
+# Case 1: Audit fails if Include is missing
+echo "no include here" > "${MOCK_SSH_CONFIG}"
+assert_exit "audit_ssh_login" 1 "SSH Audit: Fails if modular Include directive is missing"
+
+# Case 1b: Audit accepts Tab character in Include
+echo -e "Include\t${MOCK_SSH_CONFIG_DIR}/" > "${MOCK_SSH_CONFIG}"
+assert_exit "audit_ssh_login" 0 "SSH Audit: Correctly handles TAB characters in Include directive"
+
+# Case 2: Audit fails if PermitRootLogin yes exists in .d/
+echo "Include ${MOCK_SSH_CONFIG_DIR}/" > "${MOCK_SSH_CONFIG}"
+echo "PermitRootLogin yes" > "${MOCK_SSH_CONFIG_DIR}/rogue.conf"
+assert_exit "audit_ssh_login" 1 "SSH Audit: Fails if PermitRootLogin yes exists in .d/"
+
+# Case 3: Audit fails if PermitRootLogin yes exists in main config
+echo "PermitRootLogin yes" > "${MOCK_SSH_CONFIG}"
+echo "Include ${MOCK_SSH_CONFIG_DIR}/" >> "${MOCK_SSH_CONFIG}"
+rm -f "${MOCK_SSH_CONFIG_DIR}/rogue.conf"
+assert_exit "audit_ssh_login" 1 "SSH Audit: Fails if PermitRootLogin yes exists in main config"
+
+# Case 4: Remediation cleans up everything
+echo "Port 22" > "${MOCK_SSH_CONFIG}"
+echo "PermitRootLogin yes" >> "${MOCK_SSH_CONFIG}"
+echo "# PermitRootLogin yes" > "${MOCK_SSH_CONFIG_DIR}/commented.conf"
+echo "PermitRootLogin prohibit-password" > "${MOCK_SSH_CONFIG_DIR}/safe.conf"
+assert_exit "remediate_ssh" 0 "SSH Remediation: Successfully completes modular hardening"
+assert_true "grep -qE '^[[:space:]]*Include[[:space:]]+${MOCK_SSH_CONFIG_DIR}/' ${MOCK_SSH_CONFIG}" "SSH Remediation: Include directive added"
+assert_true "grep -B 2 'Include ${MOCK_SSH_CONFIG_DIR}/\*.conf' ${MOCK_SSH_CONFIG} | grep -q 'automatically included'" "SSH Remediation: Include block has correct descriptive header"
+# Since we now append to the bottom, verify placement
+assert_true "tail -n 1 ${MOCK_SSH_CONFIG} | grep -q 'Include ${MOCK_SSH_CONFIG_DIR}/\*.conf'" "SSH Remediation: Include block placed at the BOTTOM"
+# We check all files except 99-secure-policy.conf for PermitRootLogin
+assert_false "grep -ri 'PermitRootLogin' ${MOCK_SSH_CONFIG} ${MOCK_SSH_CONFIG_DIR}/commented.conf ${MOCK_SSH_CONFIG_DIR}/safe.conf 2>/dev/null" "SSH Remediation: All unauthorized instances removed"
+assert_true "[[ -f ${MOCK_SSH_CONFIG_DIR}/99-secure-policy.conf ]]" "SSH Remediation: 99-secure-policy.conf created"
+assert_true "grep -q 'PermitRootLogin no' ${MOCK_SSH_CONFIG_DIR}/99-secure-policy.conf" "SSH Remediation: Policy content is correct"
+assert_true "[[ \$(stat -c %a \"${MOCK_SSH_CONFIG_DIR}\"/99-secure-policy.conf) == 600 ]]" "SSH Remediation: Policy permissions are 600"
+
+# Case 5: Remediation fails if sshd -t fails
+MOCK_SSHD_T_FAIL=1
+# We must ensure bad files exist to trigger the check or just run verify_sshd_config
+assert_exit "verify_sshd_config" 1 "SSH Safety: verify_sshd_config fails if sshd -t validation fails"
+MOCK_SSHD_T_FAIL=0
+
+# Case 6: Audit fails if unauthorized PermitRootLogin exists (even if 'no')
+echo "PermitRootLogin no" > "${MOCK_SSH_CONFIG_DIR}/unauthorized.conf"
+assert_exit "audit_ssh_login" 1 "SSH Audit: Fails if PermitRootLogin exists outside authorized policy"
+
+# 10. Critical Failure Recovery (Non-Happy Path)
+echo -e "\nTesting Critical Failures:"
+
+# Failure Case 1: Backup failure (Simulate Disk Full / I/O Error)
+# We override gzip to return failure
+gzip() { return 1; }
+assert_exit "backup_file ${MOCK_SHADOW} ${MOCK_SHADOW}.failed" 1 "Critical: backup_file fails if compression tool returns error"
+# Restore gzip
+unset -f gzip
+
+# Failure Case 2: chattr failure (Cannot remove immutable flag)
+# We override chattr to return failure and set mock immutable to true
+chattr() { return 1; }
+MOCK_IMMUTABLE="true"
+assert_exit "prepare_for_edit ${MOCK_SHADOW}" 1 "Critical: prepare_for_edit fails if chattr cannot modify file"
+MOCK_IMMUTABLE="false"
+# Restore chattr
+chattr() { echo "MOCK chattr" >&2; }
+
+# Failure Case 3: Missing dependency (sshd missing)
+# We override sshd to simulate missing binary
+sshd() { return 127; }
+assert_exit "audit_ssh_login" 1 "Critical: Audit fails gracefully if sshd binary is missing or errors"
+# Restore sshd
+sshd() {
+  if [[ "${1}" == "-t" ]]; then return "${MOCK_SSHD_T_FAIL:-0}"; fi
+  echo "permitrootlogin ${MOCK_SSHD_PERMIT:-no}"
+}
+
+# Final results
+echo -e "\n--- Test Suite Summary ---"
+echo "Tests Passed: ${TESTS_PASSED}"
+echo "Tests Failed: ${TESTS_FAILED}"
+
+if [[ "${TESTS_FAILED}" -eq 0 ]]; then
+  echo -e "${GREEN}ALL TESTS PASSED${NC}"
   exit 0
 else
-  echo -e "\n${RED}TEST FAILURES DETECTED${NC}"
+  echo -e "${RED}SOME TESTS FAILED${NC}"
   exit 1
 fi
