@@ -1,5 +1,5 @@
 # Python Build System: Unified Modular Orchestrator
-**Version**: 2.0.2  2026/04/13
+**Version**: 2.0.3  2026/05/11
 **Target Platform**: EL8/9/10 (RHEL/AlmaLinux/Rocky/CentOS)  
 **Distribution Prefix**: `/opt/lib/python3`
 
@@ -13,7 +13,7 @@ The **Python Build System** is an infrastructure tool designed to produce fully 
 *   **Free-Threading (GIL-less) Support**: Built-in orchestration for Python 3.14+ multi-threaded builds (`--mt`), including standard binary suffixing (`t`) and **MT-Delta Packaging** for clean side-by-side coexistence.
 *   **Unified Lifecycle**: Provide a single entry point for both standalone development builds and standardized RPM-spec integration.
 *   **Strict Integrity Auditing**: Implement bit-level and logic-level validation (25-module registry) to prevent build-path leaks into production binaries.
-*   **IT Business Ready**: Ship with a curated "Battery-Included" bundle of 13 essential PyPI packages (including **Cython**, **CFFI**, and **pip-tools**) for immediate utility.
+*   **IT Business Ready**: Ship with a curated bundle of 13 essential PyPI packages (including **Cython**, **CFFI**, and **pip-tools**) for immediate utility.
 
 ---
 
@@ -26,11 +26,21 @@ The script utilizes a central associative array (`CONF`) to manage global state.
 
 ### 2.2 Relocatable Isolation Strategy ($ORIGIN)
 The build system employs a nested RPATH strategy. 
-*   **LDFLAGS Logic**: Encodes relative paths using the `\$\$ORIGIN` variable.
-*   **Design Choice**: By setting RPATHs to `'\$\$ORIGIN:\$\$ORIGIN/../lib64:\$\$ORIGIN/../..' `, the binary becomes self-aware. It searches for its shared libraries relative to its own location on disk, rather than relying on global system paths like `/usr/lib64`.
+*   **LDFLAGS Logic**: Encodes relative paths using the `$$ORIGIN` variable.
+*   **Design Choice**: By setting RPATHs to `'$$ORIGIN:$$ORIGIN/../lib64:$$ORIGIN/../..' `, the binary becomes self-aware. It searches for its shared libraries relative to its own location on disk, rather than relying on global system paths like `/usr/lib64`.
 
 ### 2.3 Compiler and Linker Specifications (CFLAGS/LDFLAGS)
-To enforce binary security and isolation, the system utilizes a specific set of optimized flags:
+To enforce binary security and isolation while adhering to distribution standards, the system utilizes a high-integrity flag management engine.
+
+#### Flag Management and Deduplication (`append_unique`)
+The orchestrator implements an internal **Deduplication Engine**. 
+*   **Strategy**: Instead of simple string concatenation, the script uses the `append_unique()` helper. This function validates every flag (e.g., `-I`, `-L`, `-Wl`) before addition.
+*   **Advantage**: This prevents "Flag Pollution" where redundant paths or security flags might appear multiple times in the compiler string, ensuring a clean and efficient build command.
+
+#### RPM Distribution Integration
+When executed within an RPM build lifecycle, the orchestrator automatically integrates host-level hardening flags.
+*   **SPEC Integration**: The system ingests `%{optflags}` (via `CFLAGS`) and `%{build_ldflags}` (via `LDFLAGS`).
+*   **Balance**: This creates a hybrid build model—standard EL hardening (stack canaries, FORTIFY_SOURCE) is applied globally, while our custom `$ORIGIN` RPATHs and isolated library paths are uniquely merged to maintain total runtime isolation.
 
 #### CFLAGS (Compiler Flags)
 *   **`-I/opt/lib/python3/include`**: Prioritizes local headers for custom-built extensions.
@@ -151,7 +161,7 @@ The orchestrator is designed for architectural flexibility, supporting two disti
 
 1.  **Standalone (Archive Mode)**: 
     *   **Workflow**: `prep` -> `compile` -> `install` -> `bootstrap` -> `validate` -> `package`.
-    *   **Output**: A portable `.tar.xz` distribution that can be extracted into any compliant host's `/opt` hierarchy. This is ideal for rapid development and side-by-side version testing.
+    *   **Output**: A portable `.tar.xz` distribution that can be extracted into any compliant host's `/opt/lib` hierarchy. This is ideal for rapid development and side-by-side version testing.
 2.  **Governed (RPM Mode)**:
     *   **Workflow**: The script's modular phases are invoked individually by an RPM `.spec` file.
     *   **Output**: A standard `.rpm` package managed by the system package manager (`dnf`/`rpm`). This is preferred for high-assurance production environments requiring dependency tracking and immutable file manifests.
@@ -170,9 +180,24 @@ For Python 3.14+ Free-Threading builds, the system enforces a strict "Zero Overl
 
 ---
 
-## 3. Data Flow and Control Logic
+## 3. Pre-Execution Requirements (Environment Isolation)
 
-### 3.1 Operational Flow
+To ensure a "Clean-Room" build environment and prevent library or path leakage from the host or user session, the following environment variables **must be unset** before executing the orchestrator. Failure to do so can result in binary pollution or non-relocatable paths.
+
+### 3.1 Global Environment Sanitization
+Execute the following command to sanitize the shell environment:
+```bash
+unset PYTHONPATH PYTHONHOME PYTHON PYTHON_PLATFORM
+```
+
+### 3.2 Identity Verification
+For standalone (Archive Mode) builds, the orchestrator enforces execution as the `builder` user. This prevents permission mismatches and ensures that the final binaries have the correct owner/group metadata (defaulting to `builder:users`).
+
+---
+
+## 4. Data Flow and Control Logic
+
+### 4.1 Operational Flow
 The system follows a strict linear sequence when executed in `all` mode, but allows for surgical execution of specific steps via the `--step` flag.
 
 ```mermaid
@@ -202,16 +227,17 @@ graph TD
     N -->|Legacy| Q[python-3.13.xx-binaries.tar.xz]
 ```
 
-### 3.2 Control Logic: The Validation Gate
+### 4.2 Control Logic: The Validation Gate
 The `validate` phase serves as the system's "Quality Gate." It triggers the `inspect_python.py` utility using the **newly built interpreter**. 
-*   **Headless Audit**: It verifies that `sys.path` does not contain any references to the build-time source directory (`/usr/src/redhat/BUILD`).
-*   **Functional Verification**: It performs code execution tests for `pyexpat`, `sqlite3`, `ssl`, and `hashlib` to ensure the dynamically loaded modules are operational and correctly linked.
+*   **RPATH Integrity Audit**: Utilizes `readelf` to ensure that no build-time paths (e.g., `/usr/src/redhat/BUILD`) have leaked into the binary's `RPATH` or `RUNPATH` headers.
+*   **Deep Logic Verification**: Invokes `inspect_python.py` to perform functional verification of core modules (`pyexpat`, `sqlite3`, `ssl`, `hashlib`) to ensure they are operational and correctly linked against custom isolated libraries.
+*   **Staging Path Audit**: Scans all installed files for absolute leaks of the `BUILDROOT` staging path.
 
 ---
 
-## 4. Dependencies
+## 5. Dependencies
 
-### 4.1 Build-Time Dependencies (Host DNF)
+### 5.1 Build-Time Dependencies (Host DNF)
 Accessible via the automated `check_dependencies` phase:
 *   **Compiler Toolchain**: `gcc`, `make`, `autoconf`, `automake`, `pkgconf-pkg-config`.
 *   **System Headers**: `glibc-devel`, `libffi-devel`, `zlib-ng-devel`, `bzip2-devel`, `xz-devel`.
@@ -219,24 +245,24 @@ Accessible via the automated `check_dependencies` phase:
 *   **Development Tools**: `git-core`, `wget`, `tar`, `readelf`.
 *   **Custom Libraries (Optional)**: `openssl-cs-devel`, `expat-cs-devel`, `sqlite-cs-devel`.
 
-### 4.2 Application Utilities
+### 5.2 Application Utilities
 *   **wget**: For secure source acquisition.
 *   **tar**: For handling XZ-compressed archives.
 *   **readelf**: Used for RPATH header auditing during validation.
 *   **sudo**: Required for dependency installation (requires TTY).
 
-### 4.3 Internal Components
+### 5.3 Internal Components
 *   **inspect_python.py**: A standalone Python utility responsible for deep-state auditing.
 
 ---
 
-## 5. Command Line Arguments
+## 6. Command Line Arguments
 
 | Argument | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `--python-version` | String | (Required) | Target Python version (e.g., `3.13.13`). |
 | `--openssl-version`| String | (Required*) | OpenSSL version (Required if `--custom-libs` is set). |
-| `--custom-libs` | Boolean | `false` | Enable linking against isolated custom libraries. |
+| `--custom-libs` | Boolean | `false` | Enable linking against isolated custom libraries (OpenSSL, Expat, SQLite). |
 | `--step` | Enum | `all` | Specific phase: `prep`, `compile`, `install`, `bootstrap`, `validate`, `package`. |
 | `--all` | Boolean | `all` | Alias for `--step=all`. |
 | `--purge` | Boolean | `false` | Remove build artifacts after successful packaging. |
@@ -247,33 +273,35 @@ Accessible via the automated `check_dependencies` phase:
 
 ---
 
-## 6. Detailed Usage Examples
+## 7. Detailed Usage Examples
 
-### 6.1 Standard Production Build
+### 7.1 Standard Production Build
 To generate a full relocatable Python 3.13 distribution with custom libraries and full cleanup:
 ```bash
 ./python_build.sh --python-version=3.13.13 --openssl-version=3.6.2 --custom-libs --purge --all
 ```
 
-### 6.2 Specialized Development (Compilation Only)
+### 7.2 Specialized Development (Compilation Only)
 When iterating on local patches within the `BUILD` directory, run only the compilation phase:
 ```bash
 ./python_build.sh --python-version=3.13.13 --custom-libs --step=compile
 ```
 
-### 6.3 Free-Threading (MT) Build
+### 7.3 Free-Threading (MT) Build
 To build a GIL-less Python 3.14 instance with custom libraries:
 ```bash
 ./python_build.sh --python-version=3.14.0 --mt --custom-libs --all
 ```
 
-### 6.4 Security Validation Audit
+### 7.4 Security Validation Audit
 To audit an existing installation staged in the `BUILDROOT`:
 ```bash
 ./python_build.sh --python-version=3.13.13 --step=validate
 ```
 
-## 7. RPM Integration Reference (%spec)
+---
+
+## 8. RPM Integration Reference (%spec)
 
 The following template demonstrates a production-grade `.spec` file designed to orchestrate the `python_build.sh` script. This approach ensures that the build is governed by the standard RPM lifecycle while benefiting from the script's advanced isolation and validation logic.
 
@@ -335,11 +363,11 @@ rm -rf %{buildroot}
 
 ---
 
-## 8. Mode-Based Governance & Execution Playbook
+## 9. Mode-Based Governance & Execution Playbook
 
 The system provides three distinct operational modes to meet production, hybrid, and development requirements.
 
-### 8.1 Operational Governance Matrix
+### 9.1 Operational Governance Matrix
 
 The system provides three distinct operational modes to meet production, hybrid, and development requirements.
 
@@ -357,3 +385,42 @@ Spec-Governed modes can be combined. Threading model (`--with mt`), version over
 *   **Relocatability**: $ORIGIN RPATHs are applied to ensure artifacts can be moved/renamed post-deployment.
 *   **Dependency Stack**: Linked against custom prefixes for OpenSSL (%{openssl_version}), Expat, and SQLite.
 *   **IT Bundle**: Automated bootstrap of core packages (Cython, pip-tools, etc.) is included in all modes.
+
+---
+
+## 10. Debian/Ubuntu Packaging Portability
+
+The Python Build System is fully portable to Debian-based distributions (Ubuntu 24.04+). It utilizes a **Unified Orchestration** strategy where the exact same scripts power both RPM and Debian package generation.
+
+### 10.1 Architectural Concept: Single Source of Truth
+The Debian package structure (located in `/usr/src/debian/python-cs-xg`) does not contain separate copies of the build logic. Instead, it uses **symbolic links** to point to the master scripts in `/usr/src/redhat/SOURCES/`. 
+*   **Advantage**: Any hardening update or performance optimization made to the master `python_build.sh` is immediately available to both RedHat and Ubuntu builds.
+
+### 10.2 The Polymorphic Build Toggle (`USE_CUSTOM_LIBS`)
+On Ubuntu, you can choose between using the native OS libraries or your custom isolated stack by toggling a variable in `debian/rules`:
+
+| Setting | Mode | Description |
+| :--- | :--- | :--- |
+| `USE_CUSTOM_LIBS := no` | **OS-Native** | Links against Ubuntu's system libraries (e.g., `libssl3`). This is the default. |
+| `USE_CUSTOM_LIBS := yes` | **Isolated** | Links against custom libraries in `/opt/lib` (e.g., `libssl36`). Requires dependencies to be pre-staged. |
+
+### 10.3 Build Instructions (Ubuntu)
+To generate a `.deb` package on an Ubuntu system:
+
+1.  **Navigate to the package root**:
+    ```bash
+    cd /usr/src/debian/python-cs-xg
+    ```
+2.  **Execute the build**:
+    ```bash
+    # Standard build using OS libraries
+    dpkg-buildpackage -us -uc -b
+
+    # Specialized build using custom isolated libraries
+    USE_CUSTOM_LIBS=yes dpkg-buildpackage -us -uc -b
+    ```
+
+### 10.4 Automated Audit Behavior
+The `inspect_python.py` auditor is distro-aware. During the `override_dh_auto_test` phase:
+*   It detects the Ubuntu environment and adjusts forbidden path checks for multi-arch layouts (`/usr/lib/x86_64-linux-gnu`).
+*   It automatically scales its isolation strictness based on the `USE_CUSTOM_LIBS` setting passed from the orchestrator.

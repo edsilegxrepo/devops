@@ -1,5 +1,5 @@
-# Pathfix Execution Intelligence (v2.7.0) - Safe Edition
-**Document Version:** v1.0.0xg 04/15/2026
+# Pathfix: High-Integrity Transactional Shebang Management Engine
+**Document Version:** v1.0.1xg 05/11/2026
 
 ### 1. Application Overview and Objectives
 `pathfix.py` is a high-integrity DevOps utility designed to orchestrate the mass-upgrading of Python interpreter paths (shebang lines) across complex directory topologies. Unlike standard stream editors (like `sed` or `awk`), Pathfix provides **semantic awareness** of the shebang structure and implements a **Safe Transactional Model** to guarantee data safety during bulk mutations.
@@ -87,12 +87,16 @@ The application adheres strictly to the **Python 3 Standard Library** to ensure 
 | `-v` | `--verbose` | `Flag` | `False` | Enables `DEBUG` level logging for engineering analysis. |
 | `-p` | `--preserve` | `Flag` | `False` | Preserve original Access/Modification timestamps using `os.utime`. |
 | `-b` | `--backup` | `Flag` | `False` | Persist the `.bak` file after a successful update. |
+| `-n` | `--no-backup` | `Flag` | `False` | Explicitly request no backup files (Default behavior; included for compatibility). |
 | `-s` | `--keep-space` | `Flag` | `False` | Favor `#! /` style if detected. Default is compact `#!/`. |
 | `-k` | `--keep-flags` | `Flag` | `False` | Inherit and keep any flags from the original shebang. |
 | `-a` | `--add-flags` | `String` | `None` | Append a single literal flag string (e.g., `W` for `-W`). |
 | `-t` | `--file-pattern` | `String` | `None` | Restrict search scope via glob (e.g., `"test_*.py"`). |
 | `-o` | `--scope` | `Int` | `None` | Max recursion depth. `0` = Current Directory only. |
 | `-x` | `--exclude` | `String` | `None` | CSV list of names/patterns to prune (e.g., `"legacy,*.tmp"`). |
+
+> [!NOTE]
+> **Transactional Safety**: `pathfix.py` always creates a `.bak` file during the update process as a mandatory safety net. If the update is successful, this backup is automatically deleted unless the `-b` flag is specified. The `-n` flag is provided for compatibility with legacy build scripts and reinforces the default no-backup behavior.
 
 ---
 

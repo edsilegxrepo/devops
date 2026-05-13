@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -----------------------------------------------------------------------------
 # pathfix.py
-# v1.0.0xg  2026/04/15  XDG / MIS Center
+# v1.0.1xg  2026/05/11  XDG / MIS Center
 # -----------------------------------------------------------------------------
 """
 # OBJECTIVE:
@@ -102,6 +102,12 @@ def parse_args() -> argparse.Namespace:
         "--backup",
         action="store_true",
         help="Commit backup (.bak) to disk after success",
+    )
+    parser.add_argument(
+        "-n",
+        "--no-backup",
+        action="store_true",
+        help="Do not keep backup files (Default behavior)",
     )
     parser.add_argument(
         "-s",
@@ -220,9 +226,9 @@ def is_python_candidate(path_obj: Path, config: Config) -> bool:
     # 4. Identification of scripts without extensions (e.g. 'my_tool')
     if not path_obj.suffix:
         try:
-            # Low-I/O header inspection
+            # High-I/O header inspection (Increased buffer for long BUILDROOT paths)
             with open(path_obj, "rb") as f:
-                header = f.read(32)
+                header = f.read(1024)
                 return header.startswith(b"#!") and b"python" in header.lower()
         except (IOError, PermissionError):
             pass

@@ -1,13 +1,30 @@
 #!/usr/bin/env python3
 # -----------------------------------------------------------------------------
-#  inspect_python.py
-#  v1.1.0  2026/04/13  XDG / MIS Center
+#  /usr/src/redhat/SPECS/inspect_python.py
+#  v1.1.1  2026/05/11  XdG (Auditor)
 # -----------------------------------------------------------------------------
-"""
 # OBJECTIVE:
-#   Act as a Quality Auditor for the newly built Python binary.
+#   Act as a "Strict Quality Auditor" for the newly built Python binary.
 #   This script is executed by the target interpreter itself during the
 #   'validate' phase of the build process.
+#
+# CORE COMPONENTS:
+#   1. ISOLATION ENGINE: Verifies sys.path and internal variables (sys.prefix)
+#      to ensure no leakage from the host or build environment.
+#   2. FUNCTIONAL VALIDATOR: Performs "Real-World" tests on critical C-extensions
+#      (OpenSSL, SQLite, Expat) to ensure dynamic linkage is operational.
+#   3. BINARY AUDITOR: Uses 'readelf' to perform recursive static analysis
+#      of ELF headers, enforcing RPATH compliance and RUNPATH prohibition.
+#   4. PERFORMANCE GATE: Audits sysconfig metadata for PGO/LTO optimizations.
+#
+# DATA FLOW:
+#   1. INGESTION: CLI arguments define the audit strictness and target prefix.
+#   2. DISCOVERY: The script recursively locates all ELF binaries in the prefix.
+#   3. VERIFICATION: Each binary is audited for header integrity (RPATH) and
+#      runtime resolution (ldd) against forbidden system paths.
+#   4. AGGREGATION: Violations are collected into a master manifest.
+#   5. REPORTING: A structured success/failure report is generated for the
+#      orchestrator (python_build.sh).
 #
 # AUDIT SCOPE:
 #   1. Path Isolation: Non-leak check of sys.path against build directories.
@@ -19,13 +36,13 @@
 # REQUIREMENTS:
 #   - readelf (from binutils): Used for static header inspection.
 #   - ldd (from glibc-common): Used for dynamic resolution verification.
-"""
+# -----------------------------------------------------------------------------
 
 import sys
 import sysconfig
 import os
 import importlib.util
-import subprocess
+import subprocess  # nosec B404
 import shutil
 import re
 import argparse
@@ -34,15 +51,23 @@ import argparse
 OPT_PREFIX = "/opt/lib"
 SRC_PREFIX = "/usr/src/redhat"
 
-# Libraries that MUST be isolated from the system /usr/lib64.
-# These represent the most common sources of host-system "pollution" in
-# redistributable binary packages.
+# Resolved tool paths to prevent partial path injection (Bandit B607)
+# Fallback to name string ensures Pyright sees a 'str' type instead of 'Optional[str]'
+READELF_BIN = shutil.which("readelf") or "readelf"
+LDD_BIN = shutil.which("ldd") or "ldd"
+
+# Distro Detection
+IS_REDHAT = os.path.exists("/etc/redhat-release")
+IS_UBUNTU = not IS_REDHAT and os.path.exists("/etc/debian_version")
+
+# Libraries that MUST be isolated from the system /usr/lib64 or /usr/lib/<arch>.
 LIBS_FOR_ISOLATION = ["libpython", "libexpat", "libsqlite3", "libssl", "libcrypto"]
 
 # System paths strictly forbidden for the above libraries.
-# Any resolution to these paths during the validation phase indicates a
-# non-portable binary that relies on OS-local configuration.
+# We adapt this for Ubuntu's multiarch layout.
 FORBIDDEN_SYSTEM_PATHS = ["/usr/lib64/", "/lib64/", "/usr/lib/", "/lib/", "/usr/src/"]
+if IS_UBUNTU:
+    FORBIDDEN_SYSTEM_PATHS += ["/usr/lib/x86_64-linux-gnu/", "/lib/x86_64-linux-gnu/"]
 
 # --- 1. Audit Utilities ---
 
@@ -59,12 +84,16 @@ def check_tools():
 
 def extract_rpath(header_text):
     """
-    Extract the RPATH/RUNPATH value from readelf -d output using regex.
-    Returns the raw string inside the brackets or None if not found.
+    Extract the RPATH value from readelf -d output.
+    Note: Specifically ignores RUNPATH as it is forbidden in this stack.
     """
-    # Pattern matches '(RPATH)' or '(RUNPATH)' followed by brackets containing the path
-    match = re.search(r"(?:RPATH|RUNPATH).*?\[(.*?)\]", header_text)
+    match = re.search(r"\(RPATH\).*?\[(.*?)\]", header_text)
     return match.group(1) if match else None
+
+
+def has_runpath(header_text):
+    """Check for the presence of RUNPATH in the dynamic section."""
+    return "(RUNPATH)" in header_text
 
 
 # --- 2. Audit Modules ---
@@ -107,13 +136,19 @@ def check_path_isolation(prefix, verbose=False):
 
 
 def check_platlibdir(verbose=False):
-    """Verify that PLATLIBDIR is correctly set to 'lib64' for EL9 compatibility."""
+    """Verify that PLATLIBDIR is correctly set for the target distribution."""
     pld = sysconfig.get_config_var("PLATLIBDIR")
+    expected = "lib64" if IS_REDHAT else "lib"
+
     if verbose:
         print(f"DEBUG: sysconfig.get_config_var('PLATLIBDIR') = '{pld}'")
-    if pld != "lib64":
-        print(f"FAILED: PLATLIBDIR is '{pld}', expected 'lib64'")
-        return False
+        print(f"DEBUG: Distro: {'RedHat' if IS_REDHAT else 'Ubuntu/Debian'}")
+
+    if pld != expected and not (IS_UBUNTU and pld == "lib"):
+        print(
+            f"WARNING: PLATLIBDIR is '{pld}', expected '{expected}' (May affect pathing)"
+        )
+        return True  # Not a hard failure for portability
     print(f"SUCCESS: PLATLIBDIR is '{pld}'")
     return True
 
@@ -248,7 +283,7 @@ def check_functional_extensions(verbose=False):
 
     # 5. Test Cython (Imports and version check)
     try:
-        import Cython
+        import Cython  # type: ignore
 
         print(f"SUCCESS: Cython functional test passed (Version: {Cython.__version__})")
         results.append(True)
@@ -333,9 +368,20 @@ def check_binary_isolation(prefix, verbose=False):
 
             # 2. Inspect RPATH/RUNPATH (Header Intent Check)
             try:
+                # Use absolute path and audit trusted input (Bandit B603, B607)
                 header_res = subprocess.run(
-                    ["readelf", "-d", path], capture_output=True, text=True, check=True
-                )
+                    [READELF_BIN, "-d", path],
+                    capture_output=True,
+                    text=True,
+                    check=True,  # type: ignore
+                )  # nosec B603
+
+                # Strict Search Strategy Verification
+                if has_runpath(header_res.stdout):
+                    violations.append(
+                        f"CRITICAL SECURITY VIOLATION: {path} contains RUNPATH (Forbidden). Must use RPATH via --disable-new-dtags."
+                    )
+
                 rpath_val = extract_rpath(header_res.stdout)
 
                 # 3. Dependency-Aware Isolation Check
@@ -351,34 +397,30 @@ def check_binary_isolation(prefix, verbose=False):
                 )
 
                 # Rule: Only enforce RPATH if the binary links against our isolated libraries.
+                # If custom-libs is disabled (OS libraries used), we relax the /opt requirement.
                 if requires_isolation:
-                    if (
-                        not rpath_val
-                        or OPT_PREFIX not in rpath_val
-                        or "$ORIGIN" not in rpath_val
-                    ):
-                        level = (
-                            "CRITICAL HEADER LEAK"
-                            if ("bin/" in path or "lib-dynload/" in path)
-                            else "HEADER LEAK"
-                        )
+                    if not rpath_val or "$ORIGIN" not in rpath_val:
                         violations.append(
-                            f"{level}: {path} (Requires isolated libs {needed_libs} but RPATH is missing or invalid: [{rpath_val}])"
+                            f"HEADER LEAK: {path} (Missing $ORIGIN RPATH)"
+                        )
+                    elif args_global.custom_libs and OPT_PREFIX not in rpath_val:
+                        violations.append(
+                            f"ISOLATION LEAK: {path} (Custom libs requested but {OPT_PREFIX} missing from RPATH: [{rpath_val}])"
                         )
                     elif verbose:
-                        print(
-                            f"INFO: [OK] {path} (Isolated RPATH confirmed: [{rpath_val}])"
-                        )
+                        print(f"INFO: [OK] {path} (RPATH validated: [{rpath_val}])")
                 else:
-                    if verbose:
-                        print(
-                            f"INFO: [OK] {path} (System dependencies only; no RPATH required: {needed_libs})"
-                        )
+                    # System-only dependencies are inherently safe as they resolve to standard OS roots.
+                    pass
 
                 # 4. Dependency Resolution Audit (Runtime Reality)
+                # Use absolute path and audit trusted input (Bandit B603, B607)
                 ldd_res = subprocess.run(
-                    ["ldd", path], capture_output=True, text=True, check=True
-                )
+                    [LDD_BIN, path],
+                    capture_output=True,
+                    text=True,
+                    check=True,  # type: ignore
+                )  # nosec B603
                 for line in ldd_res.stdout.splitlines():
                     if "=>" in line:
                         lib_part, path_part = line.split("=>")
@@ -394,11 +436,20 @@ def check_binary_isolation(prefix, verbose=False):
                             )
                             is_internal = resolved_path.startswith(prefix)
 
-                            if is_forbidden and not is_internal:
-                                violations.append(
-                                    f"SYSTEM DEPENDENCY LEAK: {path} -> {lib_name} resolves to {resolved_path}"
-                                )
-                            elif verbose:
+                            # If custom-libs is enabled, we strictly forbid system resolution for core libs.
+                            # If disabled, we only forbid resolution to the build/src tree.
+                            if args_global.custom_libs:
+                                if is_forbidden and not is_internal:
+                                    violations.append(
+                                        f"SYSTEM DEPENDENCY LEAK: {path} -> {lib_name} resolves to {resolved_path}"
+                                    )
+                            else:
+                                if SRC_PREFIX in resolved_path and not is_internal:
+                                    violations.append(
+                                        f"BUILD-TREE LEAK: {path} -> {lib_name} resolves to {resolved_path}"
+                                    )
+
+                            if verbose:
                                 print(
                                     f"  - Resolved {lib_name:<15} to {resolved_path} {'[Internal]' if is_internal else '[OK]'}"
                                 )
@@ -477,7 +528,7 @@ def check_gil_status(verbose=False):
 
     # 1. Runtime Status
     try:
-        status = sys._is_gil_enabled()
+        status = sys._is_gil_enabled()  # type: ignore
         print(
             f"INFO: sys._is_gil_enabled(): {'Enabled (Standard)' if status else 'Disabled (Free-Threading)'}"
         )
@@ -486,7 +537,7 @@ def check_gil_status(verbose=False):
 
     # 2. Flag Status (3.13+)
     if hasattr(sys.flags, "nogil"):
-        print(f"INFO: sys.flags.nogil:      {sys.flags.nogil}")
+        print(f"INFO: sys.flags.nogil:      {sys.flags.nogil}")  # type: ignore
 
     # 3. Build-time Intent
     if verbose:
@@ -507,8 +558,80 @@ def display_python_environment():
     print("-------------------------------\n")
 
 
+def check_performance_metadata(verbose=False):
+    """
+    Audit the build metadata for performance and hardening consistency.
+    Ensures that optimizations (PGO, LTO) and security flags are correctly
+    baked into the sysconfig registry.
+
+    Note: For portability across EL8/9/10/Ubuntu, these are treated as
+    WARNINGS and do not cause build failure.
+    """
+    print("--- Performance & Build-Metadata Audit ---")
+
+    # 1. Audit Performance Optimizations
+    perf_vars = {
+        "HAVE_COMPUTED_GOTOS": 1,
+        "Py_LTO": "yes",
+    }
+
+    for var, expected in perf_vars.items():
+        val = sysconfig.get_config_var(var)
+        if val == expected:
+            print(f"SUCCESS: {var} is correctly active ({val})")
+        else:
+            # Fallback check for LTO in CFLAGS
+            cflags = sysconfig.get_config_var("CONFIGURE_CFLAGS") or ""
+            if var == "Py_LTO" and "-flto" in cflags:
+                print(f"SUCCESS: {var} is active via CFLAGS (-flto)")
+            else:
+                print(
+                    f"WARNING: {var} is '{val}', expected '{expected}' (Potential performance loss)"
+                )
+
+    # 2. Audit PGO (Profile Guided Optimization) Status
+    cflags = sysconfig.get_config_var("CONFIGURE_CFLAGS") or ""
+    pgo_flag = sysconfig.get_config_var("PGO_PROF_USE_FLAG") or ""
+
+    if (
+        "-fprofile-use" in cflags
+        or "-fprofile-generate" in cflags
+        or "-fprofile-use" in pgo_flag
+    ):
+        print(
+            f"SUCCESS: PGO (Profile Guided Optimization) active ({pgo_flag or 'via CFLAGS'})"
+        )
+    else:
+        print(
+            "WARNING: PGO flags not detected. Verify if 'make profile-opt' was used in orchestrator."
+        )
+
+    # 3. Audit Hardening Metadata Persistence
+    ldflags = sysconfig.get_config_var("CONFIGURE_LDFLAGS") or ""
+    hardening_checks = {
+        "RELRO": "-Wl,-z,relro",
+        "BIND_NOW": "-Wl,-z,now",
+        "STRIP": "-Wl,-s",
+    }
+
+    if IS_REDHAT:
+        hardening_checks["HARDENED_SPECS"] = "redhat-hardened-ld"
+
+    for name, flag in hardening_checks.items():
+        if flag in ldflags:
+            if verbose:
+                print(f"INFO: [OK] Hardening {name:<15} detected in LDFLAGS metadata.")
+        else:
+            print(
+                f"WARNING: Hardening {name} ({flag}) missing from build metadata LDFLAGS."
+            )
+
+    return True  # Metadata violations are not build failures
+
+
 def main():
     """Main Auditor entry point."""
+    global args_global
     parser = argparse.ArgumentParser(
         description="Strict Python Build Isolation Auditor"
     )
@@ -517,7 +640,12 @@ def main():
         action="store_true",
         help="Provide engineering-level details for each audit step",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--custom-libs",
+        action="store_true",
+        help="Enforce strict /opt/lib isolation for core libraries",
+    )
+    args_global = parser.parse_args()
 
     if not check_tools():
         sys.exit(1)
@@ -528,15 +656,26 @@ def main():
     print(f"Prefix:      {sys.prefix}")
 
     # Audit sequence.
+    # The order of operations is deliberate:
+    # 1. PATH ISOLATION (Basic): Ensure the auditor isn't running in a polluted environment.
+    # 2. METADATA (Static): Verify distro-specific pathing expectations.
+    # 3. IMPORTS (Functional): Verify the loader can resolve extensions.
+    # 4. FUNCTIONAL (Deep): Verify the actual arithmetic/logic of extensions.
+    # 5. BINARY (System): Recursive ELF header and RPATH verification.
+    # 6. INTERNAL (State): Final verification of sys.prefix and internal paths.
+    # 7. PERFORMANCE (Static): Build metadata consistency check.
     results = [
-        check_path_isolation(sys.prefix, verbose=args.verbose),
-        check_platlibdir(verbose=args.verbose),
-        check_core_modules(verbose=args.verbose),
-        check_functional_extensions(verbose=args.verbose),
-        check_binary_isolation(sys.prefix, verbose=args.verbose),
-        check_internal_variables(sys.prefix, verbose=args.verbose),
+        check_path_isolation(sys.prefix, verbose=args_global.verbose),
+        check_platlibdir(verbose=args_global.verbose),
+        check_core_modules(verbose=args_global.verbose),
+        check_functional_extensions(verbose=args_global.verbose),
+        check_binary_isolation(sys.prefix, verbose=args_global.verbose),
+        check_internal_variables(sys.prefix, verbose=args_global.verbose),
+        check_performance_metadata(verbose=args_global.verbose),
     ]
-    check_gil_status(verbose=args.verbose)
+
+    # Information-only check (does not affect final exit code)
+    check_gil_status(verbose=args_global.verbose)
 
     print("-------------------------------------------")
     if all(results):

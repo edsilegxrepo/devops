@@ -43,7 +43,7 @@ def get_stdlib_modules():
             "This script's 'get_stdlib_modules' function requires Python 3.10 "
             "or newer."
         )
-    return set(sys.stdlib_module_names)
+    return set(sys.stdlib_module_names)  # type: ignore
 
 
 # --- Function to get module version ---

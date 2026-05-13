@@ -1,141 +1,98 @@
-# Python Quality Auditor: inspect_python.py
+# Technical Specification: Python Build Isolation Auditor (inspect_python.py)
 
-`inspect_python.py` is a specialized "Strict Quality Auditor" designed to verify the integrity and isolation of a newly built Python binary. It is intended to be executed by the target interpreter during the `validate` phase of the build process (e.g., within an RPM spec or a build orchestration script).
+## 1. Application Overview and Objectives
+`inspect_python.py` serves as a high-assurance validation gate within the Python 3.14.5 build orchestration pipeline. Its primary objective is to verify that the newly compiled interpreter and its associated extension modules are strictly isolated from the host environment and compliant with architectural hardening requirements.
 
-## Primary Objectives
+### Core Objectives:
+*   **Environment Neutrality**: Ensure no build-time absolute paths leak into the runtime `sys.path` or internal metadata.
+*   **Library Isolation**: Validate that core C-extensions (SSL, SQLite, Expat) exclusively resolve their dependencies from the isolated `/opt/lib` stack.
+*   **Binary Relocatability**: Enforce `$ORIGIN`-relative `RPATH` headers and prohibit the use of `RUNPATH` to ensure the prefix remains portable.
+*   **Performance Verification**: Audit the persistence of PGO (Profile Guided Optimization) and LTO (Link Time Optimization) metadata in the `sysconfig` registry.
 
-The auditor ensures that the Python build is **production-ready**, **fully isolated**, and **relocatable** by performing deep inspections at multiple levels:
+## 2. Architecture and Design Choices
+The auditor employs a multi-tiered, sequential validation strategy. Each tier must pass for the build to be considered compliant.
 
-1.  **Binary Isolation**: Verifies that every ELF binary (`python3`, extension modules) has correct `RPATH`/`RUNPATH` headers pointing to isolated `/opt` paths and uses `$ORIGIN` for relocatability.
-2.  **State Isolation**: Audits internal Python variables (`sys.prefix`, `sysconfig` paths) to ensure no build-time leaks or system path dependencies.
-3.  **Path Isolation**: Confirms `sys.path` is free from references to the source build directory.
-4.  **Functional Integrity**: Validates that core extensions (SSL, SQLite, Expat, Hashlib) and core packages (Cython, CFFI, Requests, Dateutil) are not only importable but also functionally operational.
-5.  **Free-Threading (MT) Audit**: Detects and reports the GIL status and Free-Threading flags for compatibility verification (Python 3.13+).
+### Granular 7-Tier Audit Sequence:
+1.  **Environment Isolation (Tier 1)**: Initial verification that `sys.path` is purged of host build-time absolute paths.
+2.  **Distribution Metadata (Tier 2)**: Verification of `PLATLIBDIR` consistency (e.g., enforcing `lib64` on RedHat systems).
+3.  **Extension Load Stability (Tier 3)**: Programmatic verification that core shared objects (e.g., `_ssl`, `_sqlite3`) can be imported without resolution errors.
+4.  **Deep Functional Integrity (Tier 4)**: Real-world execution of extension logic (XML parsing, SQL arithmetic, SSL handshakes) to verify symbol resolution.
+5.  **Recursive Binary Audit (Tier 5)**: Static inspection of every ELF binary in the prefix to enforce `$ORIGIN` RPATHs and prohibit `RUNPATH`.
+6.  **Internal State Audit (Tier 6)**: Verification that `sys.prefix`, `sys.executable`, and `sysconfig` paths are strictly anchored within the `/opt` root.
+7.  **Performance & Hardening Metadata (Tier 7)**: Final audit of the `sysconfig` registry to confirm the persistence of PGO, LTO, and RELRO/BIND_NOW flags.
 
----
+## 3. Data Flow and Control Logic
+The application follows a strictly deterministic data flow, transitioning from environment discovery to a cumulative result aggregation.
 
-## Technical Audit Layers
+### Operational Flow Diagram:
+```mermaid
+graph TD
+    A[CLI Ingestion] --> B{Dependency Check}
+    B -- Missing Tools --> C[Exit Code 1]
+    B -- Tools OK --> D[Environment Discovery]
+    D --> E[Tier 1: Path Isolation]
+    E -- Success --> G1[Tier 2: Metadata Audit]
+    G1 -- Success --> G2[Tier 3: Extension Load Audit]
+    G2 -- Success --> G3[Tier 4: Functional Integrity Audit]
+    G3 -- Success --> H[Tier 5: Recursive Binary Audit]
+    H -- Success --> I1[Tier 6: Internal State Audit]
+    I1 -- Success --> I2[Tier 7: Performance Metadata Audit]
+    I2 -- Success --> J[Result Aggregation]
+    E -- Failure --> F[Log Violation]
+    G1 -- Failure --> F
+    G2 -- Failure --> F
+    G3 -- Failure --> F
+    H -- Failure --> F
+    I1 -- Failure --> F
+    I2 -- Failure --> F
+    F --> J
+    J --> K{All Passes OK?}
+    K -- No --> L[Exit Code 1]
+    K -- Yes --> M[Exit Code 0]
+```
 
-### 1. Deep Binary Isolation Audit
-The auditor recursively scans the installation prefix for all ELF files and performs the following checks:
-- **Header Integrity & Dependency-Aware Isolation**: Uses `readelf -d` to verify `RPATH` markers. The auditor intelligently distinguishes between binaries that **REQUiRE** isolation (those linking against **libpython**, **libssl**, **libcrypto**, **libexpat**, **libsqlite3**) and those that only link against standard OS libs (like `libc`). This prevents false positives on third-party extension modules.
-- **Dynamic Dependency Audit**: Uses `ldd` simulation to verify that critical libraries resolve to the isolated prefix and **never** to system paths like `/usr/lib64/`.
+### Control Logic:
+*   **Binary Discovery**: Uses `os.walk` for recursive traversal. ELF identification is performed via magic-byte signature (`\x7fELF`) rather than file extension to ensure comprehensive coverage.
+*   **Isolation Logic**: Distinguishes between "Internal Staging" (paths within the temporary `BUILDROOT`) and "Forbidden System Paths" (e.g., `/usr/lib64`). This enables the script to run effectively both during the build phase and after final deployment.
 
-### 2. Internal State Audit
-Verifies that the interpreter's internal state reflects its isolated location:
-- **Prefix Consistency**: Ensures `sys.prefix`, `sys.base_prefix`, and `sys.executable` are rooted in the target installation directory.
-- **Path Registry**: Audits `sysconfig` paths (stdlib, platlib, etc.) to prevent leakage into the host OS.
+## 4. Dependencies
+The auditor relies on a minimal footprint of system utilities and Python standard modules to maintain its integrity.
 
-### 3. Functional Verification
-Executes real-world operations for mission-critical modules:
-- **SSL/TLS**: Creates a default context and validates the linked OpenSSL version.
-- **Hashlib**: Performs a SHA256 consistency check (verified against `ac0a3dfd...`).
-- **SQLite**: Executes memory-based database operations.
-- **Expat**: Parses sample XML to confirm parser integrity.
-- **IT Business Bundle**: Verifies successful initialization of 25 core modules, including **Cython**, **CFFI**, **Requests**, **Dateutil**, **pip-tools** (`piptools`), and concurrency modules (**_thread**, **_multiprocessing**) for free-threading (MT) environments.
+### External Utilities:
+*   **readelf (binutils)**: Required for non-intrusive static inspection of ELF dynamic sections.
+*   **ldd (glibc-common)**: Required for runtime dependency resolution verification.
 
----
+### Python Modules:
+*   **sysconfig**: Used for retrieving build-time configuration variables.
+*   **importlib**: Used for programmatic verification of extension loader stability.
+*   **subprocess**: Used for orchestration of external binary audits.
 
-## Usage & Execution
+## 5. Command Line Arguments
+The script supports a focused set of arguments to control audit strictness and verbosity.
 
-### Execution Example
-The script must be executed by the **target interpreter** (the one being validated) to ensure the audit reflects the actual runtime state. 
+| Argument | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `--verbose` | Boolean | `False` | Enables engineering-level logging, including RPATH values and LDD resolution paths for all audited binaries. |
+| `--custom-libs` | Boolean | `False` | Enforces strict `/opt/lib` isolation. When active, core modules resolving to system paths (`/usr/lib`) are treated as critical violations. |
 
-To confirm total isolation, always execute with an unset `LD_LIBRARY_PATH`. For detailed engineering reviews, use the **`--verbose`** flag:
+## 6. Detailed Examples
 
+### Standalone Production Audit
+Used to verify the integrity of an existing installation in the `/opt/lib/python3` prefix:
 ```bash
-# Explicitly clear environment libraries
-unset LD_LIBRARY_PATH
-
-# Run the auditor with detailed engineering logs
-/opt/lib/python3/bin/python3.13 /usr/src/redhat/SPECS/inspect_python.py --verbose
+/opt/lib/python3/bin/python3.14 inspect_python.py --verbose --custom-libs
 ```
 
-### Understanding the Output
-
-The auditor produces a structured report categorized by audit scope:
-
-#### 1. Core Environment Report
-Displays the version and `sysconfig` paths. This confirms that the interpreter has correctly registered the `/opt/lib/python3` prefix and is looking for its standard library in the correct, isolated locations (`lib64/python3.13`).
-
-#### 2. Path & Metadata Isolation
-- **`SUCCESS: All 25 core modules imported successfully.`**: Confirms successful initialization of the standard library and the "IT Business Bundle" (Cython, CFFI, Requests, pip-tools, etc.), including critical concurrency modules for 3.14+ MT builds.
-- **`SUCCESS: PLATLIBDIR is 'lib64'`**: Verifies adherence to the EL-type standard for architecture-specific modules.
-
-#### 3. Functional Integrity Tests
-- **`SUCCESS: ... functional test passed`**: Executes real-world XML parsing (Expat), DB operations (SQLite), and cryptographic hands-hakes (SSL/Hashlib). This proves that the binary is not just "present" but "functional" and correctly linked to its private libraries.
-
-- **`SUCCESS: Cython/CFFI functional test passed`**: Confirms that the high-level language interfaces and FFI backends are correctly integrated into the isolated environment.
-
-#### 4. Deep Binary Isolation Audit
-- **`INFO: Audited XX ELF binaries`**: Confirms a recursive scan of all `.so` and executable files in the prefix.
-- **`INFO: [OK] ... (System dependencies only; no RPATH required: [...])`**: Indicates the dependency-aware auditor identified a safe system binary and bypassed redundant RPATH checks.
-- **`SUCCESS: All ELF binaries are fully isolated...`**: Verifies that headers contain `$ORIGIN` and that dynamic resolution avoids `/usr/lib64/` and `/usr/src/`. any failure here indicates a non-portable build.
-
-#### 5. Core Variable Isolation Audit
-- **`SUCCESS: All core internal variables are correctly isolated`**: Confirms that internal state variables like `sys.prefix` and `sys.base_prefix` are correctly rooted, preventing the interpreter from "wandering" into system directories.
-
-#### 6. Threading & GIL Audit (3.13+)
-- **`INFO: sys._is_gil_enabled(): ...`**: Reports the runtime GIL status (Standard vs. Free-Threading).
-- **`INFO: sys.flags.nogil: ...`**: Reports the state of the `--nogil` runtime flag (if available).
-- **`DEBUG: sysconfig Py_GIL_DISABLED: ...`**: (Verbose only) Reports the build-time configuration intent.
-
-### Final Result
-- **`FINAL RESULT: VERIFICATION PASSED`**: The build is fully compliant and ready for redistribution.
-- **`FINAL RESULT: VERIFICATION FAILED`**: One or more audits failed. The build is contaminated and should be rejected.
-
-### Sample Audit Output
-
-Below is an example of a successful audit pass on a compliant Python 3.13.13 build:
-
-```text
---- Core Environment Report ---
-Version:      3.13
-Build Date:   None
-
---- System Paths (sysconfig) ---
-stdlib      : /opt/lib/python3/lib64/python3.13
-platstdlib  : /opt/lib/python3/lib64/python3.13
-purelib     : /opt/lib/python3/lib/python3.13/site-packages
-platlib     : /opt/lib/python3/lib64/python3.13/site-packages
-include     : /opt/lib/python3/include/python3.13
--------------------------------
-
---- Python Build deep-inspection: 3.13.13 ---
-Interpreter: /opt/lib/python3/bin/python3.13
-Prefix:      /opt/lib/python3
-SUCCESS: sys.path is isolated from build-time sources.
-SUCCESS: PLATLIBDIR is 'lib64'
-SUCCESS: All 25 core modules imported successfully.
-SUCCESS: Expat functional test passed (XML parsing ok)
-SUCCESS: SQLite functional test passed (Memory DB ops ok)
-INFO: Linked OpenSSL Version: OpenSSL 3.6.2 7 Apr 2026
-SUCCESS: SSL functional test passed (Context creation ok)
-SUCCESS: Hashlib functional test passed (SHA256 ok)
-SUCCESS: Cython functional test passed (Version: 3.2.4)
-SUCCESS: CFFI functional test passed (FFI instantiation ok)
-SUCCESS: Requests functional test passed (Version: 2.33.1)
-SUCCESS: Dateutil functional test passed (Arithmetic ok)
---- Deep Binary Isolation Audit: /opt/lib/python3 ---
-INFO: Audited 86 ELF binaries.
-SUCCESS: All ELF binaries are fully isolated and use internal RPATHs.
---- Core Variable Isolation Audit: /opt/lib/python3 ---
-SUCCESS: All core internal variables are correctly isolated.
-INFO: sys._is_gil_enabled(): Enabled (Standard)
--------------------------------------------
-FINAL RESULT: VERIFICATION PASSED
+### Build-Pipeline Integration
+Typical invocation during the `validate` phase of the `python_build.sh` orchestrator:
+```bash
+# Executed within the BUILDROOT environment
+${STAGING_INTERPRETER} inspect_python.py --custom-libs
 ```
 
-### Exit Codes
-- **0**: All audits passed successfully.
-- **1**: One or more critical isolation violations detected (Build-blocking failure).
-
----
-
-## Maintainability & Best Practices
-
-The script follows modern Python standards (PEP 8) and includes several robustness features:
-- **Pre-flight Checks**: Verifies availability of system tools (`readelf`, `ldd`) before starting.
-- **Centralized Configuration**: Core isolation lists and forbidden paths are defined as top-level constants for easy adjustment.
-- **Safe Subprocess Handling**: Uses `subprocess.run` with list-based arguments to avoid shell injection and ensure reliable output capture.
-- **Resilient Walking**: Handles permission errors and symbolic links gracefully during recursive scans.
+### Targeted Module Verification
+To verify the isolation of a specific subset of libraries (e.g., only checking SSL and SQLite):
+```bash
+# This is handled internally by modifying LIBS_FOR_ISOLATION in the configuration section
+# Default: ['libpython', 'libexpat', 'libsqlite3', 'libssl', 'libcrypto']
+```

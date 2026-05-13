@@ -30,7 +30,7 @@ Core Functionality:
 import argparse
 import sys
 import json
-import subprocess
+import subprocess  # nosec B404
 import importlib.metadata
 import os
 import shutil
@@ -90,7 +90,7 @@ def get_outdated_packages():
             capture_output=True,
             text=True,
             check=True,
-        )
+        )  # nosec B603
         return json.loads(result.stdout)
     except (
         subprocess.CalledProcessError,
@@ -217,7 +217,7 @@ def upgrade_modules(simulate=False, json_output=False, target_path=None):  # pyl
             # Use Popen to stream the output of the upgrade process in real-time.
             with subprocess.Popen(
                 command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-            ) as proc:
+            ) as proc:  # nosec B603
                 if proc.stdout:
                     for line in proc.stdout:
                         print(line, end="")

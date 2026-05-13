@@ -1,7 +1,7 @@
 #!/bin/bash
 # -----------------------------------------------------------------------------
 # Code Audit Pipeline (code_audit.sh)
-# v1.1.2xg  2026/05/01  XDG
+# v1.1.4xg  2026/05/12  XDG
 #
 # -----------------------------------------------------------------------------
 # OBJECTIVE:
@@ -123,7 +123,7 @@ setup_environment() {
   CONF_GRYPE_FLAGS="-q"                                                                                              # Quiet mode for vulnerability scanning.
   CONF_PIPAUDIT_FLAGS="-q"                                                                                           # Suppress non-critical cache warnings etc.
   CONF_BANDIT_FLAGS="-q -r -l -iii"                                                                                  # Security linting flags for Python.
-  CONF_VERSION="1.1.1xg"                                                                                             # Application lifecycle version.
+  CONF_VERSION="1.1.2xg"                                                                                             # Application lifecycle version.
 
   # 3. SECURITY & RULE CONFIGURATION (ast-grep)
   # Rules are stored in the 'rules/' subdirectory relative to the script location.
@@ -131,7 +131,9 @@ setup_environment() {
   CONF_RULES_DIR="${CONF_SCRIPT_ROOT}/rules"
 
   # 4. LANGUAGE-SPECIFIC: PYTHON
-  CONF_PYTHON_TARGET="." # Target pattern for Python tools.
+  CONF_PYTHON_BIN="python3" # Default Python binary
+  PYBIN_EXPLICIT=false      # Flag for strict -m isolation
+  CONF_PYTHON_TARGET="."    # Target pattern for Python tools.
   CONF_RUFF_CACHE="${TEMP}/cache/python/ruff"
   CONF_VULTURE_CONFIDENCE=90 # Confidence threshold for dead code detection.
   CONF_RADON_FLAGS="-a -nc"  # Flags for complexity analysis.
@@ -371,6 +373,7 @@ Options:
   --fix:               Enable auto-fixes/formatting (DEFAULT is zero-impact check only).
   --log <path>:        Redirect and append all output to the specified log file.
   --python:            Force include/isolate Python tools.
+  --pybin <path|env>:  Specify Python binary (e.g., /usr/bin/python3.14). Use 'env' for \$PYTHON.
   --golang:            Force include/isolate Go tools.
   --nodejs:            Force include/isolate Node.js tools.
   --bash:              Force include/isolate Bash tools.
@@ -439,6 +442,26 @@ parse_arguments() {
       --python)
         HAS_ISOLATION=true
         SPEC_PYTHON=true
+        ;;
+      --pybin)
+        PYBIN_EXPLICIT=true
+        local py_val="$2"
+        if [ "$py_val" = "env" ]; then
+          if [ -n "${PYTHON:-}" ] && command -v "$PYTHON" > /dev/null 2>&1; then
+            CONF_PYTHON_BIN="$PYTHON"
+          else
+            echo "Error: --pybin env specified but \$PYTHON is not set or not executable." >&2
+            exit 1
+          fi
+        else
+          if command -v "$py_val" > /dev/null 2>&1; then
+            CONF_PYTHON_BIN="$py_val"
+          else
+            echo "Error: Specified Python binary '$py_val' not found or not executable." >&2
+            exit 1
+          fi
+        fi
+        shift
         ;;
       --golang)
         HAS_ISOLATION=true
@@ -532,6 +555,7 @@ run_diagnosis() {
 
   echo "---------------------------------------------------------"
   echo " TOOL DETECTION & READINESS REPORT"
+  echo " Python Binary: $(command -v "$CONF_PYTHON_BIN")"
   echo "---------------------------------------------------------"
 
   # Establish a shared temporary buffer for all parallel tasks.
@@ -758,31 +782,36 @@ run_phase_1_quality() {
 
   if [ "$PROCESS_PYTHON" = true ]; then
     echo "[Python]"
+    local PY_EXEC=()
+    if [ "$PYBIN_EXPLICIT" = true ]; then PY_EXEC=("$CONF_PYTHON_BIN" "-m"); fi
+
     # Ruff: Industry-standard fast linter and formatter.
     # Implements logic checks, stylistic enforcement, and auto-fix capabilities.
     if [ "$PROCESS_FIX" = true ]; then
-      run_audit_tool "Ruff Linter (Fix)" ruff check --fix "$CONF_PYTHON_TARGET"
-      run_audit_tool "Ruff Formatter (Fix)" ruff format "$CONF_PYTHON_TARGET"
+      run_audit_tool "Ruff Linter (Fix)" "${PY_EXEC[@]}" ruff check --fix "$CONF_PYTHON_TARGET"
+      run_audit_tool "Ruff Formatter (Fix)" "${PY_EXEC[@]}" ruff format "$CONF_PYTHON_TARGET"
     else
-      run_audit_tool "Ruff Linter (Check Only)" ruff check "$CONF_PYTHON_TARGET"
-      run_audit_tool "Ruff Formatter (Check Only)" ruff format --check "$CONF_PYTHON_TARGET"
+      run_audit_tool "Ruff Linter (Check Only)" "${PY_EXEC[@]}" ruff check "$CONF_PYTHON_TARGET"
+      run_audit_tool "Ruff Formatter (Check Only)" "${PY_EXEC[@]}" ruff format --check "$CONF_PYTHON_TARGET"
     fi
     # Pyright: Microsoft static type checker for enforcing type safety across the project.
-    run_audit_tool "Pyright Type Checker" pyright "$CONF_PYTHON_TARGET"
+    run_audit_tool "Pyright Type Checker" "${PY_EXEC[@]}" pyright "$CONF_PYTHON_TARGET"
   fi
 
   if [ "$PROCESS_GOLANG" = true ]; then
     echo "[Golang]"
-	# gofumpt: Stricter, more opinionated Go formatter.
-	# -l: list affected files, -w: write changes, -extra: enable extra rules (group_params,clothe_returns,...)
-	if [ "$PROCESS_EXTENDED" = true ]; then
-	  CONF_GOFUMPT_FLAGS="${CONF_GOFUMPT_FLAGS} -extra"
-	fi
+    # gofumpt: Stricter, more opinionated Go formatter.
+    # -l: list affected files, -w: write changes, -extra: enable extra rules (group_params,clothe_returns,...)
+    if [ "$PROCESS_EXTENDED" = true ]; then
+      CONF_GOFUMPT_FLAGS="${CONF_GOFUMPT_FLAGS} -extra"
+    fi
     if [ "$PROCESS_FIX" = true ]; then
-	  # Commit reformatting to source files
+      # Commit reformatting to source files
+      # shellcheck disable=SC2086
       run_audit_tool "Gofumpt (Fix)" gofumpt ${CONF_GOFUMPT_FLAGS} -w $CONF_GOLANG_TARGET_CDN
     else
       # Default mode: List non-compliant files without modifying the source.
+      # shellcheck disable=SC2086
       run_audit_tool "Gofumpt (Check Only)" gofumpt ${CONF_GOFUMPT_FLAGS} $CONF_GOLANG_TARGET_CDN
     fi
 
@@ -802,6 +831,7 @@ run_phase_1_quality() {
         run_audit_tool "Go Fix (Check Only)" go fix -diff $CONF_GOLANG_TARGET_CDR
       fi
     fi
+    # shellcheck disable=SC2086
     run_audit_tool "GolangCI Meta-Linter" golangci-lint run "$EXT_LINTERS" "$CONF_GOLANGCI_FLAGS" "$GOLANGCI_FIX_FLAG" $CONF_GOLANG_TARGET_CDR
   fi
 
@@ -821,20 +851,24 @@ run_phase_1_quality() {
     # Uses 'check' for holistic audit and adds '--write' for auto-remediation.
     local BIOME_FIX_FLAG=""
     [ "$PROCESS_FIX" = true ] && BIOME_FIX_FLAG="--write"
-    run_audit_tool "Biome Audit" biome check "$BIOME_FIX_FLAG" "$CONF_NODEJS_TARGET" "$CONF_BIOME_FLAGS"
+    # shellcheck disable=SC2086
+    run_audit_tool "Biome Audit" biome check "$BIOME_FIX_FLAG" "$CONF_NODEJS_TARGET" $CONF_BIOME_FLAGS
   fi
 
   if [ "$PROCESS_BASH" = true ]; then
     echo "[Bash]"
     # ShellCheck: Industry-standard linter for catching common shell bugs and anti-patterns.
     # We use find to ensure recursive discovery within the configured depth.
-    run_audit_tool "ShellCheck (Lint)" find "$CONF_BASH_TARGET" -maxdepth "$CONF_SEARCH_DEPTH" -name "*.sh" -exec shellcheck "$CONF_SHELLCHECK_FLAGS" {} +
+    # shellcheck disable=SC2086
+    run_audit_tool "ShellCheck (Lint)" find "$CONF_BASH_TARGET" -maxdepth "$CONF_SEARCH_DEPTH" -name "*.sh" -exec shellcheck $CONF_SHELLCHECK_FLAGS {} +
 
     # shfmt: Enforces a consistent coding style across Bash scripts (check-only default).
     if [ "$PROCESS_FIX" = true ]; then
-      run_audit_tool "shfmt (Fix Mode)" find "$CONF_BASH_TARGET" -maxdepth "$CONF_SEARCH_DEPTH" -name "*.sh" -exec shfmt "$CONF_SHFMT_FLAGS" -w {} +
+      # shellcheck disable=SC2086
+      run_audit_tool "shfmt (Fix Mode)" find "$CONF_BASH_TARGET" -maxdepth "$CONF_SEARCH_DEPTH" -name "*.sh" -exec shfmt $CONF_SHFMT_FLAGS -w {} +
     else
-      run_audit_tool "shfmt (Check Only)" find "$CONF_BASH_TARGET" -maxdepth "$CONF_SEARCH_DEPTH" -name "*.sh" -exec shfmt "$CONF_SHFMT_FLAGS" -d {} +
+      # shellcheck disable=SC2086
+      run_audit_tool "shfmt (Check Only)" find "$CONF_BASH_TARGET" -maxdepth "$CONF_SEARCH_DEPTH" -name "*.sh" -exec shfmt $CONF_SHFMT_FLAGS -d {} +
     fi
   fi
 
@@ -847,7 +881,8 @@ run_phase_1_quality() {
 
     # pslint.ps1: Custom PowerShell linter wrapper utilizing PSScriptAnalyzer.
     # We invoke via pwsh to ensure cross-platform compatibility (Cygwin/MSYS2).
-    run_audit_tool "PowerShell Linter (pslint)" pwsh -ExecutionPolicy Bypass -File "$CONF_SCRIPT_ROOT/pslint.ps1" -Path "$CONF_POWERSHELL_TARGET" -Recursive "$PS_FIX_FLAG" "$PS_STRICT_FLAG" "$CONF_PSLINT_FLAGS"
+    # shellcheck disable=SC2086
+    run_audit_tool "PowerShell Linter (pslint)" pwsh -ExecutionPolicy Bypass -File "$CONF_SCRIPT_ROOT/pslint.ps1" -Path "$CONF_POWERSHELL_TARGET" -Recursive "$PS_FIX_FLAG" "$PS_STRICT_FLAG" $CONF_PSLINT_FLAGS
   fi
 }
 
@@ -871,8 +906,12 @@ run_phase_2_logic() {
     # Semgrep: Polyglot static analysis with support for auto-remediation.
     local SEMGREP_FIX_FLAG=""
     if [ "$PROCESS_FIX" = true ]; then SEMGREP_FIX_FLAG="--autofix"; fi
+
+    local PY_EXEC=()
+    if [ "$PYBIN_EXPLICIT" = true ]; then PY_EXEC=("$CONF_PYTHON_BIN" "-m"); fi
+
     # shellcheck disable=SC2086
-    run_audit_tool "Semgrep Scan" semgrep scan "$SEMGREP_FIX_FLAG" $CONF_SEMGREP_FLAGS --config "$CONF_SEMGREP_CONFIG" --error
+    run_audit_tool "Semgrep Scan" "${PY_EXEC[@]}" semgrep scan "$SEMGREP_FIX_FLAG" $CONF_SEMGREP_FLAGS --config "$CONF_SEMGREP_CONFIG" --error
   fi
 
   # ast-grep: Structural search utilizing tree-sitter for high-precision rule-based matching.
@@ -899,12 +938,15 @@ run_phase_2_logic() {
     fi
   fi
   if [ "$PROCESS_PYTHON" = true ]; then
+    local PY_EXEC=()
+    if [ "$PYBIN_EXPLICIT" = true ]; then PY_EXEC=("$CONF_PYTHON_BIN" "-m"); fi
+
     # Bandit: Security-focused static analysis for Python.
     # shellcheck disable=SC2086
-    run_audit_tool "Bandit Security Scan" bandit $CONF_BANDIT_FLAGS "$CONF_PYTHON_TARGET"
+    run_audit_tool "Bandit Security Scan" "${PY_EXEC[@]}" bandit $CONF_BANDIT_FLAGS "$CONF_PYTHON_TARGET"
     # Radon: Measures cyclomatic complexity to flag poorly structured code (technical debt).
     # We pass flags separately to ensure the argument parser correctly handles them.
-    run_audit_tool "Radon Complexity Analysis" radon cc "$CONF_PYTHON_TARGET" -a -nc
+    run_audit_tool "Radon Complexity Analysis" "${PY_EXEC[@]}" radon cc "$CONF_PYTHON_TARGET" -a -nc
   fi
 
   if [ "$PROCESS_GOLANG" = true ]; then
@@ -940,8 +982,11 @@ run_phase_3_cleanup() {
   # PHASE 3: Repository Hygiene
   # -------------------------------------------------------------------------
   log_phase_banner "3" "CODE CLEANUP (HYGIENE)"
+  local PY_EXEC=()
+  if [ "$PYBIN_EXPLICIT" = true ]; then PY_EXEC=("$CONF_PYTHON_BIN" "-m"); fi
+
   # Vulture: Scans for dead code (unused variables/functions) with high confidence.
-  run_audit_tool "Vulture Dead Code Scan" vulture "$CONF_PYTHON_TARGET" --min-confidence "$CONF_VULTURE_CONFIDENCE"
+  run_audit_tool "Vulture Dead Code Scan" "${PY_EXEC[@]}" vulture "$CONF_PYTHON_TARGET" --min-confidence "$CONF_VULTURE_CONFIDENCE"
 }
 
 # --- AUDIT PHASE 4: SECRETS MANAGEMENT ---
@@ -991,6 +1036,9 @@ run_phase_5_supply_chain() {
   fi
 
   if [ "$PROCESS_PYTHON" = true ]; then
+    local PY_EXEC=()
+    if [ "$PYBIN_EXPLICIT" = true ]; then PY_EXEC=("$CONF_PYTHON_BIN" "-m"); fi
+
     # pip-audit: Purpose-built scanner utilizing the Python Packaging Advisory (PyPA) database.
     # We target specific manifests to avoid irrelevant host-environment scans.
     local PIP_AUDIT_MANIFEST_FOUND=false
@@ -999,16 +1047,20 @@ run_phase_5_supply_chain() {
 
     for req_file in "requirements.txt" "requirements-dev.txt"; do
       if [ -f "$req_file" ]; then
+        local target_tool="pip-audit"
+        if [ "$PYBIN_EXPLICIT" = true ]; then target_tool="pip_audit"; fi
         # shellcheck disable=SC2086
-        run_audit_tool "pip-audit ($req_file)" pip-audit $CONF_PIPAUDIT_FLAGS -r "$req_file" $PIP_FIX_FLAG
+        run_audit_tool "pip-audit ($req_file)" "${PY_EXEC[@]}" "$target_tool" $CONF_PIPAUDIT_FLAGS -r "$req_file" $PIP_FIX_FLAG
         PIP_AUDIT_MANIFEST_FOUND=true
       fi
     done
 
     if [ -f "pyproject.toml" ]; then
       # pyproject.toml: Handles local project context via standard pip-audit discovery.
+      local target_tool="pip-audit"
+      if [ "$PYBIN_EXPLICIT" = true ]; then target_tool="pip_audit"; fi
       # shellcheck disable=SC2086
-      run_audit_tool "pip-audit (pyproject.toml)" pip-audit $CONF_PIPAUDIT_FLAGS $PIP_FIX_FLAG
+      run_audit_tool "pip-audit (pyproject.toml)" "${PY_EXEC[@]}" "$target_tool" $CONF_PIPAUDIT_FLAGS $PIP_FIX_FLAG
       PIP_AUDIT_MANIFEST_FOUND=true
     fi
 
@@ -1095,9 +1147,13 @@ install_python_tool() {
   echo "--> [Install/Update] Python tool: $pkg"
   bootstrap_uv
   if command -v uv > /dev/null 2>&1; then
-    uv tool install "$pkg" --upgrade --force
+    if [ "$pkg" = "semgrep" ]; then
+      uv tool install "$pkg" --with setuptools --upgrade --force
+    else
+      uv tool install "$pkg" --upgrade --force
+    fi
   else
-    python3 -m pip install --user "$pkg" --upgrade
+    "$CONF_PYTHON_BIN" -m pip install --user "$pkg" --upgrade
   fi
 }
 

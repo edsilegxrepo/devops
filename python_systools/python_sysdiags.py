@@ -1,39 +1,62 @@
 #!/usr/bin/env python3
 # ------------------------------------------
 # python_sysdiags.py
-# v1.3.6xg  2025/10/15  XDG / MIS Center
+# v1.3.7xg  2026/05/11  XDG / MIS Center
 # ------------------------------------------
 """
 A comprehensive Python script to verify the Python interpreter's build environment,
 specifically its linkage and capabilities with OpenSSL, and other key system settings.
 
-Outputs detailed information in human-readable text or structured JSON format.
-Presents detailed information about Python version, paths, environment flags,
-OpenSSL version, TLS protocol support (including TLS 1.3),
-basic hashlib functionality, and standard library module availability.
+OBJECTIVES:
+  - BUILD AUDIT: Verify OpenSSL linkage, TLS 1.3 support, and core C-extension availability.
+  - ISOLATION AUDIT: Inspect RPATH/RUNPATH integrity and module search path hygiene.
+  - PERFORMANCE AUDIT: Check for high-performance build flags like PGO and LTO.
+  - BUNDLE INVENTORY: List installed 'IT Business Bundle' packages and their architecture status.
+  - ENVIRONMENT DIAGNOSTICS: Report interpreter flags, resource limits, and encoding settings.
+
+CORE COMPONENTS:
+  - SystemDiagnostics: The diagnostic engine containing logic for all system and build checks.
+  - Presentation Layer: Specialized functions (print_text_report, print_json_report) for formatting results.
+  - CLI Orchestrator: Argument parsing logic that maps user flags to diagnostic methods.
+
+FUNCTIONALITY:
+  The script performs a series of non-destructive probes on the running Python interpreter
+  and its host system. It uses standard library modules (sys, ssl, hashlib, sysconfig)
+  supplemented by system tools (readelf) to gather a deep state analysis.
+
+DATA FLOW:
+  1. USER INPUT: Command-line arguments are parsed to determine the scope of the audit.
+  2. DISPATCH: A 'dispatch_map' routes selected flags to specific methods in SystemDiagnostics.
+  3. GATHERING: Each method returns a structured dictionary or primitive containing raw data.
+  4. AGGREGATION: All individual results are collected into a master 'results' dictionary.
+  5. OUTPUT: The master dictionary is passed to a presentation function for final reporting.
 
 Usage:
   python_sysdiags.py [options]
 
 Options:
-  --json         Output results in JSON format.
-  --env          Display Python Interpreter & Environment details.
-  --build        Display Python Build-Time Configuration.
-  --paths        Display Python Module Search Path (sys.path).
-  --stdlib       Display Key Standard Library C-Extensions check.
-  --math         Display Math Module C-Functionality Check.
-  --ssl          Display OpenSSL & SSL Module Information.
-  --tls13        Display TLS 1.3 Capability Check.
-  --hashlib      Display Hashlib Functionality Check.
-  --rlimits      Display System Resource Limits (Unix-like only).
-  --all          Display all sections (default if no options specified).
-  -h, --help     Show this help message and exit.
+  --json           Output results in JSON format.
+  --env            Display Python Interpreter & Environment details.
+  --build          Display Python Build-Time Configuration.
+  --paths          Display Python Module Search Path (sys.path).
+  --stdlib         Display Key Standard Library C-Extensions check.
+  --math           Display Math Module C-Functionality Check.
+  --ssl            Display OpenSSL & SSL Module Information.
+  --tls13          Display TLS 1.3 Capability Check.
+  --hashlib        Display Hashlib Functionality Check.
+  --rlimits        Display System Resource Limits (Unix-like only).
+  --optimizations  Display Performance & Optimization Audit.
+  --isolation      Display Binary Search Strategy (Isolation Audit).
+  --pypi_bundle    Display Core Module Inventory.
+  --thread         Display Threading & GIL Governance.
+  --all            Display all sections (default if no options specified).
+  -h, --help       Show this help message and exit.
+
 If no options are specified, the script will display all sections.
 
 Required: Ensure that the following environment variables are UNSET
-          in the shell *before* executing this script:
+          in the shell *before* executing this script to ensure isolation:
           PYTHONPATH, PYTHONHOME, PYTHON, PYTHON_PLATFORM
-          (e.g., `unset PYTHONPATH`)
 """
 
 import ssl
@@ -44,11 +67,16 @@ import importlib.util  # For checking module presence
 import argparse  # For command-line argument parsing
 import math  # Added for the math module check
 import json
+import importlib
 
 try:
     import resource  # Unix-like systems only
 except ImportError:
     resource = None  # Will be None on Windows
+
+import subprocess  # nosec B404
+import re
+import shutil
 
 
 # ----------------------------------------
@@ -56,8 +84,12 @@ except ImportError:
 # ----------------------------------------
 class SystemDiagnostics:
     """
-    Encapsulates all system diagnostic checks.
-    Each method returns structured data, separating data gathering from presentation.
+    DIAGNOSTIC ENGINE
+    -----------------
+    This class encapsulates all logic for gathering system state.
+    It is designed to be 'presentation-agnostic'—every method returns
+    structured Python data (dictionaries/lists) which can then be
+    serialized to JSON or formatted as text.
     """
 
     def get_python_env_details(self):
@@ -103,6 +135,8 @@ class SystemDiagnostics:
     def get_stdlib_c_extensions_check(self):
         """Checks status of Key Standard Library C-Extensions."""
         results = {}
+        # These modules are critical for a fully functional Python environment.
+        # Absence usually indicates missing -devel packages during the build phase.
         c_extensions_to_check = [
             "zlib",
             "_bz2",
@@ -120,6 +154,13 @@ class SystemDiagnostics:
             "_thread",
             "_multiprocessing",
             "_zstd",
+            "_ctypes",
+            "_decimal",
+            "_uuid",
+            "_asyncio",
+            "_zoneinfo",
+            "_ssl",
+            "_hashlib",
         ]
         for module_name in c_extensions_to_check:
             spec = importlib.util.find_spec(module_name)
@@ -217,14 +258,127 @@ class SystemDiagnostics:
                 limits[key] = {"soft": "N/A", "hard": "N/A"}
         return {"status": "OK", "limits": limits}
 
+    def get_optimization_details(self):
+        """
+        Audits high-performance build flags.
+
+        Checks if the interpreter was built with PGO (Profile Guided Optimization)
+        and LTO (Link-Time Optimization), which significantly impact runtime speed.
+        """
+        config_vars = sysconfig.get_config_vars()
+        pgo_flag = config_vars.get("PGO_PROF_USE_FLAG", "N/A")
+        cflags = config_vars.get("CONFIGURE_CFLAGS", "")
+
+        lto_active = (
+            "yes" if config_vars.get("Py_LTO") == "yes" or "-flto" in cflags else "no"
+        )
+        pgo_active = (
+            "yes" if "-fprofile-use" in cflags or "-fprofile-use" in pgo_flag else "no"
+        )
+
+        return {
+            "pgo_active": pgo_active,
+            "pgo_flags": pgo_flag,
+            "lto_active": lto_active,
+            "computed_gotos": config_vars.get("HAVE_COMPUTED_GOTOS", "N/A"),
+        }
+
+    def get_isolation_audit(self):
+        """
+        Performs a live binary header audit for RPATH/RUNPATH integrity.
+
+        This check ensures that the Python binary has been hardened against
+        library injection and uses $ORIGIN-based relative paths for isolation.
+        """
+        try:
+            readelf_bin = shutil.which("readelf") or "readelf"
+            res = subprocess.run(
+                [readelf_bin, "-d", sys.executable],  # type: ignore
+                capture_output=True,
+                text=True,
+                check=True,
+            )  # nosec B603
+            rpath = re.search(r"\(RPATH\).*?\[(.*?)\]", res.stdout)
+            runpath = "(RUNPATH)" in res.stdout
+            return {
+                "status": "OK",
+                "rpath": rpath.group(1) if rpath else "None",
+                "runpath_forbidden_check": "PASS"
+                if not runpath
+                else "FAIL (RUNPATH Detected)",
+                "origin_prioritized": "YES"
+                if rpath and rpath.group(1).startswith("$ORIGIN")
+                else "NO",
+            }
+        except Exception as e:
+            return {"status": "Error", "details": str(e)}
+
+    def get_pypi_bundle_inventory(self):
+        """
+        Lists the 13-package 'IT Business Bundle' and their architecture status.
+
+        Audits whether core third-party packages are installed in the architecture-
+        dependent (lib64) or architecture-independent (lib) directories.
+        """
+        from importlib.metadata import version, PackageNotFoundError
+        import importlib.util
+
+        bundle = [
+            "pip",
+            "setuptools",
+            "wheel",
+            "build",
+            "installer",
+            "requests",
+            "certifi",
+            "virtualenv",
+            "python-dateutil",
+            "packaging",
+            "pip-tools",
+            "cython",
+            "cffi",
+        ]
+        results = {}
+        platlib = sysconfig.get_path("platlib")
+
+        for pkg in bundle:
+            try:
+                v = version(pkg)
+                # Find the actual module path to determine if it's in site-arch (lib64)
+                import_name = (
+                    pkg.replace("-", "_") if pkg != "pip-tools" else "piptools"
+                )
+                spec = importlib.util.find_spec(import_name)
+                origin = spec.origin if spec else ""
+
+                status = (
+                    "sitearch" if origin and origin.startswith(platlib) else "sitelib"
+                )
+
+                results[pkg] = {
+                    "status": status,
+                    "version": v,
+                }
+            except (PackageNotFoundError, ImportError):
+                results[pkg] = {"status": "Missing"}
+        return results
+
+    def get_gil_status(self):
+        """Reports the Global Interpreter Lock status (Python 3.13+)."""
+        return {
+            "is_gil_enabled": getattr(sys, "_is_gil_enabled", lambda: "N/A (Legacy)")()
+        }
+
 
 # ----------------------------------------
-# Presentation Functions
+# Presentation Functions (Output Layer)
 # ----------------------------------------
 def print_text_report(results):  # pylint: disable=too-many-branches,too-many-statements
     """
-    Prints the diagnostic results in a human-readable text format,
-    matching the original script's output.
+    HUMAN-READABLE OUTPUT
+    ---------------------
+    Iterates through the results dictionary and prints formatted tables
+    and status messages to stdout (and errors to stderr).
     """
     if "env" in results:
         data = results["env"]
@@ -260,7 +414,8 @@ def print_text_report(results):  # pylint: disable=too-many-branches,too-many-st
     if "stdlib" in results:
         data = results["stdlib"]
         print("\n----- Key Standard Library C-Extensions -----")
-        for name, info in data.items():
+        for name in sorted(data.keys()):
+            info = data[name]
             if info["status"] == "Found":
                 print(f"  - {name}: Found (from {info['origin']})")
             else:
@@ -350,9 +505,56 @@ def print_text_report(results):  # pylint: disable=too-many-branches,too-many-st
         else:
             print(data["details"])
 
+    if "optimizations" in results:
+        data = results["optimizations"]
+        print("\n----- Performance & Optimization Audit -----")
+        print(
+            f"PGO (Profile Guided Optimization): {data['pgo_active']} ({data['pgo_flags']})"
+        )
+        print(f"LTO (Link-Time Optimization):     {data['lto_active']}")
+        print(
+            f"Computed Gotos active:            {'YES' if data['computed_gotos'] == 1 else 'NO'}"
+        )
+
+    if "isolation" in results:
+        data = results["isolation"]
+        print("\n----- Binary Search Strategy (Isolation Audit) -----")
+        if data["status"] == "OK":
+            print(f"RPATH Integrity:       {data['rpath']}")
+            print(f"RUNPATH Forbidden:     {data['runpath_forbidden_check']}")
+            print(f"ORIGIN Prioritization: {data['origin_prioritized']}")
+        else:
+            print(f"Error: {data['details']}", file=sys.stderr)
+
+    if "pypi_bundle" in results:
+        data = results["pypi_bundle"]
+        print("\n----- IT Business Bundle: Core Module Inventory -----")
+        print(f"{'Package':<15} | {'Version':<12} | {'Type'}")
+        print("-" * 40)
+        for pkg in sorted(data.keys()):
+            info = data[pkg]
+            print(f"{pkg:<15} | {info.get('version', 'N/A'):<12} | {info['status']}")
+
+    if "thread" in results:
+        data = results["thread"]
+        print("\n----- Threading & GIL Governance -----")
+        val = data["is_gil_enabled"]
+        status = (
+            "ENABLED (Standard)"
+            if val is True
+            else "DISABLED (Free-Threading)"
+            if val is False
+            else val
+        )
+        print(f"Global Interpreter Lock (GIL): {status}")
+
 
 def print_json_report(results):
-    """Prints the diagnostic results as a JSON object."""
+    """
+    STRUCTURED OUTPUT
+    -----------------
+    Serializes the entire results dictionary into a machine-readable JSON object.
+    """
     print(json.dumps(results, indent=2))
 
 
@@ -361,8 +563,12 @@ def print_json_report(results):
 # ----------------------------------------
 def main():
     """
-    Parses command-line arguments and orchestrates the execution of the
-    selected diagnostic functions.
+    CLI ORCHESTRATOR
+    ----------------
+    1. Validates runtime environment (Python version).
+    2. Defines CLI arguments and maps them to SystemDiagnostics methods.
+    3. Executes selected diagnostics.
+    4. Passes aggregated data to the requested presentation function.
     """
     if sys.version_info < (3, 10):
         print("Error: This script requires Python 3.10 or newer.", file=sys.stderr)
@@ -384,6 +590,10 @@ def main():
         "tls13": "get_tls13_capability_check",
         "hashlib": "get_hashlib_check",
         "rlimits": "get_system_resource_limits",
+        "optimizations": "get_optimization_details",
+        "isolation": "get_isolation_audit",
+        "pypi_bundle": "get_pypi_bundle_inventory",
+        "thread": "get_gil_status",
     }
 
     parser.add_argument(

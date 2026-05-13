@@ -36,7 +36,7 @@ class DummyRequests:  # pylint: disable=too-few-public-methods
     """A dummy class that mimics the `requests` library's interface for PyPI lookups."""
 
     @staticmethod
-    def get(url, timeout):  # pylint: disable=unused-argument
+    def get(url, _timeout):  # pylint: disable=unused-argument
         """Simulates a failed GET request, returning a 503 status code."""
 
         class DummyResponse:  # pylint: disable=too-few-public-methods,missing-class-docstring

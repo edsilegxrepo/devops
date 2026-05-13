@@ -39,6 +39,12 @@ The orchestrator is explicitly designed for stability and native compatibility a
 - **Dynamic Environment Isolation**: The script detects the active host ecosystem (`$IS_CYGWIN`, `$IS_MSYS`, or Linux). In Windows-based POSIX subsets, it performs rigorous `PATH` sanitization to prevent fatal conflicts (e.g., accidentally invoking MSYS binaries inside a Cygwin shell) while protecting necessary native Windows paths (like `C:\Windows\System32`).
 - **Mixed Path Normalization**: Absolute paths are universally normalized into a 'Mixed Path' format—utilizing forward slashes alongside Windows drive letters (e.g., `E:/path/to/rules/`). This specific format is natively understood by both POSIX shells for internal logic tests, and by Windows-native binaries (like `go.exe` or `python.exe`) for task execution, completely eliminating OS-level path-resolution errors.
 
+### 8. Build Isolation and Staging Integrity (Hardening)
+To ensure that builds are fully reproducible and isolated from the host environment, the orchestrator implements a strict "Zero-Pollution" isolation pattern:
+- **Environment Hijacking Prevention**: Utilizes `PYTHONHOME` and the `-I` (Isolated Mode) flag to force the interpreter to ignore host site-packages and environment variables, ensuring it exclusively uses the staged BuildRoot.
+- **Relocatability via Global Path Correction**: Implements a comprehensive post-processing pass that scans the entire installation prefix—not just binaries—to strip absolute BuildRoot paths from shebangs, pkg-config files, and sysconfig modules.
+- **Atomic Staging Control**: Carefully manages the relationship between the staging `root` and the target `prefix` to prevent "double-rooting" errors, ensuring that internal installation tools (like `ensurepip`) maintain correct internal pathing for final deployment.
+
 ## Data Flow and Control Logic
 
 The following diagram illustrates the modular operational flow from initialization to final status reporting.
@@ -101,6 +107,7 @@ The utility relies on a suite of specialized binaries. Their presence can be ver
 | `--fix` | Flag | `false` | Enables auto-fix and reformatting for supported tools. |
 | `--log <path>` | String | N/A | Redirects and appends all audit output to the specified log file. |
 | `--python` | Flag | `true`* | Isolates the audit to Python tools only. |
+| `--pybin <path\|env>` | String | `python3` | Specifies the Python binary. If set, tools run via `python -m <tool>`. If omitted, default `python3` and `PATH`-resident tools are used. |
 | `--golang` | Flag | `true`* | Isolates the audit to Go tools only. |
 | `--nodejs` | Flag | `true`* | Isolates the audit to Node.js tools only. |
 | `--bash`   | Flag | `true`* | Isolates the audit to Bash tools only. |
@@ -124,6 +131,8 @@ The utility relies on a suite of specialized binaries. Their presence can be ver
 The utility orchestrates a specialized collection of industry-standard tools. Below is a detailed breakdown of each tool's category, purpose, and detection scope.
 
 ### 1. Python-Specific Suite
+The Python audit suite is designed for high-fidelity environment isolation. By utilizing the `--pybin` flag, users can strictly control which Python interpreter is used for both tool procurement and execution, preventing version drift or system-level dependency leakage.
+
 | Tool | Purpose | Detection Scope | Audit Tier |
 | :--- | :--- | :--- | :--- |
 | **Ruff** | Ultra-fast Linter & Formatter | Detects syntax errors, PEP8 style violations, unused imports, and logical anti-patterns. | Core |
@@ -284,6 +293,23 @@ Used during CI/CD runner setup to verify all dependencies are properly mapped. B
 ./code_audit.sh --detect --python
 ```
 
+### 10. Python Environment Isolation
+The orchestrator implements a **"Smart Execution"** model for Python:
+- **Default**: If `--pybin` is not provided, the script prioritizes tools available in your `PATH`. This is compatible with global or user-installed standalone binaries.
+- **Strict Isolation**: If `--pybin` is explicitly provided, the script forces all tools to execute via `python -m <tool>`. This ensures that tools are strictly bound to the requested environment.
+
+```bash
+# Default behavior (uses PATH)
+./code_audit.sh --python
+
+# Forced isolation (uses venv's python -m)
+./code_audit.sh --python --pybin /opt/venv/bin/python
+
+# Inherit from the $PYTHON environment variable
+export PYTHON=/usr/local/bin/python3.14
+./code_audit.sh --python --pybin env
+```
+
 ## Unit Tests Implementation
 
 To ensure reliability and guard against regressions in the orchestration logic, the pipeline includes a comprehensive, self-healing unit test suite: [code_audit_test.sh](code_audit_test.sh).
@@ -370,7 +396,8 @@ The primary purpose of the installation engine is to provision a functional audi
     1. Resolve requested scope (e.g., `--python`, `--auto`).
     2. Check for binary presence.
     3. If missing, bootstrap appropriate manager (`uv`, `npm`, `go`) or utilize official `curl / sh` scripts for binary archives.
-    4. Install binary into user-context path (`~/.local/bin`, `~/.npm-global`).
+    4. **Python-Specific**: Installation is performed using `"$CONF_PYTHON_BIN" -m pip` (or `uv` if available) to ensure tools are bound to the specified interpreter.
+    5. Install binary into user-context path (`~/.local/bin`, `~/.npm-global`).
 *   **Behavioral Difference**:
     - **`--install`**: Authenticates/installs missing tools and **continues** to execute the audit phases.
     - **`--install-only`**: Performs the staging operation and **terminates** immediately with status 0.
@@ -396,7 +423,7 @@ The update engine is designed for maintenance, allowing users to refresh their l
     1.  Resolve requested scope.
     2.  Verify tool residency (must be Local).
     3.  Execute ecosystem-aware refresh:
-        - **Python**: `uv tool install --upgrade`
+        - **Python**: `uv tool install --upgrade` (or `"$CONF_PYTHON_BIN" -m pip install --upgrade` fallback)
         - **Node.js**: `npm install -g package@latest`
         - **Go**: `go install package@latest`
         - **Binary Scripts**: Re-execution of official `curl / sh` installers for latest archives.

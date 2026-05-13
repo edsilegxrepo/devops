@@ -1,7 +1,7 @@
 #!/bin/bash
 # -----------------------------------------------------------------------------
 # Unit test suite for code_audit.sh (code_audit_test.sh)
-# v1.0.0xg  2026/04/17  XDG
+# v1.0.1xg  2026/05/12  XDG
 #
 # -----------------------------------------------------------------------------
 # OBJECTIVES:
@@ -105,7 +105,7 @@ fi
 # Dynamically extract all registered tools from the orchestrator source code.
 # The regex captures everything inside the parentheses of any AUDIT_*_TOOLS array.
 TOOLS="$(grep -E "AUDIT_.*_TOOLS=\(" "$SCRIPT_PATH" | sed 's/.*(\([^)]*\)).*/\1/' | tr -d '"' | tr ' ' '\n' | sort -u | grep -v '^$')"
-TOOLS="$TOOLS uv go npm curl pwsh" # Add core installation/bootstrap tools and PowerShell to registry
+TOOLS="$TOOLS uv go npm curl pwsh python3" # Add core installation/bootstrap tools and PowerShell to registry
 
 generate_mocks() {
   echo "--> Generating Mock Binaries with Execution/Flag Tracking..."
@@ -117,6 +117,28 @@ generate_mocks() {
     case "$tool" in
       "nilness")
         printf '#!/bin/bash\necho "$*" >> "%s/nilness.args"\necho "0" > "%s/nilness"\nif [[ "$*" == *"-V=full"* ]]; then echo "nilness version devel buildID=ce7dad79295bbba0c591668e9fe38c31efc94c4cfbf3d8c5e8f6034703567209"; fi\n' "$MARKS" "$MARKS" > "$bin_path"
+        ;;
+      "python3")
+        cat << EOF > "$bin_path"
+#!/bin/bash
+# Mock binary for python3
+[ "\$1" = "--version" ] && echo "Python 3.14.5"
+if [ -n "\$MARKS" ]; then
+    echo "0" > "\$MARKS/python3"
+    echo "\$*" >> "\$MARKS/python3.args"
+fi
+# Handle -m <tool> logic to allow existing tests to pass
+if [ "\$1" = "-m" ]; then
+    tool="\$2"
+    shift 2
+    # Normalization: pip_audit -> pip-audit
+    [ "\$tool" = "pip_audit" ] && tool="pip-audit"
+    if command -v "\$tool" > /dev/null 2>&1; then
+        "\$tool" "\$@"
+    fi
+fi
+exit 0
+EOF
         ;;
       *)
         cat << EOF > "$bin_path"
@@ -341,6 +363,8 @@ run_test "Fix Propagation: oxfmt (Fix -> omit --check)" verify_fix_flags FIX_OFF
 
 # Test 4: Isolation Logic
 run_test "Python Isolation" verify_isolation "[Python]" --path "$WORKSPACE" --python
+run_test "Python Binary Isolation" bash -c "rm -f $MARKS/*; bash $SCRIPT_PATH --path $WORKSPACE --python --pybin $MOCK_BIN/python3 > /dev/null 2>&1; grep -q '\-m ruff' $MARKS/python3.args"
+run_test "Python Binary Reporting" bash -c "bash $SCRIPT_PATH --detect --pybin $MOCK_BIN/python3 | grep -q 'Python Binary: $MOCK_BIN/python3'"
 run_test "Golang Isolation" verify_isolation "[Golang]" --path "$WORKSPACE" --golang
 run_test "PowerShell Isolation" verify_isolation "[PowerShell]" --path "$WORKSPACE" --powershell
 
