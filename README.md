@@ -17,12 +17,14 @@ Hardened frameworks for system security and code quality assurance.
 - `root_audit.sh`: System-level security audit and remediation for the root account.
 - `pslint.ps1`: PowerShell Linter Wrapper for PSScriptAnalyzer (Audit and Auto-Fix).
 - `shlint.sh`: Bash script hygiene tool enforcing formatting (shfmt) and static analysis (shellcheck).
+- `detect_priv.sh`: Privileged user detection auditing administrative rights via the `sudo` policy engine.
 
 ### 2. Build & Validation Tasks (`/build_tasks`)
 Automation for building, and validating core system components.
 - `gobuild_code-analyzers.sh`: Automation for compiling Go-based static analysis tools.
 - `openssl_build.sh`: A multi-mode (RPM/Archive/All) script for isolated OpenSSL builds.
 - `sqlite3_validate.sh`: A suite for verifying SQLite 3 binary builds against specs.
+- `rust_upgrade.sh`: Automated management of Rust toolchain deployments and target libraries.
 
 ### 3. Git Management (`/git_repomgr`)
 Tools for orchestrating large-scale repository synchronization and user management.
