@@ -84,7 +84,10 @@ graph TD
     Y -- "Yes" --> AA["Extract tar archives"]
     AA --> AB{"Check: Extraction directories exist?"}
     AB -- "No" --> AC["Exit with Error 06"]
-    AB -- "Yes" --> AD["Execute execInstall for Linux Toolchain"]
+    AB -- "Yes" --> UN{"Check: Existing uninstaller?"}
+    UN -- "Yes" --> RUN["Execute uninstall.sh"]
+    UN -- "No" --> AD["Execute execInstall for Linux Toolchain"]
+    RUN --> AD["Execute execInstall for Linux Toolchain"]
     AD --> AE["Execute execInstall for Windows target std lib"]
     AE --> AF{"Check: Install Mode?"}
     AF -- "SYSTEM" --> AG["Purge downloaded files & folders"]
@@ -120,10 +123,11 @@ graph TD
 5. **Version Check and Resolution**: Compares the local version with the target version (either explicitly specified via `--version` or auto-detected via the official stable channel manifest). Exits `0` if they match, unless `--force` is specified.
 6. **Download & Space Verification**: Validates that at least 1GB of free space is available on the target partition of the installation path, changes directory to `/opt/install`, deletes stale directories, and downloads the packages via `curl`.
 7. **Decompression**: Extracts `.tar.xz` archives using `tar -Jxf` and validates the extracted directory structures.
-8. **Toolchain & Component Installation**: Invokes `execInstall` sequentially. It passes `--destdir=/var/opt/rust` if `--local` is active.
-9. **Linking (Optional)**: If in `LOCAL` mode, traverses `/usr/local/bin` and links all executable targets from `/var/opt/rust/bin/`.
-10. **Purge**: Deletes downloaded archives and temporary directories to reclaim disk space.
-11. **Verification**: Queries the active `rustc` version and checks target list availability.
+8. **Clean Uninstallation (Cleansing)**: Checks if an uninstaller script (`uninstall.sh`) exists from a previous installation in `/usr/local/lib/rustlib/` (SYSTEM mode) or `${RUST_HOME}/lib/rustlib/` (LOCAL mode). If found, executes it to completely purge the old Rust installation, preventing orphaned files or components from lingering.
+9. **Toolchain & Component Installation**: Invokes `execInstall` sequentially for the main toolchain and target standard libraries. It passes `--destdir=/var/opt/rust` if `--local` is active.
+10. **Linking (Optional)**: If in `LOCAL` mode, traverses `/usr/local/bin` and links all executable targets from `/var/opt/rust/bin/`.
+11. **Purge**: Deletes downloaded archives and temporary directories to reclaim disk space.
+12. **Verification**: Queries the active `rustc` version and checks target list availability.
 
 ---
 
@@ -170,10 +174,18 @@ The script processes parameters non-positionally:
 | **`--auto`** | Flag | Auto-detects the latest stable version and upgrades if a new version is available. | *Inactive* | **No** (Either this, `--version`, or `--detect` must be specified) |
 | **`--detect [text\|json]`** | Flag + optional arg | Scans the system for an active Rust installation and prints a report listing paths, versions, targets, and toolchain components. The optional argument selects the output format: `text` (default) for a human-readable table; `json` for a machine-readable JSON object. Does **not** require root privileges. | `text` | **No** (Either this, `--version`, or `--auto` must be specified) |
 | **`--local`** | Flag | Forces compiler binaries to be installed in `/var/opt/rust` with symbolic link entrypoints, rather than installing to `/usr/local`. | *Inactive* (System Mode) | **No** |
-| **`--force`** | Flag | Forces download and installation even if the detected local Rust version matches the target version. | *Inactive* | **No** |
-| **`--linters [<fqdn>]`** | String (optional) | Installs Rust code quality tools. If `<fqdn>` is specified, checks and extracts precompiled linter binaries directly from the archive instead of compilation. Otherwise compiles them if not present. Can be **combined** with `--version`/`--auto` **or used standalone**. Requires root. Cannot be combined with `--detect`. | *Inactive* | **No** |
+| **`--force`** | Flag | Forces download and installation even if the detected local Rust version matches the target version. Also triggers systematic re-installation of all linters. | *Inactive* | **No** |
+| **`--core-components`** | Flag | Excludes optional toolchain components (`rust-docs`, `rust-docs-json-preview`, `rust-analysis-x86_64-pc-windows-gnu`, and `llvm-bitcode-linker-preview`) during toolchain installation. | *Inactive* | **No** |
+| **`--linters [<fqdn>]`** | String (optional) | Installs Rust code quality tools. If `<fqdn>` is specified, checks and extracts precompiled linter binaries directly from the archive instead of compilation. Otherwise compiles them. Uses native Cargo update checks or forced rebuilds depending on toolchain changes. Requires root. Cannot be combined with `--detect`. | *Inactive* | **No** |
 | **`--package-citools [fqdn]`** | String (optional) | Packages all installed linter binaries into a `tar.xz` archive for distribution. Automatically enables `--linters`. If `[fqdn]` is omitted, defaults to `/opt/done/rust-linters-<version>-<date>-<dist><os_id>-<arch>.tar.xz`. | *Inactive* | **No** |
+| **`--log [<fqdn>]`** | String (optional) | Redirects all script stdout and stderr output to the specified log file in append mode. If `[fqdn]` is omitted, defaults to `/var/log/rust_upgrade.log`. | `/var/log/rust_upgrade.log` | **No** |
 | **`--help, -h`** | Flag | Displays the usage help menu and exits. | *Inactive* | **No** |
+
+> [!NOTE]
+> **Linter Update and Rebuilding Strategy**
+> 
+> * **Systematic Rebuild/Reinstallation**: Bypasses any version checking and forces clean compilation of all linters. This is automatically triggered either by a compiler toolchain version change (such as a fresh install or compiler upgrade) OR by explicitly passing the `--force` flag.
+> * **Conditional Auto-Updates**: Under standard execution (when the compiler version matches the target and `--force` is omitted), the script delegates update checks directly to Cargo. Cargo queries crates.io and automatically compiles only those tools that have a newer version available, skipping those that are already up-to-date.
 
 ---
 
@@ -226,6 +238,24 @@ Forces download and reinstallation even if the target version is already detecte
 sudo ./rust_upgrade.sh --version 1.96.0 --force
 ```
 
+### Example 3b: Core Components Only Installation (Minimal Footprint)
+Installs Rust version `1.96.0` globally but skips optional components such as documentation and preview target linkers.
+```bash
+# Execute as root
+sudo ./rust_upgrade.sh --version 1.96.0 --core-components
+```
+
+> [!NOTE]
+> **Excluded Components Details under `--core-components`**
+>
+> When the `--core-components` flag is activated, the installer dynamically queries the package manifest and excludes the following optional components:
+> 
+> * **`rust-docs`**: The local HTML documentation for the Rust standard library, compiler, and book. Used for offline browsing. Skipping this significantly reduces the installation footprint and prevents copying tens of thousands of small HTML files.
+> * **`rust-docs-json-preview`**: The JSON-formatted representation of the Rust documentation, used by experimental offline documentation tools.
+> * **`rust-analysis-<arch>-unknown-linux-gnu`**: Compiler analysis metadata files for the host Linux compilation target. These files are used by IDEs and code intelligence engines to query types and definitions. They are not required for compiling code or standard Cargo operations.
+> * **`rust-analysis-<arch>-pc-windows-gnu`**: Compiler analysis metadata files for the Windows cross-compilation target (`x86_64-pc-windows-gnu`). These files are used by IDEs and source analysis engines to query types and definitions. They are not required for standard cross-compilation or building binaries.
+> * **`llvm-bitcode-linker-preview`**: An experimental linker utility allowing direct LLVM bitcode linking. This is an optional toolchain component not required for standard toolchain or target building.
+
 ### Example 4: Rust Installation Detection (Text Format — Default)
 Runs in informational mode as any user (no root permissions required) to report current Rust installation status and components.
 ```bash
@@ -260,7 +290,17 @@ Runs in informational mode as any user (no root permissions required) to report 
   - rustfmt-preview
   - clippy-preview
 
-[4] Code Quality & Linter Tools
+[4] Switchable Components
+-------------------------
+  Component                                  Status
+  ---------                                  ------
+  rust-docs                                  Installed
+  rust-docs-json-preview                     Excluded
+  rust-analysis-x86_64-unknown-linux-gnu     Installed
+  rust-analysis-x86_64-pc-windows-gnu        Installed
+  llvm-bitcode-linker-preview                Excluded
+
+[5] Code Quality & Linter Tools
 -------------------------------
   Tool                   Status          Version
   ----                   ------          -------
@@ -310,6 +350,13 @@ Returns a machine-readable JSON object — ideal for CI pipelines, monitoring sc
     "rustfmt-preview",
     "clippy-preview"
   ],
+  "switchable_components": {
+    "rust-docs": "installed",
+    "rust-docs-json-preview": "excluded",
+    "rust-analysis-x86_64-unknown-linux-gnu": "installed",
+    "rust-analysis-x86_64-pc-windows-gnu": "installed",
+    "llvm-bitcode-linker-preview": "excluded"
+  },
   "linters": {
     "cargo-audit": "not_installed",
     "cargo-bloat": "not_installed",
@@ -422,6 +469,20 @@ sudo ./rust_upgrade.sh --package-citools
 # Packaging with a custom archive filename
 sudo ./rust_upgrade.sh --package-citools custom-linter-distribution.tar.xz
 ```
+
+### Example 9: Logging and Output Redirection
+
+Redirects all stdout and stderr output generated by the script to a log file in append mode. This is particularly useful for cron jobs, background upgrades, or automated configuration tooling (e.g., Ansible, Puppet).
+
+```bash
+# Redirect to the default log location (/var/log/rust_upgrade.log)
+sudo ./rust_upgrade.sh --auto --log
+
+# Redirect to a custom log file FQDN
+sudo ./rust_upgrade.sh --version 1.96.0 --local --log /opt/install/logs/rust_install_1.96.0.log
+```
+
+**Note:** If the log file or its parent directories do not exist, they will be automatically created (using `mkdir -p`) before execution starts. Because it runs in **append mode**, subsequent runs of the script will append to the end of the log rather than overwriting it, preserving execution histories.
 
 ### CI/CD and Production Deployment Best Practices
 

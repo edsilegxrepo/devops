@@ -9,7 +9,7 @@
 #    Supports both system-wide and localized directory installs.
 #
 #  Syntax:
-#    rust_upgrade.sh [--version <version> | --auto] [--local] [--force] [--linters [<fqdn>]] [--package-citools [fqdn]] [--help]
+#    rust_upgrade.sh [--version <version> | --auto] [--local] [--force] [--core-components] [--linters [<fqdn>]] [--package-citools [fqdn]] [--log [fqdn]] [--help]
 #    rust_upgrade.sh --detect [text|json]
 #    rust_upgrade.sh --linters [<fqdn>]
 #
@@ -20,12 +20,22 @@
 #    - Standalone linter compilation:            rust_upgrade.sh --linters
 #    - Standalone linter archive extraction:     rust_upgrade.sh --linters /path/to/archive.tar.xz
 #    - Package linters to default archive:       rust_upgrade.sh --package-citools
+#    - Redirect all output to append log file:   rust_upgrade.sh --auto --log
 #    - Show detection report in JSON format:     rust_upgrade.sh --detect json
 #    - Show help menu:                           rust_upgrade.sh --help
 # -----------------------------------------------------------------------------
 
 # ----- ENVIRONMENT AND CONFIGURATION -----
 RUST_ARCH=$(uname -m)
+
+# Optional toolchain components that can be skipped via --core-components or audited in --detect
+OPTIONAL_COMPONENTS=(
+  "rust-docs"
+  "rust-docs-json-preview"
+  "rust-analysis-${RUST_ARCH}-unknown-linux-gnu"
+  "rust-analysis-${RUST_ARCH}-pc-windows-gnu"
+  "llvm-bitcode-linker-preview"
+)
 
 # Resolve system temporary directory based on priority order: TMPDIR, TMP, TEMP, fallback to /tmp
 SYS_TMP_DIR="${TMPDIR:-${TMP:-${TEMP:-/tmp}}}"
@@ -124,7 +134,7 @@ trap cleanup EXIT INT TERM HUP
 
 # Helper function to display script usage
 function show_help() {
-  echo "Usage: $(basename "$0") [--version <version> | --auto | --detect [text|json] | --linters [<fqdn>]] [--package-citools [fqdn]] [--local] [--force] [--help]"
+  echo "Usage: $(basename "$0") [--version <version> | --auto | --detect [text|json] | --linters [<fqdn>]] [--package-citools [fqdn]] [--local] [--force] [--core-components] [--log [fqdn]] [--help]"
   echo ""
   echo "Options:"
   echo "  --version <version>  Install/upgrade to a specific Rust version (e.g. 1.96.0)."
@@ -134,6 +144,7 @@ function show_help() {
   echo "                         json           Machine-readable JSON output."
   echo "  --local              Install to a prefix-isolated path (/var/opt/rust) and symlink."
   echo "  --force              Force download and installation even if the version is already installed."
+  echo "  --core-components    Install only core toolchain components, skipping docs, analysis files, and linkers."
   echo "  --linters [<fqdn>]   Install Rust code quality tools (can be combined with --version/--auto,"
   echo "                       or used standalone to add linters to an existing Rust installation)."
   echo "                       If <fqdn> is specified, checks and extracts precompiled linter binaries"
@@ -149,6 +160,8 @@ function show_help() {
   echo "                       Generate a tar.xz archive of all installed linter binaries"
   echo "                       for deployment. If [fqdn] is omitted, defaults to:"
   echo "                       /opt/done/rust-linters-<version>-<date>-<dist><os_id>-<arch>.tar.xz"
+  echo "  --log [fqdn]         Redirect all output (stdout and stderr) to the specified log file in append mode."
+  echo "                         If [fqdn] is omitted, defaults to /var/log/rust_upgrade.log."
   echo "  --help, -h           Show this help message and exit."
   echo ""
 }
@@ -187,6 +200,9 @@ HAS_LINTERS="false"
 LINTERS_ARCHIVE=""
 HAS_PACKAGE_CITOOLS="false"
 PACKAGE_CITOOLS_NAME=""
+HAS_CORE_COMPONENTS="false"
+HAS_LOG="false"
+LOG_FILE=""
 
 # Non-positional argument parser loop
 while [ $# -gt 0 ]; do
@@ -253,6 +269,21 @@ while [ $# -gt 0 ]; do
         shift
       fi
       ;;
+    --core-components)
+      HAS_CORE_COMPONENTS="true"
+      shift
+      ;;
+    --log)
+      HAS_LOG="true"
+      # Consume optional log file name
+      if [ -n "$2" ] && [[ "$2" != -* ]]; then
+        LOG_FILE="$2"
+        shift 2
+      else
+        LOG_FILE="/var/log/rust_upgrade.log"
+        shift
+      fi
+      ;;
     --help|-h)
       SHOW_HELP="true"
       shift
@@ -277,7 +308,7 @@ fi
 
 # Validate mutually exclusive options and required arguments
 if [ "${HAS_DETECT}" == "true" ]; then
-  if [ "${HAS_VERSION}" == "true" ] || [ "${HAS_AUTO}" == "true" ] || [ "${INSTALL_MODE}" == "LOCAL" ] || [ "${FORCE_INSTALL}" == "true" ] || [ "${HAS_LINTERS}" == "true" ]; then
+  if [ "${HAS_VERSION}" == "true" ] || [ "${HAS_AUTO}" == "true" ] || [ "${INSTALL_MODE}" == "LOCAL" ] || [ "${FORCE_INSTALL}" == "true" ] || [ "${HAS_LINTERS}" == "true" ] || [ "${HAS_CORE_COMPONENTS}" == "true" ]; then
     echo "ERROR: --detect is an exclusive option and cannot be combined with other options."
     show_help
     exit 1
@@ -294,6 +325,17 @@ if [ "${HAS_VERSION}" == "false" ] && [ "${HAS_AUTO}" == "false" ] && [ "${HAS_D
   echo "ERROR: You must specify --version <version>, --auto, --detect, or --linters."
   show_help
   exit 1
+fi
+
+# ----- LOG REDIRECTION -----
+if [ "${HAS_LOG}" == "true" ]; then
+  # Ensure the directory exists
+  LOG_DIR=$(dirname "${LOG_FILE}")
+  if [ ! -d "${LOG_DIR}" ]; then
+    mkdir -p "${LOG_DIR}" || { echo "ERROR: Failed to create log directory: ${LOG_DIR}"; exit 1; }
+  fi
+  # Redirect stdout and stderr to the log file in append mode
+  exec >> "${LOG_FILE}" 2>&1 || { echo "ERROR: Failed to redirect output to log file: ${LOG_FILE}"; exit 1; }
 fi
 
 # Execute detection routine if requested and terminate cleanly
@@ -448,6 +490,28 @@ if [ "${HAS_DETECT}" == "true" ]; then
   # Clean up temporary directory
   rm -rf "${DETECT_TMP_DIR}"
 
+  # Check status of core components that could be excluded via --core-components
+  OPT_COMPONENTS_STATUS=()
+  for opt_c in "${OPTIONAL_COMPONENTS[@]}"; do
+    found="false"
+    if [ -z "${COMPONENTS_WARNING}" ]; then
+      for c in "${TOOL_COMPONENTS[@]}"; do
+        if [ "${c}" == "${opt_c}" ]; then
+          found="true"
+          break
+        fi
+      done
+    fi
+
+    if [ -n "${COMPONENTS_WARNING}" ]; then
+      OPT_COMPONENTS_STATUS+=("Unknown")
+    elif [ "${found}" == "true" ]; then
+      OPT_COMPONENTS_STATUS+=("Installed")
+    else
+      OPT_COMPONENTS_STATUS+=("Excluded")
+    fi
+  done
+
   # ---- TEXT output (default) ----
   if [ "${DETECT_FORMAT}" == "text" ]; then
     echo -e "\n============================================================================="
@@ -483,7 +547,16 @@ if [ "${HAS_DETECT}" == "true" ]; then
     fi
     echo ""
 
-    echo -e "[4] Code Quality & Linter Tools"
+    echo -e "[4] Switchable Components"
+    echo -e "-------------------------"
+    printf "  %-42s %s\n" "Component" "Status"
+    printf "  %-42s %s\n" "---------" "------"
+    for i in "${!OPTIONAL_COMPONENTS[@]}"; do
+      printf "  %-42s %s\n" "${OPTIONAL_COMPONENTS[$i]}" "${OPT_COMPONENTS_STATUS[$i]}"
+    done
+    echo ""
+
+    echo -e "[5] Code Quality & Linter Tools"
     echo -e "-------------------------------"
     # Format as a clean 3-column table
     printf "  %-22s %-15s %s\n" "Tool" "Status" "Version"
@@ -543,6 +616,23 @@ if [ "${HAS_DETECT}" == "true" ]; then
     else
       printf $']'
     fi
+
+    # switchable components status
+    printf $',\n  "switchable_components": {\n'
+    for i in "${!OPTIONAL_COMPONENTS[@]}"; do
+      val="unknown"
+      if [ "${OPT_COMPONENTS_STATUS[$i]}" == "Excluded" ]; then
+        val="excluded"
+      elif [ "${OPT_COMPONENTS_STATUS[$i]}" == "Installed" ]; then
+        val="installed"
+      fi
+      if [ "${i}" -lt $(( ${#OPTIONAL_COMPONENTS[@]} - 1 )) ]; then
+        printf $'    "%s": "%s",\n' "${OPTIONAL_COMPONENTS[$i]}" "${val}"
+      else
+        printf $'    "%s": "%s"\n' "${OPTIONAL_COMPONENTS[$i]}" "${val}"
+      fi
+    done
+    printf $'  }'
 
     # Print linters object (v1 backward-compatible)
     printf $',\n  "linters": {\n'
@@ -873,20 +963,31 @@ function installLinters() {
       "cargo-outdated"     # Performance: reports outdated dependency versions
       "cargo-udeps"        # Nightly req: detects unused dependencies (run with RUSTC_BOOTSTRAP=1)
     )
+    local force_rebuild_linters="false"
+    # If not in standalone mode and the compiler was upgraded, force rebuild all linters
+    if [ "${STANDALONE_LINTERS}" == "false" ] && [ "${LOCAL_VERSION}" != "${RUST_VERSION}" ]; then
+      echo -e "\n>> Rust toolchain upgraded from ${LOCAL_VERSION} to ${RUST_VERSION}."
+      echo "   Forcing linter rebuilds to compile against the new compiler..."
+      force_rebuild_linters="true"
+    fi
+
+    if [ "${FORCE_INSTALL}" == "true" ]; then
+      force_rebuild_linters="true"
+    fi
+
     for tool in "${CARGO_TOOLS[@]}"; do
-      # Strip inline comment for use as the actual crate name
       local crate_name
       crate_name=$(echo "${tool}" | cut -d'#' -f1 | tr -d ' ')
 
-      # Check if the tool binary is already present at the install target
-      local dest_bin="${INSTALL_ROOT}/bin/${crate_name}"
-      if [ -x "${dest_bin}" ] && [ "${FORCE_INSTALL}" != "true" ]; then
-        echo "  [+] ${crate_name} is already installed at [${dest_bin}]. Skipping compilation..."
-        continue
+      local cargo_install_args=("--root" "${INSTALL_ROOT}" "--locked")
+      if [ "${force_rebuild_linters}" == "true" ]; then
+        cargo_install_args+=("--force")
+        echo -e "\n  [+] cargo install ${crate_name} (forced rebuild)"
+      else
+        echo -e "\n  [+] cargo install ${crate_name} (conditional update)"
       fi
 
-      echo -e "\n  [+] cargo install ${crate_name}"
-      "${CARGO_BIN}" install --root "${INSTALL_ROOT}" --locked "${crate_name}" && echo "      OK" || echo "      WARNING: failed to install [${crate_name}]"
+      "${CARGO_BIN}" install "${cargo_install_args[@]}" "${crate_name}" && echo "      OK" || echo "      WARNING: failed to install [${crate_name}]"
     done
   fi
 
@@ -998,15 +1099,33 @@ function execInstall() {
   
   echo -e "\n>> 2- Installing Rust version [${RUST_VERSION} -> $1]"
   
+  local install_args=()
   if [ "${INSTALL_MODE}" == "LOCAL" ]; then
-    # Custom installation prefix path config
-    ./install.sh --destdir="${RUST_HOME}" --prefix=/
-    RETVAL="$?"
+    install_args+=("--destdir=${RUST_HOME}" "--prefix=/")
+  fi
+
+  if [ "${HAS_CORE_COMPONENTS}" == "true" ]; then
+    local WITHOUT_COMPONENTS=()
+    if [ -f "components" ]; then
+      for skip_c in "${OPTIONAL_COMPONENTS[@]}"; do
+        if grep -qFx "${skip_c}" components; then
+          WITHOUT_COMPONENTS+=("${skip_c}")
+        fi
+      done
+    fi
+
+    if [ "${#WITHOUT_COMPONENTS[@]}" -gt 0 ]; then
+      local joined
+      joined=$(IFS=,; echo "${WITHOUT_COMPONENTS[*]}")
+      install_args+=("--without=${joined}")
+    fi
+  fi
+
+  ./install.sh "${install_args[@]}"
+  RETVAL="$?"
+
+  if [ "${INSTALL_MODE}" == "LOCAL" ] && [ "${RETVAL}" -eq 0 ]; then
     chown -R "${RUST_PERMS}" "${RUST_HOME}"
-  else
-    # Standard global system installation
-    ./install.sh
-    RETVAL="$?"
   fi
   
   popd &>/dev/null || exit 1
@@ -1074,6 +1193,21 @@ done
 if ! [ -d "${RUST_INSTALL_BASE}" ] || ! [ -d "${RUST_STD_WIN_BASE}" ]; then
   echo "*** ERROR06: Base Rust install folder [${RUST_INSTALL_BASE}] or [${RUST_STD_WIN_BASE}] is missing or invalid."
   exit 6
+fi
+
+# ----- UNINSTALL PREVIOUS VERSION (IF PRESENT) -----
+# If an existing installation is present, run its uninstaller first to ensure a clean state
+# and prevent orphaned files/components from previous installations.
+if [ "${INSTALL_MODE}" == "SYSTEM" ]; then
+  if [ -x "/usr/local/lib/rustlib/uninstall.sh" ]; then
+    echo -e "\n>> Uninstalling existing global Rust installation..."
+    /usr/local/lib/rustlib/uninstall.sh
+  fi
+else
+  if [ -x "${RUST_HOME}/lib/rustlib/uninstall.sh" ]; then
+    echo -e "\n>> Uninstalling existing local Rust installation..."
+    "${RUST_HOME}/lib/rustlib/uninstall.sh"
+  fi
 fi
 
 # ----- INSTALLATION EXECUTION -----
