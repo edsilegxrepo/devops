@@ -21,10 +21,12 @@ Hardened frameworks for system security and code quality assurance.
 
 ### 2. Build & Validation Tasks (`/build_tasks`)
 Automation for building, and validating core system components.
+- `build_javacmd.sh`: Unified, generic Java compilation and packaging wrapper integrating Checkstyle, PMD, and SpotBugs validation.
 - `gobuild_code-analyzers.sh`: Automation for compiling Go-based static analysis tools.
 - `openssl_build.sh`: A multi-mode (RPM/Archive/All) script for isolated OpenSSL builds.
 - `sqlite3_validate.sh`: A suite for verifying SQLite 3 binary builds against specs.
 - `rust_upgrade.sh`: Automated management of Rust toolchain deployments and target libraries.
+- `rust_cachemgr.sh`: Safety-critical caching manager and pruning optimizer for Cargo and compiler caches.
 
 ### 3. Git Management (`/git_repomgr`)
 Tools for orchestrating large-scale repository synchronization and user management.
@@ -64,6 +66,10 @@ A comprehensive suite for managing multi-version Python environments and package
 ### 7. Client Connectivity Tools (`/client_tools`)
 Specialized utilities for end-user environment management.
 - `CitrixTool.ps1`: Citrix Workspace Backup & Restore CLI Utility.
+
+### 8. Network & Diagnostic Tools (`/diags`)
+Specialized network probing and cryptographic validation diagnostics.
+- `jtlstester/JTLSTester.java`: High-performance, concurrent Java-based TLS diagnostics, trust chain validation, and cartesian target probing utility.
 
 ## Standards & Documentation
 
