@@ -830,7 +830,7 @@ public final class JTLSTester {
                 
                 boolean anyFailed = false;
                 for (TargetResult r : results) {
-                    if (r.error != null || !r.tlsHandshakeSuccess) {
+                    if (r.error != null || !r.tlsHandshakeSuccess || (!r.certChainTrusted && !insecure)) {
                         anyFailed = true;
                     }
                 }
@@ -944,6 +944,7 @@ public final class JTLSTester {
             SSLContext sslContext;
             try {
                 sslContext = SSLContext.getInstance("TLS");
+                // lgtm [java/insecure-trustmanager]
                 sslContext.init(globalKeyManagers, new TrustManager[]{savingTm}, null);
             } catch (Exception e) {
                 Console.error("Failed to initialize custom SSLContext: " + e.getMessage());
@@ -1709,6 +1710,7 @@ public final class JTLSTester {
             Console.println(Console.GRAY, "  ALPN negotiated h2. Establishing fallback HTTP/1.1 connection for HTTP probe...");
             try {
                 SSLContext tempContext = SSLContext.getInstance("TLS");
+                // lgtm [java/insecure-trustmanager]
                 tempContext.init(null, new TrustManager[]{new SavingTrustManager(null)}, null);
                 probeSocket = createConnectedSocket(host, sslSocket.getPort(), timeout, tempContext.getSocketFactory());
                 setAlpnProtocols(probeSocket, new String[]{"http/1.1"});
@@ -2108,7 +2110,7 @@ public final class JTLSTester {
         
         boolean anyFailed = false;
         for (TargetResult r : results) {
-            if (r.error != null || !r.tlsHandshakeSuccess) {
+            if (r.error != null || !r.tlsHandshakeSuccess || (!r.certChainTrusted && !insecure)) {
                 anyFailed = true;
                 break;
             }
