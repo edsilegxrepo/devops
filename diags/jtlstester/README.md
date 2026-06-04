@@ -145,16 +145,16 @@ jar cvfe bin/jtlstester.jar JTLSTester -C class . version.txt
 ```
 
 ### 5.3 Automated Quality Build Script (Linux & Windows Bash)
-For automated build environments (Cygwin, MSYS2/Git Bash, or Linux), the project includes a unified `build_javacmd.sh` script.
+For automated build environments (Cygwin, MSYS2/Git Bash, or Linux), the project includes a unified `javacmd_build.sh` script.
 
 To build the JTLSTester application using the automated quality build pipeline:
 
 ```bash
 # Run the build for JTLSTester:
-./build_javacmd.sh --src-file JTLSTester.java --main-class JTLSTester --jar-name jtlstester.jar --distrib $TMPDIR/distrib/ --purge-obj --archive
+./javacmd_build.sh --src-file JTLSTester.java --main-class JTLSTester --jar-name jtlstester.jar --distrib $TMPDIR/distrib/ --purge-obj --archive
 ```
 
-For detailed documentation on the build script parameters, architecture, and design, refer to [build_javacmd_README.md](build_javacmd_README.md).
+For detailed documentation on the build script parameters, architecture, and design, refer to [javacmd_build_README.md](javacmd_build_README.md).
 
 
 ---
