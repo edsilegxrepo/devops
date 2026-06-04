@@ -1,12 +1,12 @@
-# build_javacmd.sh - Technical Specification and Operations Guide
+# javacmd_build.sh - Technical Specification and Operations Guide
 
-This document describes the design, architecture, configuration, and operation of `build_javacmd.sh`, a unified build wrapper and quality auditing script for compiling, validating, and packaging standalone Java applications.
+This document describes the design, architecture, configuration, and operation of `javacmd_build.sh`, a unified build wrapper and quality auditing script for compiling, validating, and packaging standalone Java applications.
 
 ---
 
 ## 1. Application Overview and Objectives
 
-`build_javacmd.sh` is an automated, utility-first pipeline script written in Bash. It provides a standardized build lifecycle for single-source Java files without requiring third-party build orchestration tools like Maven or Gradle. The script is structured for use in continuous integration (CI) workflows, build agents, and local development environments.
+`javacmd_build.sh` is an automated, utility-first pipeline script written in Bash. It provides a standardized build lifecycle for single-source Java files without requiring third-party build orchestration tools like Maven or Gradle. The script is structured for use in continuous integration (CI) workflows, build agents, and local development environments.
 
 ### Key Objectives
 * **Unified Lifecycle Orchestration**: Integrates code formatting checks, static code analysis, compilation, bytecode verification, and JAR packaging into a single invocation.
@@ -26,7 +26,7 @@ Operating system detection is completed by checking the `$OSTYPE` environment va
 * File extension suffixes are adjusted dynamically based on the OS: PMD and SpotBugs are executed via `.bat` scripts on Windows environments and via native shell scripts on Unix/Linux platforms.
 
 ### 2.2 Defensive Tool discovery
-Rather than hardcoding tool versions or paths, `build_javacmd.sh` scans `$CI_TOOLS_DIR` utilizing the `find` utility.
+Rather than hardcoding tool versions or paths, `javacmd_build.sh` scans `$CI_TOOLS_DIR` utilizing the `find` utility.
 * **Checkstyle Jar**: Matches file patterns like `checkstyle-*-all.jar` or `checkstyle*.jar`.
 * **PMD Home**: Locates matching directories named `pmd-bin-*` or `pmd`.
 * **SpotBugs Home**: Locates matching directories named `spotbugs-*` or `spotbugs`.
@@ -50,7 +50,7 @@ The diagram below maps the runtime stages and decision points of the build scrip
 
 ```mermaid
 flowchart TD
-    Start([Start build_javacmd.sh]) --> ParseArgs[Parse CLI Arguments]
+    Start([Start javacmd_build.sh]) --> ParseArgs[Parse CLI Arguments]
     ParseArgs --> CheckMandatory{Mandatory Params Present?}
     CheckMandatory -- No --> ExitUsage[Print Usage & Exit 1]
     CheckMandatory -- Yes --> DetectOS[Detect Host OS & Normalize Paths]
@@ -107,7 +107,7 @@ The sequence diagram below represents interactions between the script execution 
 sequenceDiagram
     autonumber
     participant CLI as Operator/CI Environment
-    participant Script as build_javacmd.sh
+    participant Script as javacmd_build.sh
     participant FS as File System
     participant QA as Quality Tools (Checkstyle/PMD/SpotBugs)
     participant Java as Java Platform Toolchain (javac/jar)
@@ -217,13 +217,13 @@ The script accepts CLI flags using two dashes (with optional support for one-das
 
 ```bash
 # Enable execution permissions
-chmod +x build_javacmd.sh
+chmod +x javacmd_build.sh
 ```
 
 ### Example 6.1: Basic Invocations
 Compile and package a simple Java source file using the system default Java runtime version:
 ```bash
-./build_javacmd.sh \
+./javacmd_build.sh \
   --src-file src/Server.java \
   --main-class Server \
   --jar-name server.jar
@@ -232,7 +232,7 @@ Compile and package a simple Java source file using the system default Java runt
 ### Example 6.2: Complete Release Pipeline Build
 Build a production-ready archive targeting Java 11 compatibilities, using custom CI toolchain installations:
 ```bash
-./build_javacmd.sh \
+./javacmd_build.sh \
   --src-file src/com/services/DataProcessor.java \
   --main-class com.services.DataProcessor \
   --jar-name dataprocessor-service.jar \
@@ -244,7 +244,7 @@ Build a production-ready archive targeting Java 11 compatibilities, using custom
 ### Example 6.3: Packaging Multiple Resources
 Compile a class and bundle its resource files (such as configuration files and templates) into the root of the output JAR:
 ```bash
-./build_javacmd.sh \
+./javacmd_build.sh \
   --src-file Application.java \
   --main-class Application \
   --jar-name webapp.jar \
@@ -254,7 +254,7 @@ Compile a class and bundle its resource files (such as configuration files and t
 ### Example 6.4: Running with Diagnostic Verification Bypassed
 Run compilation in an environment that does not contain code quality audit installations. The script prints warnings but compiles and packages the file successfully:
 ```bash
-./build_javacmd.sh \
+./javacmd_build.sh \
   --src-file CoreEngine.java \
   --main-class CoreEngine \
   --jar-name engine.jar \
@@ -264,7 +264,7 @@ Run compilation in an environment that does not contain code quality audit insta
 ### Example 6.5: Specifying Target Distribution Outputs Path
 Redirect the output subdirectories (`bin/`, `class/`, and `logs/`) to a designated target location:
 ```bash
-./build_javacmd.sh \
+./javacmd_build.sh \
   --src-file ServiceRouter.java \
   --main-class ServiceRouter \
   --jar-name router.jar \
@@ -274,7 +274,7 @@ Redirect the output subdirectories (`bin/`, `class/`, and `logs/`) to a designat
 ### Example 6.6: Generating a Distribution ZIP Archive
 Build the package and generate a distribution ZIP containing the compiled JAR, naming the archive using semantic version, Git hash, and compatible JDK major version targets:
 ```bash
-./build_javacmd.sh \
+./javacmd_build.sh \
   --src-file JTLSTester.java \
   --main-class JTLSTester \
   --jar-name jtlstester.jar \
