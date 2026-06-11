@@ -1,7 +1,7 @@
 #!/bin/bash
 # -----------------------------------------------------------------------------
 #  python_build.sh
-#  v2.0.4  2026/05/12  XdG (Orchestrator)
+#  v2.0.5  2026/06/10  XdG (Orchestrator)
 # -----------------------------------------------------------------------------
 # OBJECTIVE:
 #   Achieve a fully isolated, relocatable, and production-grade Python 3.13+
@@ -164,7 +164,7 @@ setup_globals() {
       CONF[BIN_SUFFIX]="t" # Standard suffix for GIL-less builds (python3.14t)
       CONF[COMPILE_OPTS]="--disable-gil"
     else
-      log "WARNING: --mt requested but not supported for version ${CONF[PV]} (Requires 3.14+)"
+      error "Free-Threading (--mt) is incompatible with Python version ${CONF[PV]} (Requires 3.14+)"
     fi
   fi
   # PBVT: Version-neutral identifier including the 't' suffix if enabled (e.g., 3.14t).
@@ -589,7 +589,7 @@ bootstrap() {
   pushd "${target_root}/bin" &> /dev/null
 
   # Tool List: Binaries to be version-suffixed and symlinked.
-  local tools=(pip wheel virtualenv cython cythonize cygdb pip-compile pip-sync pyproject-build normalizer)
+  local tools=(pip wheel virtualenv cython cythonize cygdb pip-compile pip-sync pyproject-build normalizer idna)
 
   # 0. Interpreter Aliases: Ensure generic 'python' exists.
   # Standard GIL installs provide 'python3' and 'python3.14' by default.
