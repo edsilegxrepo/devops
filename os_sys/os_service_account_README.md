@@ -62,14 +62,16 @@ The primary use case is provisioning  service accounts that executes scripts via
 
 The script follows a linear, fail-fast architecture with the following phases:
 
+**Phase 1: Initialization & Validation**
 ```mermaid
 flowchart LR
-    INIT["1·INIT<br/>shell opts, umask, constants"]
-    PARSE["2·PARSE<br/>--account, --password, --group, --uid/gid"]
-    VALID["3·VALIDATE<br/>required args, pwd≥32, root?, POSIX, UID/GID range"]
-    MODIFY["4·MODIFY<br/>group, user, home 700, chage, passwd, .bash_profile"]
-    POST["5·POST<br/>summary, syslog, history cleanup"]
-    INIT --> PARSE --> VALID --> MODIFY --> POST
+    INIT["1·INIT<br/>shell opts, umask, constants"] --> PARSE["2·PARSE<br/>--account, --password, --group, --uid/gid"] --> VALID["3·VALIDATE<br/>required args, pwd≥32, root?, POSIX, UID/GID range"]
+```
+
+**Phase 2: Execution & Post-Configuration**
+```mermaid
+flowchart LR
+    MODIFY["4·MODIFY<br/>group, user, home 700, chage, passwd, .bash_profile"] --> POST["5·POST<br/>summary, syslog, history cleanup"]
 ```
 
 ### 2.2 Design Decisions
