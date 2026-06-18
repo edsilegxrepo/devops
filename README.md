@@ -59,7 +59,7 @@ A comprehensive suite for managing multi-version Python environments and package
 - `py_module_manager.sh`: Modular utility to manage Python package lifecycles (backup/restore/sync).
 - `inspect_python.py`: Quality Auditor for newly built Python binaries (Path isolation, ELF audit).
 - `python_sysdiags.py`: Comprehensive verification of Python interpreter build and OpenSSL linkage.
-- `pathfix.py`: Surgical shebang correction for Python scripts.
+- `pathfix.py`: Efficient shebang correction for Python scripts.
 - `python_pkg_tester.py`: Analyzes Python modules for "soundness" and best practices.
 - `python_pkg_info.py`: Detailed inspection of installed Python package metadata.
 - `python_pkg_upgrader.py`: Utility for bulk upgrades of outdated Python modules.
@@ -71,6 +71,7 @@ A comprehensive suite for managing multi-version Python environments and package
 ### 7. Client Connectivity Tools (`/client_tools`)
 Specialized utilities for end-user environment management.
 - `CitrixTool.ps1`: Citrix Workspace Backup & Restore CLI Utility.
+- `md2pdf.sh`: High-performance, concurrent Markdown to PDF batch converter (using a custom Node.js compiler with Puppeteer browser rendering).
 
 ### 8. Network & Diagnostic Tools (`/diags`)
 Specialized network probing and cryptographic validation diagnostics.

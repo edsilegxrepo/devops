@@ -1,0 +1,22 @@
+{
+  "name": "client_tools",
+  "version": "1.0.0",
+  "description": "",
+  "main": "md2pdf_compiler.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@vscode/markdown-it-katex": "^1.1.2",
+    "highlight.js": "^11.11.1",
+    "markdown-it": "^14.2.0",
+    "markdown-it-container": "^4.0.0",
+    "markdown-it-emoji": "^3.0.0",
+    "markdown-it-plantuml": "^1.4.1",
+    "puppeteer-core": "^25.1.0"
+  }
+}

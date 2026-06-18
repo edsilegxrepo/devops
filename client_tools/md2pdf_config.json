@@ -1,0 +1,25 @@
+{
+  "pdf_options": {
+    "width": "215.9mm",
+    "height": "1500mm",
+    "margin": {
+      "top": "1.5cm",
+      "bottom": "1cm",
+      "left": "1cm",
+      "right": "1cm"
+    },
+    "printBackground": true
+  },
+  "launch_options": {
+    "executablePath": "D:\\inet\\www\\chromium\\bin\\chrome.exe",
+    "args": ["--no-sandbox", "--disable-setuid-sandbox"]
+  },
+  "markdown_options": {
+    "breaks": false,
+    "highlight_style": "tomorrow.css"
+  },
+  "mermaid_options": {
+    "theme": "default",
+    "settle_delay": 200
+  }
+}
