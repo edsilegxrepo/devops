@@ -23,7 +23,7 @@
 
 ### 1.1 Purpose
 
-`os_service_account.sh` is a Bash script that provisions unprivileged OS service accounts for compliance audit automation on Linux systems. The script creates dedicated service accounts with restricted privileges to run scheduled compliance audit jobs against GoAnywhere MFT database and configuration files.
+`os_service_account.sh` is a Bash script that provisions unprivileged OS service accounts for automation on Linux systems. The script creates dedicated service accounts with restricted privileges to run scheduled jobs against application, database and configuration files.
 
 ### 1.2 Objectives
 
@@ -38,11 +38,11 @@
 
 ### 1.3 Use Case
 
-The primary use case is provisioning the `gfaudit` service account that executes `ga_compliance_audit.sh` via cron or systemd timer. This account requires:
+The primary use case is provisioning  service accounts that executes scripts via cron or systemd timer. This account typically requires:
 
-- Read access to GoAnywhere configuration files
-- MySQL/MariaDB connectivity via the `dbaudit` database user
-- Write access to audit output directories
+- Read access to application configuration files
+- R/W access to application data directories
+- Database access for reporting or application troubleshooting
 - No interactive login requirements (though shell access is preserved for troubleshooting)
 
 ### 1.4 Exit Codes
@@ -474,13 +474,13 @@ All dependencies are standard Linux system utilities with long-standing security
 
 ```bash
 # Minimum required arguments (UID/GID auto-assigned)
---account gfaudit --password 'P@ssw0rd!ComplexString32CharsMin' --group gfautomation
+--account myappuser --password 'P@ssw0rd!ComplexString32CharsMin' --group myappgroup
 
 # Full specification with explicit UID/GID
---account gfaudit --password 'P@ssw0rd!ComplexString32CharsMin' --group gfautomation --uid 5020 --gid 5010
+--account myappuser --password 'P@ssw0rd!ComplexString32CharsMin' --group myappgroup --uid 5020 --gid 5010
 
 # Password with special characters (properly quoted)
---account gfaudit --password 'My$ecret!P@ss"w0rd&With<Special>Chars' --group gfautomation
+--account myappuser --password 'My$ecret!P@ss"w0rd&With<Special>Chars' --group myappgroup
 ```
 
 ---
@@ -497,8 +497,8 @@ sudo -v
 which useradd groupadd chpasswd chage logger getent sed
 
 # 3. Check if account/group already exist
-id gfaudit 2>/dev/null && echo "Account exists" || echo "Account available"
-getent group gfautomation && echo "Group exists" || echo "Group available"
+id myappuser 2>/dev/null && echo "Account exists" || echo "Account available"
+getent group myappgroup && echo "Group exists" || echo "Group available"
 
 # 4. Verify UID/GID availability
 getent passwd 5020 && echo "UID 5020 in use" || echo "UID 5020 available"
@@ -513,17 +513,17 @@ openssl rand -base64 32
 ```bash
 # Deploy with auto-assigned UID/GID
 sudo ./os_service_account.sh \
-    --account gfaudit \
-    --password 'xK9#mP2$vL5nQ8@wR3tY6uI0oA4sD7fG' \
-    --group gfautomation
+    --account myappuser \
+    --password 'Min32CharacterPasswordRequired!!' \
+    --group myappgroup
 ```
 
 **Expected Output:**
 
 ```
-[INFO] Creating group: gfautomation (GID: auto-assigned)
-[INFO] Creating service account: gfaudit (UID: auto-assigned, Group: gfautomation)
-[INFO] Setting home directory permissions: /home/gfaudit
+[INFO] Creating group: myappgroup (GID: auto-assigned)
+[INFO] Creating service account: myappuser (UID: auto-assigned, Group: myappgroup)
+[INFO] Setting home directory permissions: /home/myappuser
 [INFO] Configuring password policy (no expiration)
 [INFO] Setting account password
 [INFO] Configuring .bash_profile
@@ -534,11 +534,11 @@ sudo ./os_service_account.sh \
 ============================================================
 
 Account Details:
-  Username:   gfaudit
+  Username:   myappuser
   UID:        5001
-  Group:      gfautomation
+  Group:      myappgroup
   GID:        5001
-  Home:       /home/gfaudit
+  Home:       /home/myappuser
   Shell:      /bin/bash
 
 Password Aging:
@@ -551,7 +551,7 @@ Maximum number of days between password change          : 99999
 Number of days of warning before password expires       : 7
 
 Group Membership:
-gfaudit : gfautomation
+myappuser : myappgroup
 
 ============================================================
 [INFO] Clearing this command from shell history (security)
@@ -563,9 +563,9 @@ gfaudit : gfautomation
 ```bash
 # Deploy with specific UID/GID (for consistency across environments)
 sudo ./os_service_account.sh \
-    --account gfaudit \
-    --password 'xK9#mP2$vL5nQ8@wR3tY6uI0oA4sD7fG' \
-    --group gfautomation \
+    --account myappuser \
+    --password 'Min32CharacterPasswordRequired!!' \
+    --group myappgroup \
     --uid 5020 \
     --gid 5010
 ```
@@ -573,9 +573,9 @@ sudo ./os_service_account.sh \
 **Expected Output:**
 
 ```
-[INFO] Creating group: gfautomation (GID: 5010)
-[INFO] Creating service account: gfaudit (UID: 5020, Group: gfautomation)
-[INFO] Setting home directory permissions: /home/gfaudit
+[INFO] Creating group: myappgroup (GID: 5010)
+[INFO] Creating service account: myappuser (UID: 5020, Group: myappgroup)
+[INFO] Setting home directory permissions: /home/myappuser
 [INFO] Configuring password policy (no expiration)
 [INFO] Setting account password
 [INFO] Configuring .bash_profile
@@ -586,11 +586,11 @@ sudo ./os_service_account.sh \
 ============================================================
 
 Account Details:
-  Username:   gfaudit
+  Username:   myappuser
   UID:        5020
-  Group:      gfautomation
+  Group:      myappgroup
   GID:        5010
-  Home:       /home/gfaudit
+  Home:       /home/myappuser
   Shell:      /bin/bash
 
 Password Aging:
@@ -603,7 +603,7 @@ Maximum number of days between password change          : 99999
 Number of days of warning before password expires       : 7
 
 Group Membership:
-gfaudit : gfautomation
+myappuser : myappgroup
 
 ============================================================
 [INFO] Clearing this command from shell history (security)
@@ -616,7 +616,7 @@ gfaudit : gfautomation
 #### Missing Required Argument
 
 ```bash
-sudo ./os_service_account.sh --account gfaudit --group gfautomation
+sudo ./os_service_account.sh --account myappuser --group myappgroup
 ```
 
 **Output:**
@@ -631,9 +631,9 @@ ERROR: Missing required argument: --password
 
 ```bash
 sudo ./os_service_account.sh \
-    --account gfaudit \
+    --account myappuser \
     --password 'TooShort123!' \
-    --group gfautomation
+    --group myappgroup
 ```
 
 **Output:**
@@ -648,9 +648,9 @@ ERROR: Password must be at least 32 characters
 
 ```bash
 ./os_service_account.sh \
-    --account gfaudit \
-    --password 'xK9#mP2$vL5nQ8@wR3tY6uI0oA4sD7fG' \
-    --group gfautomation
+    --account myappuser \
+    --password 'Min32CharacterPasswordRequired!!' \
+    --group myappgroup
 ```
 
 **Output:**
@@ -665,16 +665,16 @@ ERROR: This script must be run as root
 
 ```bash
 sudo ./os_service_account.sh \
-    --account gfaudit \
-    --password 'xK9#mP2$vL5nQ8@wR3tY6uI0oA4sD7fG' \
-    --group gfautomation
+    --account myappuser \
+    --password 'Min32CharacterPasswordRequired!!' \
+    --group myappgroup
 ```
 
 **Output:**
 
 ```
-[INFO] Group already exists: gfautomation
-ERROR: Account already exists: gfaudit
+[INFO] Group already exists: myappgroup
+ERROR: Account already exists: myappuser
 ```
 
 **Exit code:** 3
@@ -683,9 +683,9 @@ ERROR: Account already exists: gfaudit
 
 ```bash
 sudo ./os_service_account.sh \
-    --account gfaudit \
-    --password 'xK9#mP2$vL5nQ8@wR3tY6uI0oA4sD7fG' \
-    --group gfautomation \
+    --account myappuser \
+    --password 'Min32CharacterPasswordRequired!!' \
+    --group myappgroup \
     --uid 500
 ```
 
@@ -701,49 +701,49 @@ ERROR: UID '500' out of range. Must be 5000-50000 (non-system accounts)
 
 ```bash
 # Verify account creation
-id gfaudit
-# Output: uid=5020(gfaudit) gid=5010(gfautomation) groups=5010(gfautomation)
+id myappuser
+# Output: uid=5020(myappuser) gid=5010(myappgroup) groups=5010(myappgroup)
 
 # Verify home directory permissions
-ls -la /home/gfaudit
-# Output: drwx------ 2 gfaudit gfautomation 4096 Jun 16 10:30 /home/gfaudit
+ls -la /home/myappuser
+# Output: drwx------ 2 myappuser myappgroup 4096 Jun 16 10:30 /home/myappuser
 
 # Verify password aging
-chage -l gfaudit
+chage -l myappuser
 
 # Verify syslog entry
 sudo grep os_service_account /var/log/messages
-# Output: Jun 16 10:30:45 hostname os_service_account.sh: Service account 'gfaudit' (UID: 5020) created by root (SUDO_USER=adminuser)
+# Output: Jun 16 10:30:45 hostname os_service_account.sh: Service account 'myappuser' (UID: 5020) created by root (SUDO_USER=adminuser)
 
 # Verify shell history cleared
 grep os_service_account ~/.bash_history
 # Output: (none)
 
 # Test account login
-su - gfaudit -c "whoami && pwd"
+su - myappuser -c "whoami && pwd"
 # Output:
-# gfaudit
-# /home/gfaudit
+# myappuser
+# /home/myappuser
 ```
 
-### 8.6 Integration with Compliance Audit
+### 8.6 Integration with shell script
 
-After account creation, configure the compliance audit job:
+After account creation, configure the job:
 
 ```bash
 # 1. Switch to service account
-sudo su - gfaudit
+sudo su - myappuser
 
 # 2. Create bin directory for scripts
 mkdir -p ~/bin
 
-# 3. Copy audit script
-cp /path/to/ga_compliance_audit.sh ~/bin/
-chmod 750 ~/bin/ga_compliance_audit.sh
+# 3. Copy script
+cp /path/to/myscript.sh ~/bin/
+chmod 750 ~/bin/myscript.sh
 
 # 4. Configure cron job
 crontab -e
-# Add: 0 2 * * * /home/gfaudit/bin/ga_compliance_audit.sh --config /etc/gfaudit/config.ini
+# Add: 0 2 * * * /home/myappuser/bin/myscript.sh --config /etc/myappuser/config.ini
 
 # 5. Verify cron
 crontab -l
@@ -761,13 +761,13 @@ For consistent UID/GID across development, staging, and production:
 
 # Deploy script (deploy_service_account.sh)
 #!/bin/bash
-ACCOUNT="gfaudit"
-GROUP="gfautomation"
+ACCOUNT="myappuser"
+GROUP="myappgroup"
 UID_NUM="5020"
 GID_NUM="5010"
 
 # Generate password or retrieve from secrets manager
-PASSWORD=$(vault kv get -field=password secret/gfaudit)
+PASSWORD=$(vault kv get -field=password secret/myappuser)
 
 sudo ./os_service_account.sh \
     --account "${ACCOUNT}" \
@@ -783,17 +783,17 @@ If the service account needs to be removed:
 
 ```bash
 # 1. Disable account (preserves for audit)
-sudo usermod -L gfaudit
+sudo usermod -L myappuser
 
 # 2. Or delete account and home directory
-sudo userdel -r gfaudit
+sudo userdel -r myappuser
 
 # 3. Remove group (if no longer needed)
-sudo groupdel gfautomation
+sudo groupdel myappgroup
 
 # 4. Verify removal
-id gfaudit
-getent group gfautomation
+id myappuser
+getent group myappgroup
 ```
 
 ---
@@ -806,21 +806,21 @@ getent group gfautomation
 
 # Basic deployment
 sudo ./os_service_account.sh \
-    --account gfaudit \
+    --account myappuser \
     --password 'Min32CharacterPasswordRequired!!' \
-    --group gfautomation
+    --group myappgroup
 
 # Full deployment
 sudo ./os_service_account.sh \
-    --account gfaudit \
+    --account myappuser \
     --password 'Min32CharacterPasswordRequired!!' \
-    --group gfautomation \
+    --group myappgroup \
     --uid 5020 \
     --gid 5010
 
 # Verify
-id gfaudit
-ls -la /home/gfaudit
+id myappuser
+ls -la /home/myappuser
 sudo grep os_service_account /var/log/messages
 ```
 
