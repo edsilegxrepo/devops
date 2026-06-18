@@ -45,35 +45,35 @@ The `ubuntu_kernel_updater.sh` script is a hardened system utility designed to a
 ```mermaid
 graph TD
     A[Start] --> B{Root Verification EUID == 0}
-    B -- No --> C[Abort: Security Error]
-    B -- Yes --> D{OS Verification /etc/os-release}
-    D -- Unsupported --> E[Abort: Unsupported OS]
-    D -- Supported --> F[Initialize log file]
+    B -->|No| C[Abort: Security Error]
+    B -->|Yes| D{OS Verification /etc/os-release}
+    D -->|Unsupported| E[Abort: Unsupported OS]
+    D -->|Supported| F[Initialize log file]
     F --> G{Parse CLI Arguments}
     
-    G -- --help / -h --> H[Show Help & Exit]
+    G -->|"--help / -h"| H[Show Help & Exit]
     
-    G -- --purge / --purge-list --> I[Execute Purge Logic]
+    G -->|"--purge / --purge-list"| I[Execute Purge Logic]
     I --> I1[Query installed packaged kernels via dpkg-query]
     I1 --> I2[Sort versions and identify LATEST_PACKAGED_KERNEL]
     I2 --> I3[Filter out LATEST_PACKAGED_KERNEL & CURRENT_ACTIVE]
     I3 --> I4[Scan /lib/modules/ for untracked custom mainline modules]
     I4 --> I5{Purge execution mode?}
-    I5 -- --purge-list --> I6[Print eligible kernels & Exit]
-    I5 -- --purge --> I7[Check for dpkg Lock & Wait]
+    I5 -->|"--purge-list"| I6[Print eligible kernels & Exit]
+    I5 -->|"--purge"| I7[Check for dpkg Lock & Wait]
     I7 --> I8[Calculate and log reclaimed disk space]
     I8 --> I9[Directly rm custom files from boot/lib/usr]
     I9 --> I10[Execute apt-get purge on old packages]
     I10 --> I11[Execute apt-get autoremove]
     I11 --> I12[Run update-grub & Exit]
     
-    G -- -f / --force / Default --> J[Execute Mainline Deployment Pipeline]
+    G -->|"-f / --force / Default"| J[Execute Mainline Deployment Pipeline]
     J --> J1[Check free disk space > 2.5GB]
     J1 --> J2[Create staging directories & trap EXIT cleanup]
     J2 --> J3[Detect latest stable mainline version via curl]
     J3 --> J4{Already running target version?}
-    J4 -- Yes and not --force --> J5[Log & Exit]
-    J4 -- No or --force --> J6[Download generic amd64 deb files]
+    J4 -->|"Yes and not --force"| J5[Log & Exit]
+    J4 -->|"No or --force"| J6[Download generic amd64 deb files]
     J6 --> J7[Verify downloaded files integrity]
     J7 --> J8[Unpack deb archives into staging area]
     J8 --> J9[Integrity checks of boot/usr directories]
