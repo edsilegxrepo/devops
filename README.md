@@ -49,6 +49,8 @@ Low-level system adjustments and service delegations.
 - `winposix_update.ps1`: Automated, headless update utility for Cygwin and MSYS2 environments.
 - `defender_setup.ps1`: Audits and manages coexistence, passive mode, and uninstallation of Microsoft Defender on systems with SentinelOne.
 - `os_service_account.sh`: Provisions unprivileged OS service accounts (e.g., `gfaudit`) for compliance audit automation.
+- `ubuntu_upgrade.sh`: Orchestrates non-interactive system package updates, telemetry/ESM disabling, parallel Flatpak upgrades, and mainline kernel updates.
+- `ubuntu_kernel_updater.sh`: Detects, installs, and manages mainline upstream kernels bypassing APT dependency checks, and purges older kernels.
 
 ### 6. Python Engineering & Lifecycle (`/python_systools`)
 A comprehensive suite for managing multi-version Python environments and package health.
