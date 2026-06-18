@@ -21,7 +21,8 @@ Hardened frameworks for system security and code quality assurance.
 
 ### 2. Build & Validation Tasks (`/build_tasks`)
 Automation for building, and validating core system components.
-- `build_javacmd.sh`: Unified, generic Java compilation and packaging wrapper integrating Checkstyle, PMD, and SpotBugs validation.
+- `javacmd_build.sh`: Unified, generic Java compilation and packaging wrapper integrating Checkstyle, PMD, and SpotBugs validation.
+- `jdk_packaging.sh`: Automates Azul Zulu JDK repackaging, footprint minimization, Maven integration, and JTLSTester diagnostic injection.
 - `gobuild_code-analyzers.sh`: Automation for compiling Go-based static analysis tools.
 - `openssl_build.sh`: A multi-mode (RPM/Archive/All) script for isolated OpenSSL builds.
 - `sqlite3_validate.sh`: A suite for verifying SQLite 3 binary builds against specs.
@@ -46,6 +47,8 @@ Low-level system adjustments and service delegations.
 - `set_nomodeset.sh`: Ensures consistent headless boot parameters across OS families.
 - `dnsmgr.ps1`: Robust, headless utility for Windows DNS server and search suffix management.
 - `winposix_update.ps1`: Automated, headless update utility for Cygwin and MSYS2 environments.
+- `defender_setup.ps1`: Audits and manages coexistence, passive mode, and uninstallation of Microsoft Defender on systems with SentinelOne.
+- `os_service_account.sh`: Provisions unprivileged OS service accounts (e.g., `gfaudit`) for compliance audit automation.
 
 ### 6. Python Engineering & Lifecycle (`/python_systools`)
 A comprehensive suite for managing multi-version Python environments and package health.
