@@ -231,6 +231,13 @@ An evaluation of the utility's security posture yields the following controls:
 ### Least Privilege Execution (Unprivileged Context)
 The utility is designed to run in a fully unprivileged user context. It does not write to system-protected locations (such as `/usr/bin` or system directories) and does not require administrative elevation (`sudo` on Linux or elevated UAC on Windows). All operations occur inside the user's workspace and temporary directory.
 
+### Root Directories Restriction (System Safety)
+To prevent accidental file creation, system modifications, or permission errors on critical partitions:
+*   **Constraint**: The source directory (`--source`) and target directory (`--target`) are strictly prohibited from being root directories.
+*   **Linux/POSIX Root**: `/` is forbidden.
+*   **Windows Drive Root**: Any single-letter drive root (e.g. `C:/`, `D:/`, etc.) is forbidden.
+*   **Enforcement**: If a root path is supplied, the validation engine aborts execution immediately with a clear error notice (exit code 1) to protect target system integrity.
+
 ### Encryption in Transit
 During automated dependency installation (`--install`), the script communicates with the official npm registry (`registry.npmjs.org`) exclusively via HTTPS, enforcing TLS encryption for all package downloads.
 
@@ -272,6 +279,8 @@ The script parses options using an iterative case-loop. Options can be passed in
 | `-s` | `--source` | Directory Path| N/A | Source folder containing the input `.md` files. |
 | `-t` | `--target` | Directory Path| N/A | Destination folder where the `.pdf` outputs are saved. |
 | `-f` | `--force` | Switch | `false` | Force overwrite of existing target PDFs (skipped by default). |
+| N/A | `--format` | String | `json` | Specify the output results format (`json` or `text`). |
+| N/A | `--log` | File Path | N/A | Path to log output file (appends combined stdout and stderr logs). |
 | `-v` | `--version` | Switch | `false` | Prints the version string (`1.2.0xg`) and exits. |
 | `-h` | `--help` | Switch | `false` | Renders the formatted help manual and exits. |
 
@@ -306,7 +315,44 @@ The parameters follow standard structures parsed by our Node.js compiler:
 
 ---
 
-## 9. Execution Examples and Output Samples
+## 9. Standard Streams & Output Redirection
+
+The utility separates program output into two distinct streams in accordance with standard POSIX patterns, facilitating automation and clear piping in CI/CD environments.
+
+### Stream Split Matrix
+| Stream | Content Type | Purpose | How to Capture |
+| :--- | :--- | :--- | :--- |
+| **`stdout` (1)** | **Structured Data** | Contains *only* the final conversion summary. Formatted as either a JSON array (default) or an aligned text table. | `> data.json` or `1> data.json` |
+| **`stderr` (2)** | **Metadata & Process Logs**| Contains progress logging, Puppeteer compile details, validation warnings, and final counts. | `2> progress.log` |
+
+### Redirection Examples
+
+1. **Capture Data Only**:
+   To parse the results programmatically without progress info:
+   ```bash
+   ./md2pdf.sh -c config.json -s ./docs -t ./pdfs > data.json
+   ```
+   *Only the clean JSON array is written to `data.json`. All progress logs remain visible in the terminal.*
+
+2. **Capture Logs Only**:
+   To capture diagnostics and error details in a file while viewing the data table on the screen:
+   ```bash
+   ./md2pdf.sh -c config.json -s ./docs -t ./pdfs --format text 2> progress.log
+   ```
+
+3. **Capture Both Separately**:
+   ```bash
+   ./md2pdf.sh -c config.json -s ./docs -t ./pdfs --format json > data.json 2> progress.log
+   ```
+
+4. **Discard All Logs (Silent Mode)**:
+   ```bash
+   ./md2pdf.sh -c config.json -s ./docs -t ./pdfs 2> /dev/null
+   ```
+
+---
+
+## 10. Execution Examples and Output Samples
 
 ### Example 1: Environment Detection (Dependencies Available)
 Checks if Node.js, npm, jq, configurations, local stylesheets, and the global Node modules are ready:
@@ -388,30 +434,104 @@ Installs missing npm dependencies globally:
 
 ---
 
-### Example 3: Batch Conversion Pass
-Converts a folder of markdown files:
+### Example 3: Batch Conversion Pass (Default: JSON format)
+Converts a folder of markdown files and outputs the results summary in JSON:
 ```bash
 ./md2pdf.sh -c md2pdf_config.json -s ./docs -t ./pdfs
 ```
 
 **Output:**
 ```text
-[INFO] Starting conversion with 4 parallel processes...
-[INFO] Config: md2pdf_config.json
-[INFO] Source: E:/data/devel/build/code/private/devops/client_tools/docs
-[INFO] Target: E:/data/devel/build/code/private/devops/client_tools/pdfs
-[INFO] Initiating parallel compiler workers. Standard outputs are buffered to prevent terminal flickering;
-       results will be printed sequentially upon task completion...
-[OK]   Converted: E:/data/devel/build/code/private/devops/client_tools/docs/architecture.md -> E:/data/devel/build/code/private/devops/client_tools/pdfs/architecture.pdf
-[OK]   Converted: E:/data/devel/build/code/private/devops/client_tools/docs/installation.md -> E:/data/devel/build/code/private/devops/client_tools/pdfs/installation.pdf
-[OK]   Converted: E:/data/devel/build/code/private/devops/client_tools/docs/usage.md -> E:/data/devel/build/code/private/devops/client_tools/pdfs/usage.pdf
-[INFO] ============================================
-[INFO] Conversion complete: 3/3 succeeded, 0 failed
+{"timestamp":"2026-06-18T21:55:49-0500","level":"info","msg":"Starting conversion with 4 parallel processes..."}
+{"timestamp":"2026-06-18T21:55:49-0500","level":"info","msg":"Config: md2pdf_config.json"}
+{"timestamp":"2026-06-18T21:55:49-0500","level":"info","msg":"Source: E:/data/devel/build/code/private/devops/client_tools/docs"}
+{"timestamp":"2026-06-18T21:55:49-0500","level":"info","msg":"Target: E:/data/devel/build/code/private/devops/client_tools/pdfs"}
+{"timestamp":"2026-06-18T21:55:49-0500","level":"info","msg":"Force Overwrite: false"}
+{"timestamp":"2026-06-18T21:55:49-0500","level":"info","msg":"Format: json"}
+{"timestamp":"2026-06-18T21:55:49-0500","level":"info","msg":"Initiating parallel compiler workers. Standard outputs are buffered to prevent terminal flickering"}
+{"timestamp":"2026-06-18T21:55:49-0500","level":"info","msg":"Results will be printed sequentially upon task completion..."}
+[
+  {
+    "status": "Converted",
+    "input_md": "architecture.md",
+    "output_pdf": "architecture.pdf"
+  },
+  {
+    "status": "Converted",
+    "input_md": "installation.md",
+    "output_pdf": "installation.pdf"
+  },
+  {
+    "status": "Converted",
+    "input_md": "usage.md",
+    "output_pdf": "usage.pdf"
+  }
+]
+{"timestamp":"2026-06-18T21:55:57-0500","level":"info","msg":"Conversion complete: 3/3 succeeded, 0 failed in 8s","success":3,"failed":0,"total":3,"duration_seconds":8}
 ```
 
 ---
 
-### Example 4: Reference Configuration File (`md2pdf_config.json`)
+### Example 4: Batch Conversion Pass (Tabular Text layout)
+Converts a folder of markdown files and outputs the results summary in a clean tabular text table:
+```bash
+./md2pdf.sh -c md2pdf_config.json -s ./docs -t ./pdfs --format text
+```
+
+**Output:**
+```text
+[2026-06-18 21:55:49] [INFO] Starting conversion with 4 parallel processes...
+[2026-06-18 21:55:49] [INFO] Config: md2pdf_config.json
+[2026-06-18 21:55:49] [INFO] Source: E:/data/devel/build/code/private/devops/client_tools/docs
+[2026-06-18 21:55:49] [INFO] Target: E:/data/devel/build/code/private/devops/client_tools/pdfs
+[2026-06-18 21:55:49] [INFO] Force Overwrite: false
+[2026-06-18 21:55:49] [INFO] Format: text
+[2026-06-18 21:55:49] [INFO] Initiating parallel compiler workers. Standard outputs are buffered to prevent terminal flickering
+[2026-06-18 21:55:49] [INFO] Results will be printed sequentially upon task completion...
+------------------------------+------------------------------------------------------------+------------------------------------------------------------
+            Status            |                           Input MD                          |                          Output PDF                         
+------------------------------+------------------------------------------------------------+------------------------------------------------------------
+[OK] Converted                | architecture.md                                            | architecture.pdf                                            
+[OK] Converted                | installation.md                                            | installation.pdf                                            
+[OK] Converted                | usage.md                                                   | usage.pdf                                                   
+------------------------------+------------------------------------------------------------+------------------------------------------------------------
+[2026-06-18 21:55:57] [INFO] Conversion complete: 3/3 succeeded, 0 failed in 8s
+```
+
+---
+
+### Example 5: Log File Redirection
+Generates conversion results and appends the combined stdout and stderr streams directly to an output log file while still outputting to the terminal:
+```bash
+./md2pdf.sh -c md2pdf_config.json -s ./docs -t ./pdfs --format json --log results_log.json
+```
+
+**Output:**
+```text
+{"timestamp":"2026-06-18T21:55:49-0500","level":"info","msg":"Starting conversion with 4 parallel processes..."}
+{"timestamp":"2026-06-18T21:55:49-0500","level":"info","msg":"Config: md2pdf_config.json"}
+{"timestamp":"2026-06-18T21:55:49-0500","level":"info","msg":"Source: E:/data/devel/build/code/private/devops/client_tools/docs"}
+{"timestamp":"2026-06-18T21:55:49-0500","level":"info","msg":"Target: E:/data/devel/build/code/private/devops/client_tools/pdfs"}
+{"timestamp":"2026-06-18T21:55:49-0500","level":"info","msg":"Force Overwrite: false"}
+{"timestamp":"2026-06-18T21:55:49-0500","level":"info","msg":"Format: json"}
+{"timestamp":"2026-06-18T21:55:49-0500","level":"info","msg":"Log File: results_log.json"}
+{"timestamp":"2026-06-18T21:55:49-0500","level":"info","msg":"Initiating parallel compiler workers. Standard outputs are buffered to prevent terminal flickering"}
+{"timestamp":"2026-06-18T21:55:49-0500","level":"info","msg":"Results will be printed sequentially upon task completion..."}
+...
+[
+  {
+    "status": "Converted",
+    "input_md": "architecture.md",
+    "output_pdf": "architecture.pdf"
+  },
+  ...
+]
+{"timestamp":"2026-06-18T21:55:57-0500","level":"info","msg":"Conversion complete: 3/3 succeeded, 0 failed in 8s","success":3,"failed":0,"total":3,"duration_seconds":8}
+```
+
+---
+
+### Example 6: Reference Configuration File (`md2pdf_config.json`)
 A complete reference configuration file detailing all supported PDF, Puppeteer browser launch, Markdown parsing, and Mermaid rendering settings:
 ```json
 {
