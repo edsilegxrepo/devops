@@ -8,7 +8,10 @@
       "left": "1cm",
       "right": "1cm"
     },
-    "printBackground": true
+    "printBackground": true,
+    "displayHeaderFooter": true,
+    "headerTemplatePath": "md2pdf_compiler/html/header.html",
+    "footerTemplatePath": "md2pdf_compiler/html/footer.html"
   },
   "launch_options": {
     "executablePath": "D:\\inet\\www\\chromium\\bin\\chrome.exe",

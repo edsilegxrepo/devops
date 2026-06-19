@@ -101,6 +101,17 @@ To avoid cryptic runtime failures or unhandled crashes due to configuration mism
 1. **Pre-flight Assertion**: The compiler verifies the existence of `launch_options.executablePath` in the JSON config. It then asserts that the configured file path exists on the host filesystem before initializing Puppeteer, exiting with an explicit error if validation fails.
 2. **Diagnostic Integration**: The `--detect` mode reads `md2pdf_config.json`, extracts the configured browser executable path, normalizes it, and verifies its existence on the host system to provide an up-front environment verification.
 
+### Systematic Error Handling & Safe Defaults
+To prevent runtime crashes and unhandled exceptions:
+1. **Safeguarded Configuration Access**: The compiler initializes all accesses to `config.pdf_options` properties using safe nullish-coalescing and fallbacks (e.g. `const pdfOptions = config.pdf_options || {};`). If optional parameters are omitted, the script falls back to safe default settings instead of throwing reference exceptions.
+2. **Positional Parameter Defaulting in Shell**: Functions inside the `md2pdf.sh` wrapper bind parameters using default shell fallbacks (`local config_file="${1:-}"`). This guarantees that calling any helper utility with missing arguments does not trigger unbound variable crashes under `set -u`.
+3. **Encapsulated Async Compilation**: Sourced configuration, template reading, date formatting, and browser operations are executed within the compiler's main asynchronous `try-catch` block. Any read errors (such as file permissions or locks on template files) are caught cleanly, reported as distinct compile failures, and exit with status code `1`, preventing unhandled Promise rejections.
+
+### Input Sanitization & Injection Prevention
+The toolchain is hardened against malicious script execution and file parsing issues:
+1. **HTML Entity Title Escaping**: The extracted page title is passed through an HTML entity encoder (`escapeHtml`) before being written to the `<title>` tag of the generated document. This prevents HTML injections or cross-site scripting (XSS) if document headers contain layout-breaking character sequences (like `</title>`).
+2. **Strict Regex Parameter Restrictions**: The configuration parameter `mermaid_options.theme` is sanitized using regex replace limits (`/[^a-zA-Z0-9_-]/g`) to restrict values to a safe alphanumeric character set. This prevents JSON config injection or script escapes from executing inside template script tags.
+
 ### Scalability and Performance
 For large-scale document execution, the script is designed with specific scalability and performance design choices:
 *   **Parallel Process Dispatching (`xargs` Thread Pool)**: Uses `find -print0 | xargs -0 -P $max_procs` to handle arguments in a null-separated stream, preventing command-line buffer limits (`ARG_MAX`) from being exceeded when batch converting thousands of files.
@@ -207,6 +218,8 @@ The script relies on the following runtime components:
 | **Local CSS Style** | `markdown-pdf.css` | Workspace (`css/` folder) | Print margins and page-breaking adjustments (sourced from the `yzane.markdown-pdf` VS Code extension resources) |
 | **Local CSS Style** | `tomorrow.css` | Workspace (`css/` folder) | Code block syntax highlighting colors (sourced from the `yzane.markdown-pdf` VS Code extension resources) |
 | **Local Asset / CDN** | `mermaid.min.js` | Workspace (`css/`) or CDN | Client-side JavaScript code compiling Mermaid SVG markup. Sourced locally for offline reliability with a fallback to unpkg.com CDN. |
+| **Local HTML Template** | `header.html` | Workspace (`html/` folder) | HTML template defining layout and style for custom page headers (supports dynamic `.title` and `.date` interpolation). |
+| **Local HTML Template** | `footer.html` | Workspace (`html/` folder) | HTML template defining layout and style for custom page footers (supports dynamic `.url`, `.pageNumber` and `.totalPages` interpolation). |
 | **System Browser** | `Google Chrome` / `Microsoft Edge` | Local machine path | Target web browser run headless via Puppeteer to write PDF files |
 
 ---
@@ -276,6 +289,11 @@ The parameters follow standard structures parsed by our Node.js compiler:
     *   **`height`**: Custom page height (e.g., `"1500mm"` for continuous pageless rendering).
     *   **`margin`**: Outer margin spacing definitions (`top`, `bottom`, `left`, `right`; e.g., `"1.5cm"` top, `"1cm"` others).
     *   **`printBackground`**: Boolean value (`true` or `false`) to enable or disable printing of CSS background colors.
+    *   **`displayHeaderFooter`**: Boolean value (`true` or `false`) to enable or disable printing of custom page headers and footers.
+    *   **`headerTemplatePath`**: Relative path to the HTML template file for page headers (e.g., `"md2pdf_compiler/html/header.html"`). Resolves relative to the JSON configuration file directory. Takes precedence over `headerTemplate` if specified.
+    *   **`footerTemplatePath`**: Relative path to the HTML template file for page footers (e.g., `"md2pdf_compiler/html/footer.html"`). Resolves relative to the JSON configuration file directory. Takes precedence over `footerTemplate` if specified.
+    *   **`headerTemplate`**: Legacy inline HTML template string for page headers (used as fallback if `headerTemplatePath` is omitted).
+    *   **`footerTemplate`**: Legacy inline HTML template string for page footers (used as fallback if `footerTemplatePath` is omitted).
 *   **`launch_options`**: Settings passed directly to Puppeteer on browser launch:
     *   **`executablePath`**: Absolute path pointing to the local Google Chrome/Edge browser binary. Backslashes must be double-escaped (`\\`) to form valid JSON strings.
     *   **`args`**: Array of command-line flags forwarded to the headless browser process (e.g., `["--no-sandbox", "--disable-setuid-sandbox"]`).
@@ -311,6 +329,9 @@ Checks if Node.js, npm, jq, configurations, local stylesheets, and the global No
 [OK]   - md2pdf_compiler.js: Found
 [OK]   - package.json: Found
 [OK]   - package-lock.json: Found
+[OK]   - html/ folder: Found
+[OK]     * html/header.html: Found
+[OK]     * html/footer.html: Found
 [OK]   - css/ folder: Found
 [OK]     * css/markdown.css: Found
 [OK]     * css/markdown-pdf.css: Found
@@ -403,7 +424,10 @@ A complete reference configuration file detailing all supported PDF, Puppeteer b
       "left": "1cm",
       "right": "1cm"
     },
-    "printBackground": true
+    "printBackground": true,
+    "displayHeaderFooter": true,
+    "headerTemplatePath": "md2pdf_compiler/html/header.html",
+    "footerTemplatePath": "md2pdf_compiler/html/footer.html"
   },
   "launch_options": {
     "executablePath": "D:\\inet\\www\\chromium\\bin\\chrome.exe",

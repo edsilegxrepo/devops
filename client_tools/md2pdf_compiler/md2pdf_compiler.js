@@ -45,14 +45,22 @@ if (!configFile || !sourceFile || !targetFile) {
 }
 
 // 3. Load configurations and run pre-flight validation checks
-const config = JSON.parse(fs.readFileSync(configFile, "utf8"));
+let configContent = fs.readFileSync(configFile, "utf8");
+if (configContent.startsWith("\uFEFF")) {
+	configContent = configContent.slice(1);
+}
+const config = JSON.parse(configContent);
 
-if (!config.launch_options || !config.launch_options.executablePath) {
-	console.error("[ERROR] Config validation failed: 'launch_options.executablePath' is not defined.");
+if (!config.launch_options?.executablePath) {
+	console.error(
+		"[ERROR] Config validation failed: 'launch_options.executablePath' is not defined.",
+	);
 	process.exit(1);
 }
 if (!fs.existsSync(config.launch_options.executablePath)) {
-	console.error(`[ERROR] Configured browser executable not found at: ${config.launch_options.executablePath}`);
+	console.error(
+		`[ERROR] Configured browser executable not found at: ${config.launch_options.executablePath}`,
+	);
 	process.exit(1);
 }
 
@@ -90,15 +98,36 @@ md.use(markdownItKatex, {
 });
 
 // 5. Read input Markdown content
-const mdContent = fs.readFileSync(sourceFile, "utf8");
+let mdContent = fs.readFileSync(sourceFile, "utf8");
 
-// Strip YAML front-matter if present
+// Strip UTF-8 Byte Order Mark (BOM) if present (ensures H1 at start of file parses correctly)
+if (mdContent.startsWith("\uFEFF")) {
+	mdContent = mdContent.slice(1);
+}
+
+// Strip YAML front-matter if present and extract title
 let markdownBody = mdContent;
+let docTitle = "";
 if (mdContent.startsWith("---")) {
 	const parts = mdContent.split("---");
 	if (parts.length >= 3) {
+		const frontMatter = parts[1];
+		const match = frontMatter.match(
+			/(?:^|\n)title\s*:\s*(["']?)(.*?)\1\s*(?:\n|$)/,
+		);
+		if (match) {
+			docTitle = match[2].trim();
+		}
 		markdownBody = parts.slice(2).join("---");
 	}
+}
+
+// Fallback to the base filename (including extension) if no YAML title is found
+if (!docTitle) {
+	docTitle = path.basename(sourceFile);
+} else {
+	// Strip standard markdown formatting from title
+	docTitle = docTitle.replace(/[*_`~]/g, "").trim();
 }
 
 // Render Markdown to HTML body
@@ -141,11 +170,16 @@ if (fs.existsSync(localMermaid)) {
 	mermaidUrl = `file:///${path.resolve(localMermaid).replace(/\\/g, "/")}`;
 }
 
+const mermaidTheme = (config.mermaid_options?.theme || "default").replace(
+	/[^a-zA-Z0-9_-]/g,
+	"",
+);
+
 const finalHtml = `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>${path.basename(sourceFile, ".md")}</title>
+<title>${escapeHtml(docTitle)}</title>
 <style>
 ${combinedStyles}
 </style>
@@ -155,7 +189,7 @@ ${combinedStyles}
   <script>
     mermaid.initialize({
       startOnLoad: true,
-      theme: '${config.mermaid_options?.theme || "default"}'
+      theme: '${mermaidTheme}'
     });
   </script>
 ${htmlBody}
@@ -210,6 +244,54 @@ process.on("SIGTERM", async () => {
 	let hasError = false;
 
 	try {
+		// Resolve header and footer templates from external files if specified
+		const pdfOptions = config.pdf_options || {};
+		let headerTemplate = pdfOptions.headerTemplate || "";
+		if (pdfOptions.headerTemplatePath) {
+			const resolvedPath = path.resolve(
+				path.dirname(configFile),
+				pdfOptions.headerTemplatePath,
+			);
+			if (fs.existsSync(resolvedPath)) {
+				headerTemplate = fs.readFileSync(resolvedPath, "utf8");
+			}
+		}
+
+		let footerTemplate = pdfOptions.footerTemplate || "";
+		if (pdfOptions.footerTemplatePath) {
+			const resolvedPath = path.resolve(
+				path.dirname(configFile),
+				pdfOptions.footerTemplatePath,
+			);
+			if (fs.existsSync(resolvedPath)) {
+				footerTemplate = fs.readFileSync(resolvedPath, "utf8");
+			}
+		}
+
+		// Format current date as YYYY/MM/DD HH:mm (24-hour format)
+		const now = new Date();
+		const mm = String(now.getMonth() + 1).padStart(2, "0");
+		const dd = String(now.getDate()).padStart(2, "0");
+		const hh = String(now.getHours()).padStart(2, "0");
+		const min = String(now.getMinutes()).padStart(2, "0");
+		const formattedDate = `${now.getFullYear()}/${mm}/${dd} ${hh}:${min}`;
+
+		// Override standard date formatting
+		const dateRegex = /<span\s+class=(['"])date\1\s*>\s*<\/span>/gi;
+		if (headerTemplate) {
+			headerTemplate = headerTemplate.replace(
+				dateRegex,
+				`<span>${formattedDate}</span>`,
+			);
+			headerTemplate = headerTemplate.replace(/\{\{date\}\}/g, formattedDate);
+		}
+		if (footerTemplate) {
+			footerTemplate = footerTemplate.replace(
+				dateRegex,
+				`<span>${formattedDate}</span>`,
+			);
+			footerTemplate = footerTemplate.replace(/\{\{date\}\}/g, formattedDate);
+		}
 		browser = await puppeteer.launch({
 			executablePath: config.launch_options.executablePath,
 			args: config.launch_options.args || [
@@ -252,10 +334,13 @@ process.on("SIGTERM", async () => {
 		// Generate PDF (retains default print media type for exact VSCode output quality)
 		await page.pdf({
 			path: targetFile,
-			width: config.pdf_options.width,
-			height: config.pdf_options.height,
-			margin: config.pdf_options.margin,
-			printBackground: config.pdf_options.printBackground,
+			width: pdfOptions.width,
+			height: pdfOptions.height,
+			margin: pdfOptions.margin,
+			printBackground: pdfOptions.printBackground,
+			displayHeaderFooter: pdfOptions.displayHeaderFooter,
+			headerTemplate: headerTemplate,
+			footerTemplate: footerTemplate,
 		});
 
 		console.log(`[OK] Successfully rendered: ${targetFile}`);

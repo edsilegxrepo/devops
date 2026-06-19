@@ -48,7 +48,7 @@ set -euo pipefail
 # This ensures path strings are fully compatible with both native Windows binaries
 # (like node.exe) and Unix utilities (like bash, find, xargs) running in emulation layers.
 format_path() {
-  local input_path="$1"
+  local input_path="${1:-}"
   # Replace all backslashes with forward slashes to ban '\' from path variables
   local normalized="${input_path//\\//}"
   # Translate POSIX mounts (e.g. /e/...) to Windows mixed drive paths (e.g. E:/...)
@@ -204,6 +204,26 @@ run_detect() {
     detected=false
   fi
 
+  local html_dir="${compiler_dir}/html"
+  if [[ -d "$html_dir" ]]; then
+    log_success "  - html/ folder: Found"
+    
+    # Check individual templates
+    local template_files=("header.html" "footer.html")
+    for template in "${template_files[@]}"; do
+      local file_path="${html_dir}/${template}"
+      if [[ -f "$file_path" ]]; then
+        log_success "    * html/${template}: Found"
+      else
+        log_error "    * html/${template}: NOT FOUND (Expected at $file_path)"
+        detected=false
+      fi
+    done
+  else
+    log_error "  - html/ folder: NOT FOUND (Expected at $html_dir)"
+    detected=false
+  fi
+
   local css_dir="${compiler_dir}/css"
   if [[ -d "$css_dir" ]]; then
     log_success "  - css/ folder: Found"
@@ -323,9 +343,9 @@ install_dependencies() {
 # If force_overwrite is false and the target PDF already exists, it skips the conversion.
 # Capture status code safely before passing it to log_error.
 convert_single_file() {
-  local config_file="$1"
-  local source_file="$2"
-  local target_dir="$3"
+  local config_file="${1:-}"
+  local source_file="${2:-}"
+  local target_dir="${3:-}"
   local force_overwrite="${4:-false}"
 
   local basename
@@ -379,9 +399,9 @@ convert_single_file() {
 #   - Clears EXIT trap and removes the temp file explicitly to prevent resource leakage
 #     if sourced in an active shell session.
 run_conversion() {
-  local config_file="$1"
-  local source_dir="$2"
-  local target_dir="$3"
+  local config_file="${1:-}"
+  local source_dir="${2:-}"
+  local target_dir="${3:-}"
   local force_overwrite="${4:-false}"
 
   local max_procs
@@ -466,16 +486,17 @@ run_conversion() {
 # validate_args - Asserts that the mandatory config file and source directories exist,
 # and verifies that Node.js is available and prerequisites are met.
 validate_args() {
-  local config_file="$1"
-  local source_dir="$2"
-  local target_dir="$3"
+  local config_file="${1:-}"
+  local source_dir="${2:-}"
+  local target_dir="${3:-}"
 
   [[ -f "$config_file" ]] || die "Config file not found: $config_file"
   [[ -d "$source_dir" ]] || die "Source directory not found: $source_dir"
 
-  # Enforce Node.js and local CSS folder presence as hard prerequisites
+  # Enforce Node.js, local CSS, and local HTML template folders presence as hard prerequisites
   command -v node &> /dev/null || die "Node.js not found. Please install Node.js first."
   [[ -d "$(dirname "$SCRIPT_PATH")/md2pdf_compiler/css" ]] || die "Local CSS styles directory not found. Please ensure 'css' folder exists inside the md2pdf_compiler directory."
+  [[ -d "$(dirname "$SCRIPT_PATH")/md2pdf_compiler/html" ]] || die "Local HTML templates directory not found. Please ensure 'html' folder exists inside the md2pdf_compiler directory."
 
   # Verify config file contains valid JSON structure (preferring jq, falling back to node)
   if command -v jq &> /dev/null; then
