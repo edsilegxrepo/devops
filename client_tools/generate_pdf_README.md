@@ -6,7 +6,7 @@ This document provides a comprehensive technical overview of the design, archite
 
 ## 1. Application Overview and Objectives
 
-`generate_pdf.sh` is an enterprise-grade shell utility designed to recursively discover Microsoft Office documents (defaulting to `*.doc`, `*.docx`, `*.xls`, `*.xlsx`, `*.ppt`, and `*.pptx` if no filter options are specified, along with support for OpenDocument, vector graphics, and raster images) and convert them to PDF using LibreOffice in headless mode. 
+`generate_pdf.sh` is an enterprise-grade shell utility designed to recursively discover Office documents (defaulting to `*.doc`, `*.docx`, `*.xls`, `*.xlsx`, `*.ppt`, and `*.pptx` if no filter options are specified, along with support for OpenDocument, vector graphics, and raster images) and convert them to PDF using LibreOffice in headless mode. 
 
 <!-- [Objective]: Define performance and audit-compliance boundaries -->
 ### Objectives
@@ -261,7 +261,7 @@ The script parses options using an iterative case-loop. Options can be passed in
 | **`--force`** | Flag | `false` | Bypasses the incremental timestamp check, forcing reconversion of all files. |
 | **`--quiet`** | Flag | `false` | Suppresses standard output from LibreOffice, showing only the final run summary. |
 | **`--verbose`** | Flag | `false` | Shows detailed debug output, including the epoch timestamps being compared. |
-| **`--extensions <list>`** | String (CSV List) | `*.doc,*.docx,*.xls,*.xlsx,*.ppt,*.pptx` | Comma-separated list of extensions to find. If omitted, defaults to standard MS Office formats. |
+| **`--extensions <list>`** | String (CSV List) | `*.doc,*.docx,*.xls,*.xlsx,*.ppt,*.pptx` | Comma-separated list of extensions to find. If omitted, defaults to standard Office formats. |
 | **`--pattern <regex>`**| String (Regex) | N/A | Alternative regex pattern for matching filenames. |
 | **`--document`** | Flag | `false` | Category filter. Includes word processing documents (Writer formats). |
 | **`--spreadsheet`** | Flag | `false` | Category filter. Includes spreadsheets (Calc formats). |

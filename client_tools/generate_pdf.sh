@@ -6,7 +6,7 @@
 # VERSION: 1.9.0
 #
 # OBJECTIVE:
-#   Recursively find Microsoft Office documents (Word, Excel, PowerPoint) and
+#   Recursively find Office documents (Word, Excel, PowerPoint) and
 #   convert them to PDF using LibreOffice in headless mode. Designed for bulk
 #   conversion of compliance/audit documents.
 #
