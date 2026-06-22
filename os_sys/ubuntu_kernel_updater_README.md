@@ -6,9 +6,10 @@ This document provides a comprehensive overview of the design, architecture, sec
 
 ## 1. Application Overview and Objectives
 
-The `ubuntu_kernel_updater.sh` script is a hardened system utility designed to automate two core tasks on Debian, Ubuntu, and Linux Mint distributions:
+The `ubuntu_kernel_updater.sh` script is a hardened system utility designed to automate three core tasks on Debian, Ubuntu, and Linux Mint distributions:
 1. **Upstream Mainline Kernel Deployment:** Auto-detects, downloads, extracts, and atomically deploys the latest stable mainline Linux kernel from the official Ubuntu kernel archives.
 2. **Hardened Kernel Purging:** Identifies and purges obsolete mainline (custom/untracked) and official (packaged/tracked) kernel installations to prevent `/boot` and `/usr/src` exhaustion, while strictly enforcing safety checks to keep the active booted kernel and the newest packaged kernel.
+3. **Atomic Boot Symlink Management:** Automatically maps and updates `/boot/vmlinuz`, `/boot/initrd.img`, and optionally `.old` versions (as well as `/` equivalents if present) to point to the newest and second-newest kernels, ensuring no dangling links exist.
 
 ### Objectives
 - **System Stability:** Implement atomic filesystem moves and dependency validation to guarantee that a partially downloaded or corrupted kernel installation never breaks the bootloader.
@@ -22,6 +23,11 @@ The `ubuntu_kernel_updater.sh` script is a hardened system utility designed to a
 ### Core Design Principles
 - **Decoupled Mainline Deployment:** Mainline kernels downloaded from the PPA repository are manually extracted and deployed to system directories (`/boot`, `/lib/modules`, and `/usr/src`) instead of being registered via `dpkg -i`. This protects the system package manager database from unresolved dependencies.
 - **Atomic File Operations:** When files are copied to the critical `/boot` directory, they are first copied with a `.tmp` suffix (e.g. `vmlinuz-xxx.tmp`) and then atomically renamed via `mv`. This prevents a partial copy from being parsed by the bootloader in the event of power loss or disk exhaustion.
+- **Atomic Symlink Management:** Updates system symlinks by creating a temporary link (`mktemp -u`) on the same filesystem and atomically renaming it (`mv -f`). This guarantees that a system crash or power failure never leaves a symlink in a half-written or corrupted state.
+- **GRUB Recovery Hardening:** Checks and hardens `/etc/default/grub` during installation and purge executions to ensure the bootloader menu style is visible (`menu`), has a valid timeout (`5` seconds), prevents indefinite menu hangs on failure recovery (`GRUB_RECORDFAIL_TIMEOUT=5`), and optimizes default kernel command-line parameters (`GRUB_CMDLINE_LINUX_DEFAULT`) by removing `quiet` (to display verbose boot diagnostics), ensuring `nomodeset` (for broad video display compatibility), and ensuring `panic=30` (to trigger auto-reboot on kernel panic). This ensures remote servers can always boot back to fallback kernels on crash.
+- **Visible System Diagnostics:** Executes RAM disk creation (`update-initramfs`) without stderr suppression (`2>/dev/null`) so that compilation warnings, missing device driver warnings, or firmware alerts are immediately visible to administrators.
+- **Script-Wide Mutual Exclusion (Locking):** Enforces a strict script-wide locking mechanism via `flock` on file descriptor 9 (`/run/kernel_updater.lock`). This prevents concurrent updates or purging instances from executing simultaneously, eliminating file-system write-collisions or race conditions.
+- **Conditional DKMS Autoinstallation:** Checks if DKMS is installed on the host and queries `dkms status`. If registered out-of-tree modules (e.g. ZFS, Nvidia) are detected, it automatically executes `dkms autoinstall` to compile modules for the new mainline kernel before compiling the initramfs.
 - **Defensive Sourcing and Array commands:** Commands (such as `linux-version sort` or its fallback `sort -V`) are stored as Bash arrays to ensure safe shell expansion, completely eliminating unquoted word-splitting issues.
 - **Lock-Aware Execution:** The script does not compete with system package managers; it dynamically queries `/var/lib/dpkg/lock-frontend` and yields execution until concurrent updates complete.
 
@@ -35,6 +41,9 @@ The `ubuntu_kernel_updater.sh` script is a hardened system utility designed to a
 - **Lock Contention:** Prevents installation failures due to background `apt` or `unattended-upgrades` processes by waiting on the dpkg frontend lock.
 - **Shared Base Headers:** Shared base headers (e.g. `linux-headers-6.8.0-120`) are only deleted if no other flavored kernel (like `lowlatency`) is still installed on the system.
 - **Disk Exhaustion:** Verifies `/` contains at least 2.5 GB of free space before initiating downloads.
+- **Single Kernel Environments:** When only one kernel remains on the system, the script automatically removes the `.old` symlinks from both `/boot` and `/` to prevent dangling references.
+- **Pre-Reboot Re-installation Prevention:** Checks if the target kernel version is already present on the filesystem in `/boot`. If it exists but is not yet the active booted kernel (pending reboot), the script aborts safely rather than repeating download and compilation phases.
+- **Pre-Reboot Custom Kernel Protection:** During purging, the script automatically identifies the newest custom mainline kernel installed on disk (even if not booted yet) and protects it from being swept away as redundant.
 
 ---
 
@@ -49,7 +58,8 @@ graph TD
     B -->|Yes| D{OS Verification /etc/os-release}
     D -->|Unsupported| E[Abort: Unsupported OS]
     D -->|Supported| F[Initialize log file]
-    F --> G{Parse CLI Arguments}
+    F --> F1[Acquire flock /run/kernel_updater.lock]
+    F1 --> G{Parse CLI Arguments}
     
     G -->|"--help / -h"| H[Show Help & Exit]
     
@@ -57,7 +67,8 @@ graph TD
     I --> I1[Query installed packaged kernels via dpkg-query]
     I1 --> I2[Sort versions and identify LATEST_PACKAGED_KERNEL]
     I2 --> I3[Filter out LATEST_PACKAGED_KERNEL & CURRENT_ACTIVE]
-    I3 --> I4[Scan /lib/modules/ for untracked custom mainline modules]
+    I3 --> I3a[Identify and protect newest custom mainline kernel on disk]
+    I3a --> I4[Scan /lib/modules/ for untracked custom mainline modules]
     I4 --> I5{Purge execution mode?}
     I5 -->|"--purge-list"| I6[Print eligible kernels & Exit]
     I5 -->|"--purge"| I7[Check for dpkg Lock & Wait]
@@ -65,7 +76,8 @@ graph TD
     I8 --> I9[Directly rm custom files from boot/lib/usr]
     I9 --> I10[Execute apt-get purge on old packages]
     I10 --> I11[Execute apt-get autoremove]
-    I11 --> I12[Run update-grub & Exit]
+    I11 --> I12[Run harden_grub_config & update_boot_symlinks]
+    I12 --> I13[Run update-grub & Exit]
     
     G -->|"-f / --force / Default"| J[Execute Mainline Deployment Pipeline]
     J --> J1[Check free disk space > 2.5GB]
@@ -73,14 +85,21 @@ graph TD
     J2 --> J3[Detect latest stable mainline version via curl]
     J3 --> J4{Already running target version?}
     J4 -->|"Yes and not --force"| J5[Log & Exit]
-    J4 -->|"No or --force"| J6[Download generic amd64 deb files]
+    J4 -->|"No or --force"| J5a{Already installed on disk?}
+    J5a -->|"Yes and not --force"| J5b[Log & Exit]
+    J5a -->|"No or --force"| J6[Download generic amd64 deb files]
     J6 --> J7[Verify downloaded files integrity]
     J7 --> J8[Unpack deb archives into staging area]
     J8 --> J9[Integrity checks of boot/usr directories]
     J9 --> J10[Deploy modules and headers to lib/usr]
     J10 --> J11[Deploy boot files atomically to boot]
-    J11 --> J12[Run depmod, update-initramfs, update-grub]
-    J12 --> K[End / Success Exit]
+    J11 --> J11a[Run depmod & rebuild hardware maps]
+    J11a --> J11b{DKMS modules registered?}
+    J11b -->|Yes| J11c[Run dkms autoinstall]
+    J11b -->|No| J12[Run update-initramfs]
+    J11c --> J12
+    J12 --> J13[Run harden_grub_config, update_boot_symlinks & update-grub]
+    J13 --> K[End / Success Exit]
 ```
 
 ### Data Sequencing (Mainline Pipeline)
@@ -128,6 +147,13 @@ sudo chmod 700 /opt/scripts/ubuntu_kernel_updater.sh
 ```
 This ensures that only the root user can read or execute the tool.
 
+### Kernel Preservation and Anti-Accidental Deletion Guarantees
+To ensure that the script never leaves a system in an unbootable state, multiple defensive preservation policies are mathematically and logically enforced during purge sweeps:
+1. **Active Kernel Safeguard**: The script queries `uname -r` at startup and strictly validates that it resolves to a non-empty string. If this verification fails, execution is aborted immediately. The active booted kernel (`CURRENT_ACTIVE`) is explicitly skipped and protected during both custom file removals and package purging.
+2. **Packaged Fallback Safeguard**: The package purge routine dynamically identifies the latest official packaged distribution kernel (`LATEST_PACKAGED_KERNEL`) and protects it from purging. This guarantees that at least one official distribution kernel remains on disk as a failsafe boot option.
+3. **Mainline Preservation Safeguard**: During custom kernel sweeps, the script identifies the newest custom mainline kernel version (`latest_custom_kernel`) and protects it from purging, preserving newly installed kernels that are pending reboot.
+4. **Single-Kernel Fail-Safe**: If there is only one kernel installed on the system, the logic will match it against the active kernel and latest package/mainline rules, setting `FOUND_ANY=false`. The script will output a safe status log and exit cleanly without executing any file removals or package purges. It is logically impossible to leave the system with zero kernels.
+
 ---
 
 ## 6. Code Quality Assessment and Review
@@ -144,6 +170,7 @@ shellcheck /opt/scripts/ubuntu_kernel_updater.sh
   - `-u` (Treat unset variables as an error when expanding).
   - `-o pipefail` (Pipeline returns the exit status of the last command to exit with a non-zero status).
 - **Directory Traps:** Staging sandboxes are allocated using `mktemp -d`. An `EXIT` signal trap is registered early to guarantee that directory cleanups (`rm -rf`) are always executed upon script termination, regardless of whether it exits normally, crashes, or is terminated by the user (`Ctrl+C`).
+- **Strict Version Pattern Validation (Regex)**: During purging operations, the script validates custom version strings using a strict regular expression pattern (`[[ "$kver" =~ ^[0-9][0-9a-zA-Z.-]+$ ]]`). This enforces that only well-formed kernel version names (starting with a digit and containing only alphanumeric characters, dots, and hyphens) can be processed, completely preventing directory traversal (`..`), spaces, or wildcard (`*`) expansions from triggering accidental deletions in `/boot`, `/lib/modules`, and `/usr/src`.
 
 ---
 
@@ -155,6 +182,7 @@ shellcheck /opt/scripts/ubuntu_kernel_updater.sh
 | `-f` | `--force` | Force download/installation of the mainline kernel. | Boolean | `false` |
 | N/A | `--purge-list` | Lists older custom/packaged kernels eligible for purging. | Boolean | `false` |
 | N/A | `--purge` | Purges older custom/packaged kernels non-interactively. | Boolean | `false` |
+| N/A | `--detect` | Dry-run mode: Scans system and lists all operations (purges and deployments) that would be done without executing them. | Boolean | `false` |
 
 ---
 
@@ -224,4 +252,24 @@ sudo /opt/scripts/ubuntu_kernel_updater.sh
 [+] 2026-06-17 21:55:01 : Auto-detecting latest stable upstream kernel...
 [+] 2026-06-17 21:55:02 : Latest stable version detected: v7.1.0
 [!] 2026-06-17 21:55:02 : System is already running 7.1.0-070100-generic. Aborting safely.
+```
+
+---
+
+### Example 4: Dry-Run Mode Option (`--detect`)
+Scans the system and lists all actions (purges and/or deployments) that would be performed, without executing any writes or deletions.
+
+#### Command
+```bash
+sudo /opt/scripts/ubuntu_kernel_updater.sh --detect
+```
+
+#### Sample Output
+```
+[+] 2026-06-22 14:37:40 : [DETECT] Scanning system for custom mainline and packaged distribution kernel instances...
+[+] 2026-06-22 14:37:40 : [DETECT] No redundant custom or packaged kernels detected for purging.
+[+] 2026-06-22 14:37:40 : [DETECT] Initializing dry mainline kernel deployment pipeline...
+[+] 2026-06-22 14:37:40 : Auto-detecting latest stable upstream kernel...
+[+] 2026-06-22 14:37:42 : Latest stable version detected: v7.1.1
+[+] 2026-06-22 14:37:42 : [DETECT] System is already running 7.1.1-070101-generic. No deployment would be performed.
 ```

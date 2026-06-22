@@ -1,5 +1,9 @@
 #!/bin/bash
 # ==============================================================================
+# FILE: ubuntu_upgrade.sh
+# VERSION: 1.0.0
+# DATE: 2026-06-22
+#
 # SUMMARY & OBJECTIVES:
 # ------------------------------------------------------------------------------
 # Robust Automated System Upgrade & Hardening Utility (Debian/Ubuntu/Linux Mint)

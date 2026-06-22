@@ -262,7 +262,7 @@ run_detect() {
     if command -v pkill &>/dev/null; then
         echo "[OK]   - pkill (orphan cleanup): Found"
     else
-        echo "[INFO]  - pkill (orphan cleanup): Not found (optional, used to terminate orphaned LibreOffice processes on interruption), failling back to standard kill"
+        echo "[INFO]  - pkill (orphan cleanup): Not found, falling back to standard kill"
     fi
     
     # Check hashing algorithms
