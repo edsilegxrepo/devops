@@ -1,6 +1,8 @@
 #!/bin/bash
 # ==============================================================================
 # Script Name: jdk_packaging.sh
+# Version: 1.0.0
+# Date: 2026-06-03
 #
 # Objectives:
 #   Repackage multiple Azul Zulu JDK distributions (for both Linux and Windows 

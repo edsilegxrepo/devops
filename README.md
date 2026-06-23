@@ -23,6 +23,7 @@ Hardened frameworks for system security and code quality assurance.
 Automation for building, and validating core system components.
 - `javacmd_build.sh`: Unified, generic Java compilation and packaging wrapper integrating Checkstyle, PMD, and SpotBugs validation.
 - `jdk_packaging.sh`: Automates Azul Zulu JDK repackaging, footprint minimization, Maven integration, and JTLSTester diagnostic injection.
+- `tomcat_packaging.sh`: Reconstructs, customizes, and packages Apache Tomcat layouts, applying configuration patches and resolving external database drivers.
 - `gobuild_code-analyzers.sh`: Automation for compiling Go-based static analysis tools.
 - `openssl_build.sh`: A multi-mode (RPM/Archive/All) script for isolated OpenSSL builds.
 - `sqlite3_validate.sh`: A suite for verifying SQLite 3 binary builds against specs.
