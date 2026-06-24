@@ -75,6 +75,7 @@ Specialized utilities for end-user environment management.
 - `CitrixTool.ps1`: Citrix Workspace Backup & Restore CLI Utility.
 - `md2pdf.sh`: High-performance, concurrent Markdown to PDF batch converter (using a custom Node.js compiler with Puppeteer browser rendering).
 - `generate_pdf.sh`: High-performance, concurrent Office to PDF batch converter (using LibreOffice headless rendering, preserving original file modification timestamps for compliance auditing, and outputting NDJSON logs).
+- `pdf_text-extractor.sh`: High-performance, concurrent layout-preserved plain text extractor from PDF documents, supporting single-file/batch operations, throttle concurrency, and NDJSON logging.
 
 ### 8. Network & Diagnostic Tools (`/diags`)
 Specialized network probing and cryptographic validation diagnostics.
