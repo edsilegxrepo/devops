@@ -9,6 +9,12 @@ This document provides architectural, operational, and security specifications f
 
 The `tomcat_probe_build.sh` script automates the retrieval, compilation, security hardening, customization, and packaging of `psi-probe` (supporting the `javax` namespace branch). The resulting artifact is a compressed tarball (`.tar.xz`) compatible with the target application servlet container (e.g., Tomcat `javax` namespace runtimes).
 
+> [!NOTE]
+> **`javax` vs. `jakarta` Namespace Transition:**
+> - **`javax` Namespace (Tomcat 9 and earlier):** Supports Java EE specifications (e.g., Servlet API 4.0 and below). This script packages `psi-probe` specifically for these legacy runtimes.
+> - **`jakarta` Namespace (Tomcat 10 and later):** Supports Jakarta EE specifications (e.g., Servlet API 5.0 and above).
+> - **Incompatibility:** Due to the package renaming from `javax.*` to `jakarta.*`, WAR files compiled for one namespace cannot run on the other without using a migration tool (such as the Apache Tomcat Migration Tool for Jakarta EE).
+
 ### Primary Objectives:
 - **Automation of Build Lifecycle**: Orchestrates source code retrieval, version tagging, compilation, staging, branding customization, and archival.
 - **Java Compiler Target Compatibility**: Uses the configured Java Development Kit (JDK) compiler environment to support build plugins (such as error-prone) while targeting runtime Java bytecode compatibility levels. The generated Java binaries (compiled war bytecode) target runtime compatibility with **Java 11 or higher** runtime environments.
