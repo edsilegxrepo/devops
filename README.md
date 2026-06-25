@@ -18,6 +18,7 @@ Hardened frameworks for system security and code quality assurance.
 - `pslint.ps1`: PowerShell Linter Wrapper for PSScriptAnalyzer (Audit and Auto-Fix).
 - `shlint.sh`: Bash script hygiene tool enforcing formatting (shfmt) and static analysis (shellcheck).
 - `detect_priv.sh`: Privileged user detection auditing administrative rights via the `sudo` policy engine.
+- `generate_diffs.sh`: High-performance, concurrent script diff generator with fuzzy rename and extension change detection.
 
 ### 2. Build & Validation Tasks (`/build_tasks`)
 Automation for building, and validating core system components.
