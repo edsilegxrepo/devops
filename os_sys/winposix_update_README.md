@@ -33,7 +33,9 @@ The following diagram illustrates the operational flow of a WinPOSIX update sess
 ```mermaid
 graph TD
     A[CLI Input / Environment Variables] --> B[Manual Argument Mapping]
-    B --> C{Orchestrator}
+    B --> BP[Pre-Flight Checks: Privileges & Processes]
+    BP -->|Checks Pass| C{Orchestrator}
+    BP -->|Checks Fail| BO[Abort with Error]
     
     C -->|Update Cygwin| D[Invoke-IsolatedAction: Cygwin]
     C -->|Update MSYS2| E[Invoke-IsolatedAction: MSYS]
@@ -53,12 +55,14 @@ graph TD
 ```
 
 ### **Operational Sequence:**
-1.  **Discovery**: Resolves the home directories for Cygwin and MSYS2 using environment variables (`CYGWIN_HOME`, `MSYS_HOME`, `MSYS2_HOME`) with an array of standardized local fallbacks (`C:\admin\cygwin`, `C:\cygwin64`, `C:\admin\msys2`, `C:\msys64`).
-2.  **Isolation**: Before triggering an update engine, the script saves the current `env:PATH` and applies a filtered version containing only the target's binaries.
-3.  **Execution**:
+1.  **Argument Mapping**: Resolves and maps POSIX-style CLI flags (e.g. `--update-all`, `--json`) from unbound remaining arguments.
+2.  **Pre-Flight Verification**: Enforces administrative privilege checks (bypassed for read-only `--help` and `--info` requests) and verifies that no active/blocking processes are running under the target environments (aborts execution if conflicts are detected).
+3.  **Discovery**: Resolves the home directories for Cygwin and MSYS2 using environment variables (`CYGWIN_HOME`, `MSYS_HOME`, `MSYS2_HOME`) with an array of standardized local fallbacks (`C:\admin\cygwin`, `C:\cygwin64`, `C:\admin\msys2`, `C:\msys64`).
+4.  **Isolation**: Before triggering an update engine, the script saves the current `env:PATH` and applies a filtered version containing only the target's binaries.
+5.  **Execution**:
     - **Cygwin**: Triggers the setup utility with `-WindowStyle Hidden` to suppress all graphical prompts.
     - **MSYS2**: Streams pacman output in real-time, monitoring for specific strings to determine if a subsequent update pass is required.
-4.  **Restoration**: Guaranteed restoration of the original system `PATH` in the `finally` block of the isolation wrapper, ensuring no side effects for the calling shell.
+6.  **Restoration**: Guaranteed restoration of the original system `PATH` in the `finally` block of the isolation wrapper, ensuring no side effects for the calling shell.
 
 ---
 
@@ -89,6 +93,7 @@ WinPOSIX Update requires the following components to be present on the host:
 | `--LogPath`      | `string` | `$null`  | Destination path for the session log file. |
 | `--CygwinMirror` | `string` | `mirrors.kernel.org` | URL of the mirror to be used for Cygwin package downloads. |
 | `--help`         | `switch` | `$false` | Displays the help output and exits. |
+| `--json`         | `switch` | `$false` | Formats all logs, warnings, errors, and environment info in structured ndjson (no colorization) for CI/CD pipelines. |
 
 ### **Environment Variables**
 The script resolves installation directories by checking environment variables, and if undefined, inspecting an array of standard fallback paths.
@@ -138,16 +143,60 @@ Example command for a Windows Scheduled Task (Running as SYSTEM or Admin).
 powershell.exe -ExecutionPolicy Bypass -File "C:\scripts\winposix_update.ps1" --update-all
 ```
 
+### **Scenario G: CI/CD Pipeline Integration (JSON Output)**
+Execute updates and pipe structured ndjson logs directly to an external ingest processor.
+```powershell
+.\os_sys\winposix_update.ps1 --update-all --json
+```
+
 ---
 
 ## 7. Important Technical Notes
 
 ### **Administrative Privileges**
 > [!IMPORTANT]
-> **Administrative rights are mandatory.** The script performs system-level modifications, including writing to protected directories (e.g., `C:\cygwin64`) and updating Machine-level environment variables. The script includes a built-in check and will exit with an error if executed without elevated privileges.
+> **Administrative rights are mandatory.** The script performs system-level modifications, including writing to protected directories (e.g., `C:\cygwin64`) and updating Machine-level environment variables. The script includes a built-in check and will exit with an error if executed without elevated privileges (unless requesting the help menu, which is permitted to run as non-admin).
+
+### **Running Process Prevention**
+> [!WARNING]
+> **No active POSIX environments should be running during updates.**
+> To prevent file-locking conflicts, installation corruption, or DLL collisions, the script checks for running processes under the target Cygwin and MSYS2 directories before performing any update or install operations. If blocking processes are detected, the script lists their names and PIDs and aborts execution with an error.
 
 ### **Automatic Environment Variable Population**
 To ensure consistent environment discovery across the system, WinPOSIX Update manages **Machine-level** environment variables:
 - **Auto-Discovery**: If an existing installation is detected but the corresponding `CYGWIN_HOME` or `MSYS_HOME` variable is missing, the script will automatically populate it.
 - **Installation Persistence**: When performing a fresh installation (`--install-*`), the target path is immediately persisted to the system environment.
 - **PATH Integrity**: In accordance with best practices for environment isolation, the script **never** modifies the global system `PATH`. It only ensures the home directory variables are correctly positioned for external tool resolution.
+
+### **PowerShell Script Execution Policy & Digital Signatures**
+> [!NOTE]
+> **PowerShell Digital Signature & Execution Policy Restriction:**
+> If executing the script results in the following error:
+> `winposix_update.ps1 cannot be loaded. The file is not digitally signed. You cannot run this script on the current system. For more information about running scripts and setting execution policy, see about_Execution_Policies.`
+> 
+> This restriction can be bypassed or resolved using one of the following approaches:
+> 
+> - **Bypass the Execution Policy (Recommended for scheduled tasks/one-off runs)**:
+>   Launch PowerShell with the bypass parameter:
+>   ```powershell
+>   powershell.exe -ExecutionPolicy Bypass -File "path\to\winposix_update.ps1"
+>   ```
+> - **Unblock the Script File**:
+>   If the file has been downloaded or transferred and is flagged by Windows SmartScreen, unblock it:
+>   ```powershell
+>   Unblock-File -Path "path\to\winposix_update.ps1"
+>   ```
+
+### **Script Exit Codes & Diagnostics**
+The script surfaces specific diagnostic exit codes to simplify pipeline reporting and debugging:
+
+| Exit Code | Classification | Trigger Conditions / Description |
+| :---: | :--- | :--- |
+| **`0`** | Success | All requested tasks completed cleanly, help menu was shown, or environment info was printed. |
+| **`2`** | Privilege Failure | Administrative privileges are required for the requested action but are missing. |
+| **`3`** | Process Conflict | Conflicting running processes detected locking files in target environment paths. |
+| **`4`** | Parameter Validation | Validation check failed (e.g. providing `--path` without installation mode switches, or target path is not writeable). |
+| **`5`** | Guardrail Failure | Fresh installation aborted because target platform already exists at installation path. |
+| **`6`** | Cygwin Engine Failure | Setup utility missing, bootstrapper download failed, or setup-x86_64.exe returned a non-zero exit code. |
+| **`7`** | MSYS2 Engine Failure | SFX download failed, extraction failed, pacman was missing, or pacman returned a non-zero exit code. |
+| **`8`** | Isolation Exception | Unexpected runtime or path isolation exception caught inside the context manager wrapper. |
