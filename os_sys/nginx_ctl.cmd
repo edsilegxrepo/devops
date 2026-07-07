@@ -8,15 +8,18 @@
 :: Created     : 2026-07-06
 ::=============================================================================
 
+setlocal
+
 if "%~1"=="__init" (
-    shift
+    set "CMD_ARG=%~2"
     goto init
 )
+set "CMD_ARG=%~1"
 call "%~dpnx0" __init %*
+endlocal
 exit /b %errorlevel%
 
 :init
-setlocal
 
 :: Configuration
 set NGINX_HOME=d:\inetd\nginx
@@ -39,14 +42,14 @@ if not exist "%NGINX_HOME%\nginx.exe" (
 if not exist "%NGINX_LOG%" mkdir "%NGINX_LOG%" 2>nul
 
 :: Change to Nginx home directory
-cd /d %NGINX_HOME%
+cd /d "%NGINX_HOME%"
 
 :: Parse command line argument
-if /i "%~1"=="start" goto start
-if /i "%~1"=="stop" goto stop
-if /i "%~1"=="restart" goto restart
-if /i "%~1"=="reload" goto reload
-if /i "%~1"=="status" goto status
+if /i "%CMD_ARG%"=="start" goto start
+if /i "%CMD_ARG%"=="stop" goto stop
+if /i "%CMD_ARG%"=="restart" goto restart
+if /i "%CMD_ARG%"=="reload" goto reload
+if /i "%CMD_ARG%"=="status" goto status
 
 :: Display usage if no valid argument provided
 echo Usage: %~nx0 [start^|stop^|restart^|reload^|status]
@@ -102,7 +105,7 @@ if errorlevel 1 (
 )
 echo Reloading nginx configuration
 echo [%DATE% %TIME%] Reloading nginx configuration >> "%NGINX_LOG%\nginx_ctl.log"
-%NGINX_HOME%\nginx -s reload
+"%NGINX_HOME%\nginx" -s reload
 goto end
 
 ::-----------------------------------------------------------------------------
@@ -124,14 +127,14 @@ exit /b 1
 exit /b %errorlevel%
 
 :do_start
-start /MIN %NGINX_HOME%\nginx
+start "" /MIN "%NGINX_HOME%\nginx"
 exit /b 0
 
 :do_stop
-start /MIN %NGINX_HOME%\nginx -s stop
+start "" /MIN "%NGINX_HOME%\nginx" -s stop
 %TIMEOUT% /t 5 /nobreak >nul
 %TASKKILL% /F /IM nginx.exe >nul 2>&1
-del %NGINX_DATA%\var\nginx.pid 2>nul
+del "%NGINX_DATA%\var\nginx.pid" 2>nul
 exit /b 0
 
 ::-----------------------------------------------------------------------------
