@@ -8,12 +8,26 @@
 :: Created     : 2026-07-06
 ::=============================================================================
 
+if "%~1"=="__init" (
+    shift
+    goto init
+)
+call "%~dpnx0" __init %*
+exit /b %errorlevel%
+
+:init
 setlocal
 
 :: Configuration
 set NGINX_HOME=d:\inetd\nginx
 set NGINX_DATA=d:\data\nginx
 set NGINX_LOG=d:\archive\logs\nginx
+
+:: System Utilities
+set TASKLIST=%SystemRoot%\System32\tasklist.exe
+set TASKKILL=%SystemRoot%\System32\taskkill.exe
+set TIMEOUT=%SystemRoot%\System32\timeout.exe
+set FIND=%SystemRoot%\System32\find.exe
 
 :: Validate NGINX_HOME exists
 if not exist "%NGINX_HOME%\nginx.exe" (
@@ -73,7 +87,7 @@ goto end
 echo Restarting nginx web proxy
 echo [%DATE% %TIME%] Restarting nginx >> "%NGINX_LOG%\nginx_ctl.log"
 call :do_stop
-timeout /t 2 /nobreak >nul
+%TIMEOUT% /t 2 /nobreak >nul
 call :do_start
 goto end
 
@@ -95,7 +109,7 @@ goto end
 :: STATUS - Check if Nginx is running and display PID
 ::-----------------------------------------------------------------------------
 :status
-for /f "tokens=2" %%p in ('tasklist /FI "IMAGENAME eq nginx.exe" /NH 2^>nul ^| find /I "nginx.exe"') do (
+for /f "tokens=2" %%p in ('%TASKLIST% /FI "IMAGENAME eq nginx.exe" /NH 2^>nul ^| %FIND% /I "nginx.exe"') do (
     echo nginx is running [PID: %%p]
     exit /b 0
 )
@@ -106,7 +120,7 @@ exit /b 1
 :: INTERNAL FUNCTIONS
 ::-----------------------------------------------------------------------------
 :is_running
-tasklist /FI "IMAGENAME eq nginx.exe" 2>nul | find /I "nginx.exe" >nul
+%TASKLIST% /FI "IMAGENAME eq nginx.exe" 2>nul | %FIND% /I "nginx.exe" >nul
 exit /b %errorlevel%
 
 :do_start
@@ -115,8 +129,8 @@ exit /b 0
 
 :do_stop
 start /MIN %NGINX_HOME%\nginx -s stop
-timeout /t 5 /nobreak >nul
-taskkill /F /IM nginx.exe >nul 2>&1
+%TIMEOUT% /t 5 /nobreak >nul
+%TASKKILL% /F /IM nginx.exe >nul 2>&1
 del %NGINX_DATA%\var\nginx.pid 2>nul
 exit /b 0
 
