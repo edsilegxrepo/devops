@@ -51,6 +51,7 @@ Low-level system adjustments and service delegations.
 - `dnsmgr.ps1`: Robust, headless utility for Windows DNS server and search suffix management.
 - `winposix_update.ps1`: Automated, headless update utility for Cygwin and MSYS2 environments.
 - `defender_setup.ps1`: Audits and manages coexistence, passive mode, and uninstallation of Microsoft Defender on systems with SentinelOne.
+- `nginx_ctl.cmd`: Native Windows command script wrapper managing the runtime lifecycle of the Nginx web server.
 - `os_service_account.sh`: Provisions unprivileged OS service accounts (e.g., `gfaudit`) for compliance audit automation.
 - `ubuntu_upgrade.sh`: Orchestrates non-interactive system package updates, telemetry/ESM disabling, parallel Flatpak upgrades, and mainline kernel updates.
 - `ubuntu_kernel_updater.sh`: Detects, installs, and manages mainline upstream kernels bypassing APT dependency checks, and purges older kernels.
