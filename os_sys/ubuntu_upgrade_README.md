@@ -55,11 +55,9 @@ sequenceDiagram
     Upgrader->>Upgrader: Verify EUID & OS Release (/etc/os-release)
     Upgrader->>Upgrader: Source settings.sh & export DEBIAN_FRONTEND=noninteractive
     
-    rect rgb(30, 30, 40)
-        Note over Upgrader, Flatpak: Parallel Job Spawner
-        Upgrader->>Flatpak: Fork flatpak upgrade -y (Background)
-        activate Flatpak
-    end
+    Note over Upgrader, Flatpak: Parallel Job Spawner
+    Upgrader->>Flatpak: Fork flatpak upgrade -y (Background)
+    activate Flatpak
 
     Upgrader->>APT: Run apt-get clean & apt-get update
     Upgrader->>APT: Run apt-get upgrade & dist-upgrade
@@ -68,12 +66,10 @@ sequenceDiagram
     Upgrader->>APT: Run autoremove & autoclean
     Upgrader->>APT: Purge leftover configuration directories (rc)
     
-    rect rgb(30, 30, 40)
-        Note over Upgrader, Flatpak: Sync Background Job
-        Flatpak-->>Upgrader: Exit and return status
-        deactivate Flatpak
-        Upgrader->>Upgrader: Wait for FLATPAK_PID
-    end
+    Note over Upgrader, Flatpak: Sync Background Job
+    Flatpak-->>Upgrader: Exit and return status
+    deactivate Flatpak
+    Upgrader->>Upgrader: Wait for FLATPAK_PID
 
     Upgrader->>Kernel: Invoke mainline kernel deployment pipeline
     activate Kernel

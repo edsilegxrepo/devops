@@ -22,32 +22,36 @@
 The application is structured as a single-entry CLI wrapper written in Windows Command Script (`.cmd`). It relies on label-based branching (`goto`) to route execution based on user-supplied parameters.
 
 ```mermaid
-graph TD
-    %% Architecture Component Layout
-    %% Operational wrapper logic
-    subgraph controller [Orchestration Wrapper]
-        CLI[nginx_ctl.cmd] -- "Parses CLI arguments: start, stop, restart, reload, status" --> Logic
-    end
-    
+flowchart TD
     %% Standard Windows Utilities
-    subgraph system_env [Windows System Environment]
-        Tasklist[tasklist.exe] -- "Queries running processes for nginx.exe" --> Logic
-        Taskkill[taskkill.exe] -- "Forcefully terminates orphaned processes (taskkill /F /IM nginx.exe)" --> Logic
-        Timeout[timeout.exe] -- "Introduces delays for process shutdown/restart sequences" --> Logic
+    subgraph system_env ["Windows System Environment"]
+        Tasklist["tasklist.exe"]
+        Taskkill["taskkill.exe"]
+        Timeout["timeout.exe"]
+    end
+
+    %% Operational wrapper logic
+    subgraph controller ["Orchestration Wrapper"]
+        CLI["nginx_ctl.cmd"] -- "Parses CLI arguments:<br>start | stop | restart<br>reload | status" --> Logic["Control Logic"]
     end
 
     %% Storage and Filesystem targets
-    subgraph target_paths [Target Directory Structure]
-        Home["NGINX_HOME (d:\inetd\nginx)"] -- "Contains executable: nginx.exe" --> NginxExe
-        Data["NGINX_DATA (d:\data\nginx)"] -- "Stores pid file: var\nginx.pid" --> PidFile
-        Log["NGINX_LOG (d:\archive\logs\nginx)"] -- "Contains execution log: nginx_ctl.log" --> LogFile
+    subgraph target_paths ["Target Directory Structure"]
+        direction LR
+        Home["NGINX_HOME<br>(d:\inetd\nginx)"] -- "Contains" --> NginxExe["nginx.exe"]
+        Data["NGINX_DATA<br>(d:\data\nginx)"] -- "Stores var" --> PidFile["nginx.pid"]
+        Log["NGINX_LOG<br>(d:\archive\logs\nginx)"] -- "Contains log" --> LogFile["nginx_ctl.log"]
     end
 
     %% Control and Data paths
-    Logic -- "Starts process minimized" --> NginxExe
-    NginxExe -- "Writes process ID" --> PidFile
-    Logic -- "Deletes on clean exit" --> PidFile
-    Logic -- "Appends status and timestamps" --> LogFile
+    Tasklist -- "Queries processes" --> Logic
+    Taskkill -- "Forcefully terminates<br>orphaned processes" --> Logic
+    Timeout -- "Introduces delays" --> Logic
+
+    Logic -- "Starts minimized" --> NginxExe
+    NginxExe -- "Writes PID" --> PidFile
+    Logic -- "Deletes on exit" --> PidFile
+    Logic -- "Appends log" --> LogFile
 ```
 
 ### 2.2 Design Choices and Rationale
@@ -170,21 +174,19 @@ sequenceDiagram
     FS-->>Script: Success/Exists
 
     %% Start Flow logic
-    rect rgb(30, 30, 40)
-        Note over Script: Start Sequence Evaluation
-        Script->>System: Query running processes (tasklist.exe)
-        System-->>Script: Process table details
-        Script->>Script: Filter processes for "nginx.exe" via find.exe
-        
-        alt Process Already Active
-            Script-->>Ops: Print "nginx is already running" & exit 0
-        else Process Not Active
-            Script->>FS: Append "Starting nginx" and timestamp to nginx_ctl.log
-            Script->>System: Invoke start /MIN d:\inetd\nginx\nginx.exe
-            System->>Nginx: Spawn nginx process in minimized window
-            Nginx->>FS: Write PID file to d:\data\nginx\var\nginx.pid
-            Script-->>Ops: Return exit code 0
-        end
+    Note over Script: Start Sequence Evaluation
+    Script->>System: Query running processes (tasklist.exe)
+    System-->>Script: Process table details
+    Script->>Script: Filter processes for "nginx.exe" via find.exe
+    
+    alt Process Already Active
+        Script-->>Ops: Print "nginx is already running" & exit 0
+    else Process Not Active
+        Script->>FS: Append "Starting nginx" and timestamp to nginx_ctl.log
+        Script->>System: Invoke start /MIN d:\inetd\nginx\nginx.exe
+        System->>Nginx: Spawn nginx process in minimized window
+        Nginx->>FS: Write PID file to d:\data\nginx\var\nginx.pid
+        Script-->>Ops: Return exit code 0
     end
 ```
 
