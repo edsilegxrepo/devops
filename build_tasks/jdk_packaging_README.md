@@ -4,7 +4,7 @@ This document provides a comprehensive guide to the JDK packaging script, its ar
 
 ## Application Overview and Objectives
 
-The [jdk_packaging.sh](file:///usr/src/packages/SCRIPTS/jdk_packaging.sh) script is a bash-based automation utility designed to repackage multiple **Azul Zulu JDK** distributions (supporting both Linux and Windows platforms for major versions 8, 11, 17, 21, and 25).
+The [jdk_packaging.sh](jdk_packaging.sh) script is a bash-based automation utility designed to repackage multiple **Azul Zulu JDK** distributions (supporting both Linux and Windows platforms for major versions 8, 11, 17, 21, and 25).
 
 The primary objectives of this repackaging process are:
 1. **Footprint Reduction (Minimization)**: Strip unnecessary development or documentation artifacts (such as `demo/`, `sample/`, and Japanese manual pages `man/ja*`) to minimize the distribution size.
@@ -139,7 +139,7 @@ The script does not accept arguments via standard command-line parameters (e.g. 
 
 ### Staging and Workspace Configuration Variables
 
-These configuration paths are defined directly in [jdk_packaging.sh](file:///usr/src/packages/SCRIPTS/jdk_packaging.sh#L45-L51):
+These configuration paths are defined directly in [jdk_packaging.sh](jdk_packaging.sh#L45-L51):
 
 | Variable Name | Type | Default Value | Description |
 |:---|:---|:---|:---|

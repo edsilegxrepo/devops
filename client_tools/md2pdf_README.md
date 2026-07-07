@@ -288,7 +288,7 @@ The script parses options using an iterative case-loop. Options can be passed in
 
 ## 8. Configuration Specification (`md2pdf_config.json`)
 
-The conversion utility accepts a JSON configuration file passed via the `-c` or `--config` argument to customize rendering engine options. A reference configuration is located at [md2pdf_config.json](file:///e:/data/devel/build/code/private/devops/client_tools/md2pdf_config.json).
+The conversion utility accepts a JSON configuration file passed via the `-c` or `--config` argument to customize rendering engine options. A reference configuration is located at [md2pdf_config.json](md2pdf_config.json).
 
 ### Structure Breakdown
 The parameters follow standard structures parsed by our Node.js compiler:

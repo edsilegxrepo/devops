@@ -4,6 +4,9 @@
 
 `nginx_ctl.cmd` is a native Windows command script designed to manage the runtime lifecycle of the Nginx web server/reverse proxy. It provides a standardized interface for administrative operators and automation frameworks to orchestrate starting, stopping, restarting, reloading, and checking the status of Nginx without directly invoking low-level executables or manually managing process tables.
 
+> [!NOTE]
+> Unlike registering or controlling Nginx as a Windows Service (which requires local Administrator privileges), `nginx_ctl.cmd` manages Nginx as a user-space process and does not require administrative privileges to start, stop, reload, or query Nginx, provided the calling user has read/write permissions to the configured paths.
+
 ### 1.1 Objectives
 * **Process Lifecycle Wrapper**: Abstract the startup, shutdown, config reload, and status retrieval of Nginx on Windows into a single CLI tool.
 * **Execution Idempotency**: Ensure that calling the start command when Nginx is already active, or the stop command when Nginx is already terminated, returns gracefully without generating system errors or duplicate processes.
@@ -234,7 +237,10 @@ The script does not store or process operational secrets. Certificates, private 
 Because this script calls system management utilities (`taskkill`, `mkdir`, and `start`), permissions are subject to the active Windows User Account Control (UAC) context:
 * **Administrators**: Full capabilities. Able to start Nginx, write logs, and terminate all active `nginx.exe` processes on the host.
 * **Standard/Unprivileged Users**: Restrictive capabilities. Can check Nginx status (`nginx_ctl.cmd status`) and view logs, but cannot write to administrative paths (`NGINX_HOME`, `NGINX_LOG`) or kill Nginx processes owned by other users.
-* **Action Recommendation**: To restrict execution access, apply NTFS security permissions on [nginx_ctl.cmd](file:///e:/data/devel/build/code/private/devops/os_sys/nginx_ctl.cmd):
+* **Service Control vs. Script Execution**:
+  * **Windows Service Control Manager (SCM)**: Managing Nginx as a Windows Service (via `nginx_service.exe`, `sc`, or the Services MMC console) **strictly requires administrative privileges** (elevation / run as Administrator).
+  * **Direct Wrapper Execution (`nginx_ctl.cmd`)**: Running Nginx directly via `nginx_ctl.cmd` **does not require administrative privileges** or elevated command prompts, provided the executing user account has read/write permissions to the target filesystem paths (`NGINX_HOME`, `NGINX_LOG`, and `NGINX_DATA`).
+* **Action Recommendation**: To restrict execution access, apply NTFS security permissions on [nginx_ctl.cmd](nginx_ctl.cmd):
   * Grant `Read & Execute` to designated service accounts or automation groups.
   * Grant `Full Control` exclusively to local system administrators.
 
@@ -244,7 +250,12 @@ The script utilizes core Windows OS system binaries (`tasklist.exe`, `taskkill.e
 * **Execution Verification**: The script calls these system utilities from the local path. To prevent DLL hijacking or executable spoofing, ensure the host system's `PATH` environment variable lists `%SystemRoot%\System32` prior to user-writable directories.
 
 ### 6.6 Unprivileged Context
-As a service control wrapper, the script is typically run in an administrative or service account context. However, it can run in an unprivileged context for `status` queries. It is recommended to run the wrapper using a dedicated service account that only holds write access to the specific folders (`d:\data\nginx` and `d:\archive\logs\nginx`) and lacks full local administrator privileges, provided it has the necessary rights to start processes and kill those owned by itself.
+Unlike the Windows Service wrapper (`nginx_service.exe`), which requires full administrative privileges to interact with the Windows Service Control Manager, `nginx_ctl.cmd` can be run in a completely unprivileged context (without Administrator rights) for all lifecycle commands (`start`, `stop`, `restart`, `reload`, `status`). 
+
+To run `nginx_ctl.cmd` in an unprivileged context, the executing user or dedicated service account only requires:
+1. NTFS permissions to execute [nginx_ctl.cmd](nginx_ctl.cmd) and `nginx.exe`.
+2. Write access to the specific data and logging folders (`d:\data\nginx` and `d:\archive\logs\nginx`).
+3. Rights to spawn processes and terminate processes owned by the same user context.
 
 ---
 
@@ -470,6 +481,9 @@ To configure the .NET assembly execution environment and optimize service initia
 ### A.4 Service Installation, Uninstallation, and Management Commands
 
 The WinSW executable `nginx_service.exe` acts as the interface to the Windows Service Controller. To configure Nginx to run as a boot-time background service, system administrators must execute the lifecycle commands in an elevated shell session (Command Prompt or PowerShell run as Administrator).
+
+> [!IMPORTANT]
+> Controlling Nginx through the Windows Service Control Manager (using `nginx_service.exe start`, `net start Nginx`, etc.) **requires full administrator privileges**. By contrast, executing the standalone script `nginx_ctl.cmd` directly **does not require administrator privileges** (it only requires NTFS permissions to access the binary, data, and log directories).
 
 #### A.4.1 Installation Procedure
 To register Nginx as a Windows Service:

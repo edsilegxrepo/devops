@@ -1,6 +1,6 @@
 # Ubuntu Upgrade & Hardening Utility Suite Documentation
 
-This documentation provides an architectural and functional overview of the automated upgrade and system hardening suite, which consists of the orchestrator script [ubuntu_upgrade.sh](file:///opt/scripts/ubuntu_upgrade.sh) and the standalone deployment engine [ubuntu_kernel_updater.sh](file:///opt/scripts/ubuntu_kernel_updater.sh).
+This documentation provides an architectural and functional overview of the automated upgrade and system hardening suite, which consists of the orchestrator script [ubuntu_upgrade.sh](ubuntu_upgrade.sh) and the standalone deployment engine [ubuntu_kernel_updater.sh](ubuntu_kernel_updater.sh).
 
 ---
 
@@ -22,7 +22,7 @@ The objective of the upgrade suite is to automate system-level updates, strip tr
 ### Architectural Design Choices
 * **Bypassing APT for Mainline Kernels:**Mainline kernels from upstream distributions are unpacked manually via `dpkg-deb -x` rather than installed via `dpkg -i`. This design choice protects the host APT database from dependency mismatches (e.g., when a new kernel requires a newer glibc than the host distribution provides). 
 * **Process Parallelism:** By spawning Flatpak updates in a background process, the native package manager (`apt-get`) can update concurrently. Since Flatpak uses sandboxed user/system space libraries, it does not lock `/var/lib/dpkg/lock-frontend`, preventing write conflicts.
-* **Environment Sourcing:** The application sources [sysenv.sh](file:///opt/scripts/sysenv.sh) to explicitly define and export `PATH` variable hierarchies, ensuring that execution path resolution remains identical whether run interactively, via crontab, or under systemd timers.
+* **Environment Sourcing:** The application sources `sysenv.sh` to explicitly define and export `PATH` variable hierarchies, ensuring that execution path resolution remains identical whether run interactively, via crontab, or under systemd timers.
 * **Robust Status Parsing:** Package states are checked using `dpkg-query` formatting strings rather than scraping standard `dpkg -l`. This avoids shell scripts breaking when the terminal width (`COLUMNS`) is low or unconfigured, which causes truncation.
 
 ### Key Assumptions
