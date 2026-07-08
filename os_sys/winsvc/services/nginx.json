@@ -1,0 +1,13 @@
+{
+  "name": "nginx",
+  "exe": "nginx.exe",
+  "home": "d:/inetd/nginx",
+  "data": "d:/data/nginx",
+  "args": "-c \"{home}/conf/nginx.conf\" -p \"{home}\"",
+  "pidFile": "{home}/var/nginx.pid",
+  "logFile": "d:/archive/logs/nginx/nginx.log",
+  "ctlLogFile": "d:/archive/logs/nginx/nginx_ctl.log",
+  "stopMethod": "signal",
+  "stopSignal": "-s stop -c \"{home}/conf/nginx.conf\" -p \"{home}\"",
+  "plugin": "nginx"
+}

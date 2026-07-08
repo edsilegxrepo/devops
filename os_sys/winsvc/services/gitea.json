@@ -1,0 +1,12 @@
+{
+  "name": "gitea",
+  "exe": "gitea.exe",
+  "home": "d:/inetd/gitea",
+  "data": "d:/data/gitea",
+  "args": "web --config \"{data}/conf/app.ini\" --custom-path \"{data}/custom\" --work-path \"{data}/work\" --pid \"{data}/work/pid/gitea.pid\"",
+  "pidFile": "{data}/work/pid/gitea.pid",
+  "logFile": "d:/archive/logs/gitea/gitea.log",
+  "ctlLogFile": "d:/archive/logs/gitea/gitea_ctl.log",
+  "stopMethod": "graceful",
+  "plugin": "gitea"
+}

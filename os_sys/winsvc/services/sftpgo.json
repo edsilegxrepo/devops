@@ -1,0 +1,13 @@
+{
+  "name": "sftpgo",
+  "exe": "sftpgo.exe",
+  "home": "d:/inetd/sftpgo",
+  "data": "d:/data/sftpgo",
+  "args": "serve --config-dir \"{data}\" --grace-time 30 --log-file-path \"d:/archive/logs/sftpgo/sftpgo.log\" --log-level info",
+  "pidFile": "{data}/sftpgo.pid",
+  "logFile": "d:/archive/logs/sftpgo/sftpgo.log",
+  "ctlLogFile": "d:/archive/logs/sftpgo/sftpgo_ctl.log",
+  "stopMethod": "graceful",
+  "plugin": "sftpgo",
+  "healthUrl": "https://mgmteatst.mckesson.com:8443/healthz"
+}
