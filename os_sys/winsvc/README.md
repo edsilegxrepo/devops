@@ -127,30 +127,21 @@ winsvc/
 
 ```mermaid
 flowchart LR
-    subgraph User ["User Input"]
-        CMD["svcmgr.ps1 nginx reload"]
+    %% Column 1: Invocation and Framework (Vertical Flow)
+    subgraph entry ["Framework Execution"]
+        direction TB
+        CMD["User Input:<br/>svcmgr.ps1 nginx reload"] --> CLI["CLI Entry:<br/>svcmgr.ps1"] --> MOD["Core Logic:<br/>lib/ProcessControl.psm1"]
     end
 
-    subgraph Framework ["Framework"]
-        CLI["svcmgr.ps1"]
-        MOD["lib/ProcessControl.psm1"]
+    %% Column 2: Configuration and Target Service (Vertical Flow)
+    subgraph runtime ["Service Configuration & Runtime"]
+        direction TB
+        JSON["Configuration:<br/>services/nginx.json"] -.->|"plugin: nginx"| PLUGIN["Plugin Handler:<br/>plugins/nginx.plugin.ps1"] --> EXE["Target Service:<br/>d:/inetd/nginx/nginx.exe"]
     end
 
-    subgraph Config ["Configuration"]
-        JSON["services/nginx.json"]
-        PLUGIN["plugins/nginx.plugin.ps1"]
-    end
-
-    subgraph Target ["Target Service"]
-        EXE["d:/inetd/nginx/nginx.exe"]
-    end
-
-    CMD --> CLI
-    CLI --> MOD
+    %% Horizontal Links between columns
     MOD --> JSON
-    JSON -.->|"plugin: nginx"| PLUGIN
     MOD --> PLUGIN
-    PLUGIN --> EXE
 ```
 
 **Flow:**
@@ -280,20 +271,23 @@ The plugin system extends the framework with service-specific commands without m
 
 #### How Plugins Work
 
-```
-User runs: svcmgr.ps1 nginx reload
-                ↓
-CLI dispatches to Invoke-ServiceCommand("nginx", "Reload")
-                ↓
-Module loads services/nginx.json → finds "plugin": "nginx"
-                ↓
-Module dot-sources plugins/nginx.plugin.ps1
-                ↓
-Module calls $script:PluginCommands["Reload"]($config)
-                ↓
-Plugin executes nginx.exe -s reload
-                ↓
-Plugin returns $true/$false → CLI sets exit code
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant CLI as svcmgr.ps1
+    participant Module as ProcessControl.psm1
+    participant Plugin as nginx.plugin.ps1
+
+    User->>CLI: Run: svcmgr.ps1 nginx reload
+    CLI->>Module: Invoke-ServiceCommand("nginx", "Reload")
+    Note over Module: Loads services/nginx.json<br/>Finds "plugin": "nginx"
+    Note over Module: Dot-sources plugins/nginx.plugin.ps1
+    Module->>Plugin: Call $script:PluginCommands["Reload"]($config)
+    Note over Plugin: Executes nginx.exe -s reload
+    Plugin-->>Module: Return $true / $false
+    Module-->>CLI: Return success status
+    CLI-->>User: Set exit code & exit
 ```
 
 #### Plugin Loading Rules
@@ -318,7 +312,7 @@ Plugin returns $true/$false → CLI sets exit code
 | `test` | Plugin | `$PluginCommands.Test` in nginx.plugin.ps1 |
 | `ping` | Plugin | `$PluginCommands.Ping` in sftpgo.plugin.ps1 |
 
-### 4.5 Sequence Diagram
+### 4.5 Core Service Startup Sequence Diagram
 
 ```mermaid
 sequenceDiagram
@@ -815,9 +809,9 @@ For production use, add more fields:
 
 | Field | Required | Example | Description |
 | :--- | :---: | :--- | :--- |
-| `name` | ✅ | `"myservice"` | CLI identifier (used in `svcmgr.ps1 myservice start`) |
-| `exe` | ✅ | `"myservice.exe"` | Executable filename (relative to `home`) |
-| `home` | ✅ | `"d:/inetd/myservice"` | Directory containing the executable |
+| `name` | Yes | `"myservice"` | CLI identifier (used in `svcmgr.ps1 myservice start`) |
+| `exe` | Yes | `"myservice.exe"` | Executable filename (relative to `home`) |
+| `home` | Yes | `"d:/inetd/myservice"` | Directory containing the executable |
 | `data` | | `"d:/data/myservice"` | Data directory (config, state, PID files) |
 | `args` | | `"--config ..."` | Command-line arguments |
 | `pidFile` | | `"{data}/myservice.pid"` | Path to PID file for process tracking |
@@ -870,11 +864,11 @@ Plugins add **custom commands** beyond the built-in `start`, `stop`, `restart`, 
 
 | Scenario | Plugin Needed? |
 | :--- | :--- |
-| Basic start/stop/status | ❌ No |
-| Service has `reload` command | ✅ Yes |
-| Service has config `test` command | ✅ Yes |
-| Service has health check endpoint | ✅ Yes |
-| Service has diagnostic tools | ✅ Yes |
+| Basic start/stop/status | No |
+| Service has `reload` command | Yes |
+| Service has config `test` command | Yes |
+| Service has health check endpoint | Yes |
+| Service has diagnostic tools | Yes |
 
 #### Plugin Template
 

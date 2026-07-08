@@ -15,7 +15,7 @@
 ## 2. Architecture & Design Choices
 The script follows a "Defense-in-Depth" architectural approach:
 
-### 🛠️ Key Design Patterns:
+### Key Design Patterns:
 *   **Isolated Subshells**: Each repository is processed in a temporary subshell `( ... )`. This prevents a `cd` failure or a fatal Git error from crashing the entire discovery loop.
 *   **Segmented Path Regex**: Instead of standard string substitution, the script uses a dual-logic regex engine to target only the "owner" segment of the URI.
 *   **Non-Interactive Execution**: By setting `GIT_TERMINAL_PROMPT=0`, the script ensures it fails fast if authentication is missing, rather than hanging for human input.
