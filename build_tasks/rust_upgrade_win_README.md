@@ -100,33 +100,27 @@ sequenceDiagram
     CLI->>Script: Run script with options
     Script->>Script: Parse arguments & validate permissions
     
-    rect rgb(20, 20, 30)
-        note right of Script: Version & Environment Resolution
-        Script->>Web: Fetch stable-channel release manifest (if --auto)
-        Web-->>Script: Return TOML manifest
-        Script->>Script: Resolve stable version and C compiler
-    end
+    note right of Script: Version & Environment Resolution
+    Script->>Web: Fetch stable-channel release manifest (if --auto)
+    Web-->>Script: Return TOML manifest
+    Script->>Script: Resolve stable version and C compiler
 
-    rect rgb(30, 20, 20)
-        note right of Script: Build Phase (--build)
-        Script->>Disk: Check cache for packages
-        opt Package not in cache
-            Script->>Web: Download compiler package and Linux std lib
-            Web-->>Disk: Write xz archives to cache
-        end
-        Script->>Sandbox: Extract official packages to staging
-        Script->>Sandbox: Compile cargo tools (LLD Linker, cached cargo_compiled_tools)
-        Script->>Disk: Package unified toolchain and linters into release directory
+    note right of Script: Build Phase (--build)
+    Script->>Disk: Check cache for packages
+    opt Package not in cache
+        Script->>Web: Download compiler package and Linux std lib
+        Web-->>Disk: Write xz archives to cache
     end
+    Script->>Sandbox: Extract official packages to staging
+    Script->>Sandbox: Compile cargo tools (LLD Linker, cached cargo_compiled_tools)
+    Script->>Disk: Package unified toolchain and linters into release directory
 
-    rect rgb(20, 30, 20)
-        note right of Script: Deploy Phase (--deploy)
-        Script->>Target: Purge existing toolchain directories (bin, lib, share, etc.)
-        Script->>Target: Extract main compiler toolchain (or selectively copy core components)
-        Script->>Target: Extract and merge linter binaries into target bin/
-        Script->>Target: Write custom Cargo config.toml and env scripts
-        Script->>Script: (Optional) Register target bin/ to Windows Registry PATH
-    end
+    note right of Script: Deploy Phase (--deploy)
+    Script->>Target: Purge existing toolchain directories (bin, lib, share, etc.)
+    Script->>Target: Extract main compiler toolchain (or selectively copy core components)
+    Script->>Target: Extract and merge linter binaries into target bin/
+    Script->>Target: Write custom Cargo config.toml and env scripts
+    Script->>Script: (Optional) Register target bin/ to Windows Registry PATH
 
     Script-->>CLI: Print completion report / return status code
 ```
