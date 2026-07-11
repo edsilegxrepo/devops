@@ -117,7 +117,7 @@ function safe_delete() {
     fi
     local normalized
     # shellcheck disable=SC1003
-    normalized=$(echo "${path}" | tr '\\' '/' | sed 's|//*|/|g' | sed 's|/$||')
+    normalized=$(printf '%s\n' "${path}" | tr '\\' '/' | sed 's|//*|/|g' | sed 's|/$||')
     
     # Block Unix root or empty path
     if [ "${normalized}" == "/" ] || [ "${normalized}" == "" ]; then
@@ -125,14 +125,30 @@ function safe_delete() {
       exit 99
     fi
     
-    # Block drive root structures (e.g. D:, d:/, /cygdrive/c, /c)
-    if [[ "${normalized}" =~ ^[a-zA-Z]:$ ]] || [[ "${normalized}" =~ ^/cygdrive/[a-zA-Z]$ ]] || [[ "${normalized}" =~ ^/[a-zA-Z]$ ]]; then
+    # Block drive root structures (e.g. D:, d:/, D:\, /cygdrive/c, /cygdrive/c/, /c, /c/)
+    if [[ "${normalized}" =~ ^[a-zA-Z]:/?$ ]] || [[ "${normalized}" =~ ^/cygdrive/[a-zA-Z]/?$ ]] || [[ "${normalized}" =~ ^/[a-zA-Z]/?$ ]]; then
       echo "*** ERROR: Dangerous deletion of drive root prevented for target: ${path}!"
       exit 99
     fi
     
-    if [ -d "${path}" ] || [ -f "${path}" ] || [ -L "${path}" ]; then
-      rm -rf "${path}"
+    if [ -d "${normalized}" ]; then
+      # Fast path: rename directory out of the way instantly, then delete natively in background
+      local rand_suffix
+      rand_suffix=$(date +%s%N 2>/dev/null || echo "${RANDOM}")
+      local trash_dir="${normalized}.trash-${rand_suffix}"
+      local win_trash
+      
+      if mv -f -- "${normalized}" "${trash_dir}" 2>/dev/null; then
+        win_trash=$(to_win_path "${trash_dir}")
+        cmd.exe //c rmdir //s //q "${win_trash}" >/dev/null 2>&1 &
+      else
+        # Fallback if rename fails (e.g. due to lock or volume boundaries)
+        local win_path
+        win_path=$(to_win_path "${normalized}")
+        cmd.exe //c rmdir //s //q "${win_path}" >/dev/null 2>&1 || rm -rf -- "${normalized}" || true
+      fi
+    elif [ -f "${normalized}" ] || [ -L "${normalized}" ]; then
+      rm -f -- "${normalized}" || true
     fi
   done
 }
@@ -590,7 +606,8 @@ function install_linters() {
   fi
 
   # Can be overridden via RUST_CARGO_CACHE_DIR environment variable
-  local BOOTSTRAP_CARGO_HOME=$(to_unix_path "${RUST_CARGO_CACHE_DIR:-${SYS_TMP_DIR}/devops/cargo_cache}")
+  local BOOTSTRAP_CARGO_HOME
+  BOOTSTRAP_CARGO_HOME=$(to_unix_path "${RUST_CARGO_CACHE_DIR:-${SYS_TMP_DIR}/devops/cargo_cache}")
   mkdir -p "${BOOTSTRAP_CARGO_HOME}"
   CARGO_HOME=$(to_win_path "${BOOTSTRAP_CARGO_HOME}")
   export CARGO_HOME
@@ -1012,7 +1029,7 @@ RUST_STD_LINUX_PKG="rust-std-${RUST_VERSION}-x86_64-unknown-linux-gnu"
 RUST_STD_LINUX_ARCH="${RUST_STD_LINUX_PKG}.tar.xz"
 
 # Unified bundle target name
-FINAL_BUNDLE_NAME="rust-custom-gnu-${RUST_VERSION}-x86_64.tar.xz"
+FINAL_BUNDLE_NAME="rust-custom-${RUST_VERSION}-x86_64-pc-windows-gnu.tar.xz"
 FINAL_BUNDLE_PATH="${BUILD_DIR}/${FINAL_BUNDLE_NAME}"
 
 # Resolve default linter package name once target Rust version is resolved

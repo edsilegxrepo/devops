@@ -53,12 +53,15 @@ To achieve optimal execution speeds under Windows file systems (NTFS) and shell 
 2.  **Persistent Compiler Download Cache:**
     *   The script routes all package downloads (such as standard library archives) to a persistent cache directory (`${SYS_TMP_DIR}/devops/downloads`).
     *   By passing the `-C -` (continue) flags to `curl`, it natively supports resuming partially downloaded archives and avoids re-downloading packages across runs.
+    *   This path can be customized by setting the `RUST_DOWNLOAD_CACHE_DIR` environment variable.
 3.  **Persistent Cargo Build Cache:**
     *   Normally, sandboxed Cargo builds download registry indexes and package dependencies from scratch.
     *   This script redirects `CARGO_HOME` to a persistent directory (`${SYS_TMP_DIR}/devops/cargo_cache`), allowing Cargo to reuse package indexes and downloads, cutting build initialization times.
+    *   This path can be customized by setting the `RUST_CARGO_CACHE_DIR` environment variable.
 4.  **Persistent Compiled Tools Cache (cargo_compiled_tools):**
     *   Compiling all linters from source can take over an hour. The script implements a persistent build cache at `${SYS_TMP_DIR}/devops/cargo_compiled_tools`.
     *   Cargo compiles and installs binaries directly to this cache. On subsequent runs, Cargo natively detects that the tool is up-to-date (taking less than a second) and copies/hard-links the cached binary to the active staging area, avoiding redundant compilations.
+    *   This path can be customized by setting the `RUST_PERSISTENT_TOOLS_DIR` environment variable.
 5.  **Process-Optimized Detection Engine:**
     *   Process spawning (forking) is extremely slow in Windows shell emulation environments.
     *   During `--detect`, linter version queries are run in parallel background subshells.
@@ -77,8 +80,11 @@ To achieve optimal execution speeds under Windows file systems (NTFS) and shell 
     *   The path helper wrappers (`to_win_path`, `to_unix_path`, `to_mixed_path`) are guarded to immediately return `""` on empty inputs.
 *   **Registry PATH Duplicate Prevention:**
     *   Persistent registry updates are guarded to normalize path separators, strip trailing slashes, and compare folder paths case-insensitively, avoiding duplicate entries in Windows Registry variables.
-*   **Destructive Deletion Safeguard (`safe_delete`):**
+*   **Destructive Deletion Safeguard & Fast Deletion (`safe_delete`):**
     *   Replaces generic `rm -rf` commands. It checks that inputs are non-empty, do not equal `/`, and do not match physical or virtual drive roots (`C:`, `/cygdrive/d`, etc.), halting with exit code `99` on violation.
+    *   Uses native Windows `cmd.exe //c rmdir //s //q` in the background for directory removal, preceded by an instantaneous filesystem rename (`mv -f --`) to free the build path instantly.
+    *   Addresses Windows CLI parsing bugs by stripping trailing slashes before translation to avoid escaped quote (`\"`) errors, and adds the POSIX option terminator (`--`) to protect against paths starting with a hyphen.
+    *   Shielded with `|| true` exit-status protection to ensure file locking errors do not abort script EXIT cleanup traps.
 
 ---
 
