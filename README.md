@@ -30,6 +30,7 @@ Automation for building, and validating core system components.
 - `openssl_build.sh`: A multi-mode (RPM/Archive/All) script for isolated OpenSSL builds.
 - `sqlite3_validate.sh`: A suite for verifying SQLite 3 binary builds against specs.
 - `rust_upgrade.sh`: Automated management of Rust toolchain deployments and target libraries.
+- `rust_upgrade_win.sh`: Unified, parallelized Rust toolchain deployment, linter compilation, and environment detection manager for Windows (Cygwin/MSYS2).
 - `rust_cachemgr.sh`: Safety-critical caching manager and pruning optimizer for Cargo and compiler caches.
 
 ### 3. Git Management (`/git_repomgr`)

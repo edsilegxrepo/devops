@@ -3,6 +3,7 @@
     { "name": "browsers", "filters": ["chrome", "edge", "firefox", "opera", "brave"] },
     { "name": "office", "filters": ["msedgewebview", "outlook", "teams", "excel", "word", "powerpoint", "onenote"] },
     { "name": "dev", "filters": ["code", "devenv", "rider", "idea", "node", "python"] },
-    { "name": "comms", "filters": ["teams", "slack", "zoom", "discord"] }
+    { "name": "comms", "filters": ["teams", "slack", "zoom", "discord"] },
+    { "name": "security", "filters": ["cribl", "sentinel", "rapid"] }
   ]
 }
