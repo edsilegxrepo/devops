@@ -1,7 +1,7 @@
 #!/bin/bash
 # -----------------------------------------------------------------------------
 #  /usr/src/redhat/SPECS/rust_upgrade_win.sh
-#  v1.0.0wg  2026/07/01  XDG / MIS Center
+#  v1.0.1xg  2026/07/11  XDG / MIS Center
 # -----------------------------------------------------------------------------
 #  Purpose:
 #    Automates Rust toolchain downloading, building, and deploying on Windows
@@ -97,7 +97,8 @@ TEMP_WORKSPACE=""
 DETECT_TMP_DIR=""
 
 # Persistent directory to cache compiled tools across runs (DRY & speed optimization)
-PERSISTENT_TOOLS_DIR="${SYS_TMP_DIR}/devops/cargo_compiled_tools"
+# Can be overridden via RUST_PERSISTENT_TOOLS_DIR environment variable
+PERSISTENT_TOOLS_DIR=$(to_unix_path "${RUST_PERSISTENT_TOOLS_DIR:-${SYS_TMP_DIR}/devops/cargo_compiled_tools}")
 mkdir -p "${PERSISTENT_TOOLS_DIR}"
 
 # -----------------------------------------------------------------------------
@@ -588,7 +589,8 @@ function install_linters() {
     fi
   fi
 
-  local BOOTSTRAP_CARGO_HOME="${SYS_TMP_DIR}/devops/cargo_cache"
+  # Can be overridden via RUST_CARGO_CACHE_DIR environment variable
+  local BOOTSTRAP_CARGO_HOME=$(to_unix_path "${RUST_CARGO_CACHE_DIR:-${SYS_TMP_DIR}/devops/cargo_cache}")
   mkdir -p "${BOOTSTRAP_CARGO_HOME}"
   CARGO_HOME=$(to_win_path "${BOOTSTRAP_CARGO_HOME}")
   export CARGO_HOME
@@ -596,6 +598,12 @@ function install_linters() {
   local CARGO_TOOLS=("${GLOBAL_CARGO_TOOLS[@]}")
 
   for tool in "${CARGO_TOOLS[@]}"; do
+    # Check if binary already exists in PERSISTENT_TOOLS_DIR/bin to bypass redundant installation checks
+    if [ "${FORCE_INSTALL}" != "true" ] && [ -f "${PERSISTENT_TOOLS_DIR}/bin/${tool}.exe" ]; then
+      echo "   [+] ${tool} is already installed (cached), skipping."
+      continue
+    fi
+
     echo "   [+] Installing ${tool}..."
     local install_args=("--root" "$(to_win_path "${PERSISTENT_TOOLS_DIR}")" "--locked")
     [ "${FORCE_INSTALL}" == "true" ] && install_args+=("--force")
@@ -1024,7 +1032,8 @@ if [ "${RUN_BUILD}" == "true" ]; then
 
   # 1. Download official compiler package and Linux target std library
   echo -e "\n>> 1. Downloading Rust packages: ${RUST_MAIN_ARCH}, ${RUST_STD_LINUX_ARCH}"
-  DOWNLOAD_CACHE_DIR="${SYS_TMP_DIR}/devops/downloads"
+  # Can be overridden via RUST_DOWNLOAD_CACHE_DIR environment variable
+  DOWNLOAD_CACHE_DIR=$(to_unix_path "${RUST_DOWNLOAD_CACHE_DIR:-${SYS_TMP_DIR}/devops/downloads}")
   mkdir -p "${DOWNLOAD_CACHE_DIR}"
   
   ORIG_PWD=$(pwd)
@@ -1115,7 +1124,8 @@ if [ "${RUN_BUILD}" == "true" ]; then
   fi
   
   # Set persistent isolated CARGO_HOME to cache registry indexes and crates across runs
-  BOOTSTRAP_CARGO_HOME="${SYS_TMP_DIR}/devops/cargo_cache"
+  # Can be overridden via RUST_CARGO_CACHE_DIR environment variable
+  BOOTSTRAP_CARGO_HOME=$(to_unix_path "${RUST_CARGO_CACHE_DIR:-${SYS_TMP_DIR}/devops/cargo_cache}")
   mkdir -p "${BOOTSTRAP_CARGO_HOME}"
   CARGO_HOME=$(to_win_path "${BOOTSTRAP_CARGO_HOME}")
   export CARGO_HOME
