@@ -101,6 +101,13 @@ DETECT_TMP_DIR=""
 PERSISTENT_TOOLS_DIR=$(to_unix_path "${RUST_PERSISTENT_TOOLS_DIR:-${SYS_TMP_DIR}/devops/cargo_compiled_tools}")
 mkdir -p "${PERSISTENT_TOOLS_DIR}"
 
+# Persistent isolated CARGO_HOME to cache registry indexes and crates across runs
+# Can be overridden via RUST_CARGO_CACHE_DIR environment variable
+BOOTSTRAP_CARGO_HOME=$(to_unix_path "${RUST_CARGO_CACHE_DIR:-${SYS_TMP_DIR}/devops/cargo_cache}")
+mkdir -p "${BOOTSTRAP_CARGO_HOME}"
+CARGO_HOME=$(to_win_path "${BOOTSTRAP_CARGO_HOME}")
+export CARGO_HOME
+
 # -----------------------------------------------------------------------------
 # Function:    safe_delete
 # Description: Recursively deletes directories, files, or symbolic links safely.
@@ -140,12 +147,20 @@ function safe_delete() {
       
       if mv -f -- "${normalized}" "${trash_dir}" 2>/dev/null; then
         win_trash=$(to_win_path "${trash_dir}")
-        cmd.exe //c rmdir //s //q "${win_trash}" >/dev/null 2>&1 &
+        if [ "${OS_ENV}" == "CYGWIN" ]; then
+          cmd.exe /c rmdir /s /q "${win_trash}" >/dev/null 2>&1 &
+        else
+          cmd.exe //c rmdir //s //q "${win_trash}" >/dev/null 2>&1 &
+        fi
       else
         # Fallback if rename fails (e.g. due to lock or volume boundaries)
         local win_path
         win_path=$(to_win_path "${normalized}")
-        cmd.exe //c rmdir //s //q "${win_path}" >/dev/null 2>&1 || rm -rf -- "${normalized}" || true
+        if [ "${OS_ENV}" == "CYGWIN" ]; then
+          cmd.exe /c rmdir /s /q "${win_path}" >/dev/null 2>&1 || rm -rf -- "${normalized}" || true
+        else
+          cmd.exe //c rmdir //s //q "${win_path}" >/dev/null 2>&1 || rm -rf -- "${normalized}" || true
+        fi
       fi
     elif [ -f "${normalized}" ] || [ -L "${normalized}" ]; then
       rm -f -- "${normalized}" || true
@@ -165,6 +180,60 @@ function cleanup() {
   safe_delete "${TEMP_WORKSPACE}" "${DETECT_TMP_DIR}"
 }
 trap cleanup EXIT INT TERM HUP
+
+# -----------------------------------------------------------------------------
+# Function:    configure_compiler_env
+# Description: Normalizes compiler paths, exports CC and compiler target variables,
+#              and enables LLD linker optimizations if LLD is detected.
+# Arguments:   $1 - Path to C compiler
+# Returns:     None
+# -----------------------------------------------------------------------------
+function configure_compiler_env() {
+  local cc_path="$1"
+  [ -z "${cc_path}" ] && return 0
+
+  CC=$(to_win_path "${cc_path}")
+  export CC
+  CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=$(to_win_path "${cc_path}")
+  export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER
+
+  local cc_dir
+  cc_dir=$(dirname "${cc_path}")
+  if [ -f "${cc_dir}/ld.lld.exe" ] || [ -f "${cc_dir}/lld.exe" ] || command -v lld.exe &>/dev/null; then
+    if [[ -z "${RUSTFLAGS:-}" ]]; then
+      export RUSTFLAGS="-C link-arg=-fuse-ld=lld"
+    elif [[ "${RUSTFLAGS}" != *"-fuse-ld=lld"* ]]; then
+      export RUSTFLAGS="${RUSTFLAGS} -C link-arg=-fuse-ld=lld"
+    fi
+  fi
+
+  if [ "${NO_LTO}" == "true" ]; then
+    export CARGO_PROFILE_RELEASE_LTO="false"
+    export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=256
+  fi
+}
+
+# -----------------------------------------------------------------------------
+# Function:    register_manifest_components
+# Description: Scans standard component directories and records folder basenames
+#              into the package component registry manifest.
+# Arguments:   $1 - Root path of components to scan
+#              $2 - Target manifest filepath
+# Returns:     None
+# -----------------------------------------------------------------------------
+function register_manifest_components() {
+  local root_dir="$1"
+  local manifest_file="$2"
+  [ -d "${root_dir}" ] || return 0
+
+  for comp_path in "${root_dir}"/*/; do
+    if [ -d "${comp_path}" ]; then
+      local comp_name
+      comp_name=$(basename "${comp_path%/}")
+      echo "${comp_name}" >> "${manifest_file}"
+    fi
+  done
+}
 
 # -----------------------------------------------------------------------------
 # Function:    update_windows_path
@@ -247,6 +316,8 @@ function show_help() {
   echo "  --archive-path <pat> Path to custom archive to deploy (omitting defaults to pending folder)."
   echo "  --force              Force download, compilation, or deployment even if versions match."
   echo "  --core-components    Deploy core compiler only (exclude docs, preview components)."
+  echo "  --no-lto             Disable Link-Time Optimization (LTO) and use parallel codegen"
+  echo "                       units to speed up Cargo compilation (release build speedup)."
   echo "  --log [file]         Redirect stdout/stderr to a log file (default: /var/log/rust_upgrade_win.log)."
   echo "  --help, -h           Show this help message and exit."
   echo ""
@@ -273,6 +344,7 @@ HAS_PACKAGE_CITOOLS="false"
 PACKAGE_CITOOLS_NAME=""
 HAS_LINTERS="false"
 LINTERS_ARCHIVE=""
+NO_LTO="false"
 SHOW_HELP="false"
 
 while [ $# -gt 0 ]; do
@@ -377,6 +449,10 @@ while [ $# -gt 0 ]; do
       else
         shift
       fi
+      ;;
+    --no-lto)
+      NO_LTO="true"
+      shift
       ;;
     -h|--help)
       SHOW_HELP="true"
@@ -488,27 +564,7 @@ function resolve_cc() {
     fi
   fi
 
-  # 3. Check common Windows developer locations (e.g. MinGW64)
-  # Resolve Windows drive-prefix paths dynamically using to_unix_path
-  if [ -z "${cc_resolved}" ]; then
-    local common_paths=(
-      "d:/dev/mingw64/bin/gcc.exe"
-      "c:/cygwin64/bin/x86_64-w64-mingw32-gcc.exe"
-      "c:/msys64/mingw64/bin/gcc.exe"
-      "c:/msys64/ucrt64/bin/gcc.exe"
-      "/usr/bin/x86_64-w64-mingw32-gcc.exe"
-    )
-    for path in "${common_paths[@]}"; do
-      local posix_path
-      posix_path=$(to_unix_path "${path}")
-      if [ -x "${posix_path}" ]; then
-        cc_resolved="${posix_path}"
-        break
-      fi
-    done
-  fi
-
-  # 4. Check system PATH
+  # 3. Check system PATH
   if [ -z "${cc_resolved}" ]; then
     # Look for MinGW-w64 compiler first
     if command -v x86_64-w64-mingw32-gcc.exe &>/dev/null; then
@@ -528,6 +584,26 @@ function resolve_cc() {
         cc_resolved="${system_clang}"
       fi
     fi
+  fi
+
+  # 4. Check common Windows developer locations (e.g. MinGW64)
+  # Resolve Windows drive-prefix paths dynamically using to_unix_path
+  if [ -z "${cc_resolved}" ]; then
+    local common_paths=(
+      "d:/dev/mingw64/bin/gcc.exe"
+      "c:/cygwin64/bin/x86_64-w64-mingw32-gcc.exe"
+      "c:/msys64/mingw64/bin/gcc.exe"
+      "c:/msys64/ucrt64/bin/gcc.exe"
+      "/usr/bin/x86_64-w64-mingw32-gcc.exe"
+    )
+    for path in "${common_paths[@]}"; do
+      local posix_path
+      posix_path=$(to_unix_path "${path}")
+      if [ -x "${posix_path}" ]; then
+        cc_resolved="${posix_path}"
+        break
+      fi
+    done
   fi
 
   # 5. Staging-Bundled Fallback (handled at build-time using staging directories)
@@ -586,34 +662,46 @@ function install_linters() {
     fi
   fi
 
-  # Run cargo installs
-  echo -e "\n>> Compiling third-party tools/linters..."
-  local ORIGINAL_PATH="${PATH}"
-  export PATH="${PERSISTENT_TOOLS_DIR}/bin:${BIN_DIR}:${PATH}"
-
+  # Copy LLD linker if missing from compiler directory to speed up compilation
   if [ -n "${CC_PATH}" ]; then
-    CC=$(to_win_path "${CC_PATH}")
-    export CC
-    CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=$(to_win_path "${CC_PATH}")
-    export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER
-    
-    # Enable LLD linker optimization if LLD is detected in the compiler directory or PATH
     local cc_dir
     cc_dir=$(dirname "${CC_PATH}")
-    if [ -f "${cc_dir}/ld.lld.exe" ] || [ -f "${cc_dir}/lld.exe" ] || command -v lld.exe &>/dev/null; then
-      export RUSTFLAGS="-C link-arg=-fuse-ld=lld"
+    local needs_lld="false"
+    if [ ! -f "${cc_dir}/ld.lld.exe" ] && [ ! -f "${cc_dir}/lld.exe" ] && ! command -v lld.exe &>/dev/null; then
+      needs_lld="true"
+    elif [ -f "${cc_dir}/ld.lld.exe" ] && ! "${cc_dir}/ld.lld.exe" --version &>/dev/null; then
+      needs_lld="true"
+    fi
+
+    if [ "${needs_lld}" == "true" ]; then
+      local toolchain_root
+      toolchain_root=$(dirname "${BIN_DIR}")
+      local source_lld="${toolchain_root}/lib/rustlib/x86_64-pc-windows-gnu/bin/rust-lld.exe"
+      if [ -f "${source_lld}" ]; then
+        echo "   [+] LLD linker not found or broken in compiler directory. Copying from Rust standard library..."
+        # Remove potentially broken wrapper if it exists before copying
+        [ -f "${cc_dir}/ld.lld.exe" ] && rm -f "${cc_dir}/ld.lld.exe"
+        if cp "${source_lld}" "${cc_dir}/ld.lld.exe" 2>/dev/null; then
+          echo "       Successfully copied LLD to $(to_mixed_path "${cc_dir}/ld.lld.exe")"
+        else
+          echo "       WARNING: Failed to copy LLD (check write permissions for ${cc_dir})"
+        fi
+      fi
     fi
   fi
 
-  # Can be overridden via RUST_CARGO_CACHE_DIR environment variable
-  local BOOTSTRAP_CARGO_HOME
-  BOOTSTRAP_CARGO_HOME=$(to_unix_path "${RUST_CARGO_CACHE_DIR:-${SYS_TMP_DIR}/devops/cargo_cache}")
-  mkdir -p "${BOOTSTRAP_CARGO_HOME}"
-  CARGO_HOME=$(to_win_path "${BOOTSTRAP_CARGO_HOME}")
-  export CARGO_HOME
+  # Run cargo installs
+  echo -e "\n>> Compiling third-party tools/linters..."
+  local ORIGINAL_PATH="${PATH}"
+  local cc_dir=""
+  [ -n "${CC_PATH:-}" ] && cc_dir=$(dirname "${CC_PATH}")
+  export PATH="${PERSISTENT_TOOLS_DIR}/bin:${BIN_DIR}:${cc_dir}:${PATH}"
+
+  configure_compiler_env "${CC_PATH}"
 
   local CARGO_TOOLS=("${GLOBAL_CARGO_TOOLS[@]}")
 
+  local failed_tools=()
   for tool in "${CARGO_TOOLS[@]}"; do
     # Check if binary already exists in PERSISTENT_TOOLS_DIR/bin to bypass redundant installation checks
     if [ "${FORCE_INSTALL}" != "true" ] && [ -f "${PERSISTENT_TOOLS_DIR}/bin/${tool}.exe" ]; then
@@ -637,9 +725,15 @@ function install_linters() {
     if [ "${install_success}" == "true" ]; then
       echo "      OK"
     else
-      echo "      WARNING: failed to install [${tool}]"
+      echo "      ERROR: failed to install [${tool}]"
+      failed_tools+=("${tool}")
     fi
   done
+
+  if [ ${#failed_tools[@]} -gt 0 ]; then
+    echo -e "\n*** ERROR15: Failed to compile or install one or more tools: ${failed_tools[*]}"
+    exit 15
+  fi
 
   # Link/copy the compiled tools from PERSISTENT_TOOLS_DIR/bin to install_root/bin
   # Use CP_CMD (which resolves to cp -rlf) for instant staging
@@ -988,7 +1082,7 @@ if [ "${HAS_AUTO}" == "true" ]; then
 fi
 
 # Dynamically resolve linter archive if requested but not specified
-if [ "${HAS_LINTERS}" == "true" ] && [ -z "${LINTERS_ARCHIVE}" ]; then
+if [ "${FORCE_INSTALL}" != "true" ] && [ "${HAS_LINTERS}" == "true" ] && [ -z "${LINTERS_ARCHIVE}" ]; then
   echo -e "\n>> Dynamically searching for latest linter archive..."
   linter_pattern="${BUILD_DIR}/rust-linters-*-win-x86_64.tar.xz"
   matches=()
@@ -1001,8 +1095,12 @@ if [ "${HAS_LINTERS}" == "true" ] && [ -z "${LINTERS_ARCHIVE}" ]; then
     LINTERS_ARCHIVE="${sorted[0]}"
     echo "   Resolved to: $(to_mixed_path "${LINTERS_ARCHIVE}")"
   else
-    echo "*** ERROR12: No linter archive matching [$(to_mixed_path "${BUILD_DIR}")/rust-linters-*-win-x86_64.tar.xz] found in build directory."
-    exit 12
+    if [ "${RUN_BUILD}" == "true" ]; then
+      echo "   No precompiled linter archive found. Will compile from source."
+    else
+      echo "*** ERROR12: No linter archive matching [$(to_mixed_path "${BUILD_DIR}")/rust-linters-*-win-x86_64.tar.xz] found in build directory."
+      exit 12
+    fi
   fi
 fi
 
@@ -1104,6 +1202,15 @@ if [ "${RUN_BUILD}" == "true" ]; then
     done
   fi
 
+  # Replace the broken LLD wrapper inside the bootstrapped sandbox with the real linker binary
+  sandbox_wrapper="${BOOTSTRAP_BIN_DIR}/lib/rustlib/x86_64-pc-windows-gnu/bin/gcc-ld/ld.lld.exe"
+  sandbox_real="${BOOTSTRAP_BIN_DIR}/lib/rustlib/x86_64-pc-windows-gnu/bin/rust-lld.exe"
+  if [ -f "${sandbox_real}" ] && [ -f "${sandbox_wrapper}" ]; then
+    echo "   [+] Overwriting LLD wrapper in sandbox with real linker binary..."
+    rm -f "${sandbox_wrapper}"
+    cp "${sandbox_real}" "${sandbox_wrapper}"
+  fi
+
   # 4. Resolve and configure C compiler path
   echo -e "\n>> 4. Resolving C-Compiler..."
   CC_PATH=$(resolve_cc)
@@ -1123,29 +1230,16 @@ if [ "${RUN_BUILD}" == "true" ]; then
 
   # Prepend the bootstrapped rustc/cargo to path so cargo is invoked from our sandbox
   ORIGINAL_PATH="${PATH}"
-  export PATH="${BOOTSTRAP_BIN_DIR}/bin:${PATH}"
+  cc_dir=""
+  [ -n "${CC_PATH:-}" ] && cc_dir=$(dirname "${CC_PATH}")
+  export PATH="${BOOTSTRAP_BIN_DIR}/bin:${cc_dir}:${PATH}"
   
   # Setup compiler variables for cargo build-scripts to compile C dependencies
   # Use Windows-style paths since cargo.exe and rustc.exe are native Windows binaries
-  CC=$(to_win_path "${CC_PATH}")
-  export CC
-  CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=$(to_win_path "${CC_PATH}")
-  export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER
+  configure_compiler_env "${CC_PATH}"
+
   RUSTC=$(to_win_path "${BOOTSTRAP_BIN_DIR}/bin/rustc.exe")
   export RUSTC
-  
-  # Enable LLD linker optimization if LLD is detected in the compiler directory or PATH
-  cc_dir=$(dirname "${CC_PATH}")
-  if [ -f "${cc_dir}/ld.lld.exe" ] || [ -f "${cc_dir}/lld.exe" ] || command -v lld.exe &>/dev/null; then
-    export RUSTFLAGS="-C link-arg=-fuse-ld=lld"
-  fi
-  
-  # Set persistent isolated CARGO_HOME to cache registry indexes and crates across runs
-  # Can be overridden via RUST_CARGO_CACHE_DIR environment variable
-  BOOTSTRAP_CARGO_HOME=$(to_unix_path "${RUST_CARGO_CACHE_DIR:-${SYS_TMP_DIR}/devops/cargo_cache}")
-  mkdir -p "${BOOTSTRAP_CARGO_HOME}"
-  CARGO_HOME=$(to_win_path "${BOOTSTRAP_CARGO_HOME}")
-  export CARGO_HOME
 
   # 5. Compile linters / cargo tools in the sandbox
   install_linters "${BOOTSTRAP_BIN_DIR}"
@@ -1175,20 +1269,10 @@ if [ "${RUN_BUILD}" == "true" ]; then
   mkdir -p "${MANIFEST_DIR}"
   
   # List all standard components copied from original packages
-  for comp_path in "${EXTRACTED_ROOT}"/*/; do
-    if [ -d "${comp_path}" ]; then
-      comp_name=$(basename "${comp_path%/}")
-      echo "${comp_name}" >> "${MANIFEST_DIR}/components"
-    fi
-  done
+  register_manifest_components "${EXTRACTED_ROOT}" "${MANIFEST_DIR}/components"
   
   if [ -d "${STAGING_DIR}/${RUST_STD_LINUX_PKG}" ]; then
-    for comp_path in "${STAGING_DIR}/${RUST_STD_LINUX_PKG}"/*/; do
-      if [ -d "${comp_path}" ]; then
-        comp_name=$(basename "${comp_path%/}")
-        echo "${comp_name}" >> "${MANIFEST_DIR}/components"
-      fi
-    done
+    register_manifest_components "${STAGING_DIR}/${RUST_STD_LINUX_PKG}" "${MANIFEST_DIR}/components"
   fi
   
   # Also append the custom linters component name
@@ -1248,68 +1332,79 @@ if [ "${RUN_DEPLOY}" == "true" ]; then
     fi
   fi
 
-  # 3. Clean up previous installation
-  if [ -x "${TARGET_DIR}/bin/rustc.exe" ]; then
-    echo -e "\n>> 2. Purging old installation files..."
-    # Perform clean sweep of primary folders to prevent orphans
-    safe_delete "${TARGET_DIR}/bin" "${TARGET_DIR}/lib" "${TARGET_DIR}/share" "${TARGET_DIR}/etc" "${TARGET_DIR}/libexec"
+  # 3. Extract and stage toolchain files in a temporary location
+  echo -e "\n>> 2. Extracting toolchain files to staging area..."
+  DEPLOY_STAGING=$(mktemp -d -p "${TEMP_WORKSPACE}" rust-deploy-stage-XXXXXX)
+  
+  if ! tar --force-local -I "${XZ_OPTS}" -xf "${ACTIVE_ARCHIVE}" -C "${DEPLOY_STAGING}"; then
+    echo "*** ERROR16: Failed to extract toolchain archive."
+    safe_delete "${DEPLOY_STAGING}"
+    exit 16
   fi
 
-  # 4. Extract archive directly to target dir
-  echo -e "\n>> 3. Extracting toolchain files..."
-  
-  # Optional Core Components check
+  # Apply core components filtering in the staging directory if requested
   if [ "${CORE_COMPONENTS}" == "true" ]; then
-    # Staging extraction for selective copy
-    TEMP_EXTRACT=$(mktemp -d -p "${TEMP_WORKSPACE}" rust-extract-XXXXXX)
-    tar --force-local -I "${XZ_OPTS}" -xf "${ACTIVE_ARCHIVE}" -C "${TEMP_EXTRACT}"
-    
-    mkdir -p "${TARGET_DIR}/bin"
-    mkdir -p "${TARGET_DIR}/lib"
-    mkdir -p "${TARGET_DIR}/libexec"
-
-    # Copy only core libraries and binaries (exclude docs and analysis preview packages)
-    cp -r "${TEMP_EXTRACT}/bin"/* "${TARGET_DIR}/bin/"
-    cp -r "${TEMP_EXTRACT}/lib"/* "${TARGET_DIR}/lib/"
-    [ -d "${TEMP_EXTRACT}/libexec" ] && cp -r "${TEMP_EXTRACT}/libexec"/* "${TARGET_DIR}/libexec/"
-    
-    # Strip linters and optional tools from core install bin if present
+    echo "   Filtering core compiler components..."
+    # Strip linters and optional tools
     opt_tools=()
     for tool in "${GLOBAL_BUILTIN_TOOLS[@]}" "${GLOBAL_CARGO_TOOLS[@]}"; do
       opt_tools+=("${tool}.exe")
     done
     for tool in "${opt_tools[@]}"; do
-      safe_delete "${TARGET_DIR}/bin/${tool}"
+      safe_delete "${DEPLOY_STAGING}/bin/${tool}"
     done
 
     # Delete analysis files and preview linker
-    safe_delete "${TARGET_DIR}/lib/rustlib/x86_64-pc-windows-gnu/analysis" \
-                "${TARGET_DIR}/lib/rustlib/x86_64-unknown-linux-gnu/analysis" \
-                "${TARGET_DIR}/bin/llvm-bitcode-linker.exe"
+    safe_delete "${DEPLOY_STAGING}/lib/rustlib/x86_64-pc-windows-gnu/analysis" \
+                "${DEPLOY_STAGING}/lib/rustlib/x86_64-unknown-linux-gnu/analysis" \
+                "${DEPLOY_STAGING}/bin/llvm-bitcode-linker.exe"
 
     # Filter the components manifest registry
-    COMP_FILE="${TARGET_DIR}/lib/rustlib/components"
+    COMP_FILE="${DEPLOY_STAGING}/lib/rustlib/components"
     if [ -f "${COMP_FILE}" ]; then
       temp_comp_file=$(mktemp -p "${TEMP_WORKSPACE}" comp-filter-XXXXXX)
       regex_pattern="^($(IFS='|'; echo "${GLOBAL_EXCLUDE_COMPONENTS[*]}"))$"
       grep -vE "${regex_pattern}" "${COMP_FILE}" > "${temp_comp_file}" || true
       mv "${temp_comp_file}" "${COMP_FILE}"
     fi
-
-    safe_delete "${TEMP_EXTRACT}"
-  else
-    # Extract everything
-    tar --force-local -I "${XZ_OPTS}" -xf "${ACTIVE_ARCHIVE}" -C "${TARGET_DIR}"
   fi
+
+  # 4. Swap and apply new installation atomically
+  echo -e "\n>> 3. Deploying toolchain files to target..."
+  if [ -x "${TARGET_DIR}/bin/rustc.exe" ]; then
+    # Perform clean sweep of primary folders to prevent orphans
+    safe_delete "${TARGET_DIR}/bin" "${TARGET_DIR}/lib" "${TARGET_DIR}/share" "${TARGET_DIR}/etc" "${TARGET_DIR}/libexec"
+  fi
+
+  # Move folders from staging area to target
+  mkdir -p "${TARGET_DIR}"
+  for dir in bin lib share etc libexec; do
+    if [ -d "${DEPLOY_STAGING}/${dir}" ]; then
+      mv "${DEPLOY_STAGING}/${dir}" "${TARGET_DIR}/" 2>/dev/null || {
+        cp -rf "${DEPLOY_STAGING}/${dir}" "${TARGET_DIR}/"
+      }
+    fi
+  done
+
+  # Clean up staging area
+  safe_delete "${DEPLOY_STAGING}"
 
   # Generate default Cargo config.toml to enable rust-lld for cross-compilation
   mkdir -p "${TARGET_DIR}/.cargo"
-  if [ ! -f "${TARGET_DIR}/.cargo/config.toml" ]; then
-    cat <<EOF > "${TARGET_DIR}/.cargo/config.toml"
+  config_file="${TARGET_DIR}/.cargo/config.toml"
+  if [ ! -f "${config_file}" ]; then
+    cat <<EOF > "${config_file}"
 [target.x86_64-unknown-linux-gnu]
 linker = "rust-lld"
 EOF
     echo "   Default Cargo config created to enable rust-lld linker for Linux cross-compilation."
+  elif ! grep -q "\[target.x86_64-unknown-linux-gnu\]" "${config_file}" 2>/dev/null; then
+    cat <<EOF >> "${config_file}"
+
+[target.x86_64-unknown-linux-gnu]
+linker = "rust-lld"
+EOF
+    echo "   Cargo config updated to enable rust-lld linker for Linux cross-compilation."
   fi
 
   # 5. Generate Environment Setup

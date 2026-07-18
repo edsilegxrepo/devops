@@ -46,10 +46,12 @@ graph TD
 ### 2.1. Performance and Efficiency Optimizations
 To achieve optimal execution speeds under Windows file systems (NTFS) and shell emulation layers (Cygwin/MSYS2), several architectural performance patterns are utilized:
 
-1.  **LLVM Linker (LLD) Optimization:**
+1.  **LLVM Linker (LLD) Optimization & Auto-Copying:**
     *   Linking is historically the slowest step of Cargo compilation on Windows.
     *   During linter compilation, the script dynamically scans the resolved GCC installation and the host `PATH` for the LLVM linker (`ld.lld.exe`).
-    *   If found, it configures `RUSTFLAGS="-C link-arg=-fuse-ld=lld"`, replacing the default GNU linker (`ld.exe`) with the high-performance `lld` linker.
+    *   If missing or broken (fails `--version` validation), it automatically copies the actual `rust-lld.exe` binary from the active Rust toolchain's private `bin` folder and saves it as `ld.lld.exe` in the C compiler directory.
+    *   Additionally, the script automatically replaces the linter wrapper inside the sandboxed staging directory with the real `rust-lld.exe` binary to prevent relative path lookup errors during bootstrapped Cargo builds.
+    *   If found or successfully copied, it appends `-C link-arg=-fuse-ld=lld` to `RUSTFLAGS` (preserving any existing flags), replacing the default GNU linker (`ld.exe`) with the high-performance LLD linker.
 2.  **Persistent Compiler Download Cache:**
     *   The script routes all package downloads (such as standard library archives) to a persistent cache directory (`${SYS_TMP_DIR}/devops/downloads`).
     *   By passing the `-C -` (continue) flags to `curl`, it natively supports resuming partially downloaded archives and avoids re-downloading packages across runs.
@@ -66,6 +68,10 @@ To achieve optimal execution speeds under Windows file systems (NTFS) and shell 
     *   Process spawning (forking) is extremely slow in Windows shell emulation environments.
     *   During `--detect`, linter version queries are run in parallel background subshells.
     *   Instead of calling heavy POSIX external commands like `head`, `tr`, and `sed` to slice strings, the script parses version outputs using 100% native Bash builtins (such as `read -r` and regex pattern matching `BASH_REMATCH`), reducing process spawns by over 80%.
+6.  **LTO and Parallel Codegen Acceleration (`--no-lto`):**
+    *   Compiling large Rust tools in release mode defaults to single-threaded code generation and expensive Link-Time Optimization (LTO) to produce highly optimized binaries.
+    *   Passing the `--no-lto` flag overrides these defaults by exporting `CARGO_PROFILE_RELEASE_LTO="false"` and `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=256` in the environment.
+    *   This forces the compiler to parallelize code generation across all CPU cores and skip the slow LTO phase, reducing `rustc` compilation times by up to 50% with minimal runtime speed impact.
 
 ### 2.2. Architectural Assumptions
 *   **MinGW-w64 GCC Runtime:** The host compiler must target `x86_64-pc-windows-gnu` and requires a working MinGW-w64 C compiler (`gcc.exe`) to link native libraries. MSVC toolchains are not supported.
@@ -75,6 +81,12 @@ To achieve optimal execution speeds under Windows file systems (NTFS) and shell 
 *   **GNU Tar Colon Bug (`--force-local`):**
     *   GNU `tar` interprets colons in paths (e.g. `f:/stage`) as remote tape drives/hosts.
     *   To prevent extraction failures when handling Windows-style paths, the script appends `--force-local` to all `tar` compress/decompress calls.
+*   **Staged Deployment Extraction (Atomic-style deploys):**
+    *   To prevent leaving the toolchain in a corrupt, non-functional state on extraction failures, the script extracts the archive into a temporary staging folder first. Old folders are only removed, and new folders moved into place, if the extraction successfully completes.
+*   **Smart Cargo Config Merging:**
+    *   If a `.cargo/config.toml` already exists in your target directory, the script parses it and appends the Linux target cross-compilation config instead of skipping the file entirely or overwriting it, preserving existing custom configurations.
+*   **Force Compilation Override (`--force`):**
+    *   If `--force` is specified during Build Mode, the script ignores any auto-discovered precompiled linter packages in the build directory, forcing Cargo to rebuild all code-quality tools from source.
 *   **Cygwin cygpath Empty-Input Safeguard:**
     *   By default, calling `cygpath` with an empty string returns `.` (current directory), which could cause accidental folder operations.
     *   The path helper wrappers (`to_win_path`, `to_unix_path`, `to_mixed_path`) are guarded to immediately return `""` on empty inputs.
@@ -141,14 +153,16 @@ sequenceDiagram
     *   Verify the C compiler path using `resolve_cc`.
     *   Download toolchain components via `curl` to the persistent downloads folder.
     *   Assemble compiler components in a sandboxed staging directory.
+    *   Overwrite the sandboxed LLD forwarding wrapper inside the sandbox with the real `rust-lld.exe` binary to ensure linker compatibility during build.
     *   Prepend the compiler binaries to the environment `PATH` to bootstrap Cargo.
-    *   Execute Cargo builds for each linter, pulling binaries from the persistent tools cache if already compiled.
+    *   Execute Cargo builds for each linter, pulling binaries from the persistent tools cache if already compiled. Any compiler tool installation failure is treated as a hard error (`exit 15`).
     *   Compress the compiled linters to a standalone archive, or merge them directly with the compiler components into a single unified deployment bundle.
 7.  **Deployment Mode Execution:**
-    *   Purge existing folders (`bin`, `lib`, `share`, `etc`, `libexec`) under the target directory.
-    *   Decompress the toolchain archive directly to the target folder.
+    *   Extract the toolchain archive into a temporary staging folder first (`exit 16` if extraction fails).
+    *   (Optional) If `--core-components` is enabled, filter and strip optional components inside the staging folder.
+    *   Purge existing folders (`bin`, `lib`, `share`, `etc`, `libexec`) under the target directory, and move the staged folders into place.
     *   (Optional) If `--linters` is specified, locate the matching linter archive in the pending folder, decompress it, and merge its binaries into the target `bin/` folder.
-    *   Generate a Cargo `config.toml` that forces `rust-lld` as the linker for Linux targets.
+    *   Generate or update your Cargo `config.toml` to force `rust-lld` as the linker for Linux targets (appending if the file already exists).
     *   Configure path variables: Update the Windows Registry scope (`User` or `Machine`), or generate local sourceable scripts (`env.sh` and `env.bat`).
 
 ---
@@ -168,6 +182,13 @@ The script relies on standard tools and system shells. It is designed to run in 
 ### 4.2. Host Toolchain Dependencies
 *   **C Compiler:** A MinGW-w64 GCC implementation (e.g. WinLibs GCC or MSYS2 Mingw-w64). Must target native Windows thread models (UCRT or MSVCRT).
 *   **System API Interface:** `powershell.exe` (must be accessible from the shell to query and write Windows Registry environment variables).
+
+> [!NOTE]
+> The C compiler search order prioritizes active environment configurations:
+> 1. CLI specified compiler path (`--cc`).
+> 2. `CC` environment variable.
+> 3. System `PATH` (`command -v`).
+> 4. Hardcoded fallback directory locations (such as `d:/dev/mingw64/bin/gcc.exe`).
 
 ---
 
@@ -211,8 +232,9 @@ The script parsing logic processes the following CLI parameters:
 | `--target-dir` | String | `d:/dev/rust` | Target directory for installation and deployment. |
 | `--build-dir` | String | `f:/stage/upload/pending` | Output directory for built package archives. |
 | `--archive-path` | String | `""` | Path to a custom toolchain package archive to deploy. |
-| `--force` | Flag | `false` | Forces build or deployment actions even if local and target versions match. |
+| `--force` | Flag | `false` | Forces build/deploy actions even if versions match, and forces linter recompilation from source (ignoring cached archives). |
 | `--core-components` | Flag | `false` | Limits deployment strictly to core compiler binaries and libraries (excludes docs). |
+| `--no-lto` | Flag | `false` | Disables Link-Time Optimization (LTO) and forces 256 parallel codegen units to speed up Cargo compilation times. |
 | `--log` | String | `""` | Redirects script output to the specified log file path. |
 
 ---
@@ -337,3 +359,24 @@ This command runs the optimized parallel detection routine and outputs a summary
   rustfmt                Installed       1.9.0-stable (2d8144b788 2026-07-07)
 =========================================================================
 ```
+
+---
+
+## 8. Exit Codes Reference
+
+The script exits with a non-zero code on errors to ensure reliability in automated pipelines:
+
+| Exit Code | Error Name / Condition | Description |
+| :--- | :--- | :--- |
+| `1` | `Cargo Not Found` | Native `cargo.exe` is missing or not executable. |
+| `2` | `UAC Elevation Required` | Attempted system registry PATH updates without Admin privileges. |
+| `3` | `Write Access Denied` | Target installation directory is not writable. |
+| `4` | `Retrieval Failure` | Failed to download Rust installation packages or active archive not found. |
+| `8` | `Disk Space Depleted` | Less than 1GB of free disk space found on target directory. |
+| `9` | `Unsupported Environment` | Running outside of a supported Cygwin or MSYS2 Bash shell. |
+| `10` | `Archive Missing` | Explicitly specified linter archive path does not exist. |
+| `12` | `Linter Resolution Failure` | No matching linter package archive found in build directory (deploy mode). |
+| `14` | `C Compiler Missing` | No valid GCC/MinGW compiler resolved on the host. |
+| `15` | `Tool Compilation Error` | Failed to build or install one or more code quality/linter tools from source. |
+| `16` | `Deploy Extraction Error` | Extraction of the toolchain archive to the staging directory failed. |
+| `99` | `Dangerous Deletion Blocked` | An unsafe file path deletion (e.g. root or drive root) was prevented. |
