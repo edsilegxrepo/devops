@@ -1,7 +1,7 @@
 #!/bin/bash
 # -----------------------------------------------------------------------------
 # Code Audit Pipeline (code_audit.sh)
-# v1.1.4xg  2026/05/12  XDG
+# v1.1.5xg  2026/07/18  XDG
 #
 # -----------------------------------------------------------------------------
 # OBJECTIVE:
@@ -716,6 +716,23 @@ resolve_context() {
   CONF_BASH_TARGET="$TARGET_PATH"
   CONF_POWERSHELL_TARGET="$TARGET_PATH"
   CONF_GENERAL_TARGET="$TARGET_PATH"
+
+  # Dynamically configure golangci-lint config loading.
+  # If any standard config file exists in the Go target path, let the linter use it;
+  # otherwise, fall back to --no-config.
+  local has_go_config=false
+  for f in ".golangci.yml" ".golangci.yaml" ".golangci.toml" ".golangci.json"; do
+    if [ -f "${CONF_GOLANG_TARGET}/${f}" ]; then
+      has_go_config=true
+      break
+    fi
+  done
+
+  if [ "$has_go_config" = true ]; then
+    CONF_GOLANGCI_FLAGS=""
+  else
+    CONF_GOLANGCI_FLAGS="--no-config"
+  fi
 }
 
 # --- MODULE: GLOBAL REPORTING INITIALIZATION ---
