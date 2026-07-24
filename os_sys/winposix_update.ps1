@@ -30,11 +30,29 @@
 .PARAMETER update-msys
     Updates only the MSYS2 environment using pacman -Syu.
 
+.PARAMETER InstallCygwin
+    Installs a fresh Cygwin environment at the specified or default root directory.
+
+.PARAMETER InstallMsys
+    Installs a fresh MSYS2 environment at the specified or default root directory.
+
+.PARAMETER Path
+    Explicit target directory for installation or package cache configuration.
+
+.PARAMETER ShowHelp
+    Displays the help guidance output and exits.
+
+.PARAMETER ShowInfo
+    Inspects and displays details about existing installations and environment variables.
+
 .PARAMETER LogPath
     Optional file path to save session logs for auditing and debugging.
 
 .PARAMETER CygwinMirror
     Optional URL for the Cygwin mirror. Defaults to mirrors.kernel.org.
+
+.PARAMETER CygwinCache
+    Optional directory path to set as the local Cygwin package cache permanently.
 
 .PARAMETER Json
     Optional switch to format all logs, warnings, errors, and environment info in structured ndjson (no colorization) for CI/CD pipelines.
@@ -44,6 +62,12 @@
 
 .EXAMPLE
     .\winposix_update.ps1 --update-all --json
+
+.EXAMPLE
+    .\winposix_update.ps1 --CygwinCache "D:\CygwinPackages"
+
+.EXAMPLE
+    .\winposix_update.ps1 --install-cygwin --path "D:\mycygwin" --CygwinCache "D:\CygwinPackages"
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true, PositionalBinding = $false)]
@@ -84,6 +108,10 @@ param(
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSReviewUnusedParameter", "")]
     [string]$CygwinMirror = "https://mirrors.kernel.org/sourceware/cygwin/",
 
+    [Parameter(Mandatory = $false)]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSReviewUnusedParameter", "")]
+    [string]$CygwinCache,
+
     # Capture any unbound arguments (like --update-cygwin) to support standard Linux-style flags.
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$RemainingArgs
@@ -112,6 +140,14 @@ if ($null -ne $RemainingArgs -and $RemainingArgs.Count -gt 0) {
     $pathIdx = [Array]::IndexOf($RemainingArgs, "--path")
     if ($pathIdx -ge 0 -and $pathIdx -lt ($RemainingArgs.Count - 1)) {
         $Path = $RemainingArgs[$pathIdx + 1]
+    }
+
+    # CygwinCache mapping: captures the value after --CygwinCache or --cygwin-cache if present.
+    for ($i = 0; $i -lt ($RemainingArgs.Count - 1); $i++) {
+        if ($RemainingArgs[$i] -in @("--cygwincache", "--cygwin-cache", "--CygwinCache")) {
+            $CygwinCache = $RemainingArgs[$i + 1]
+            break
+        }
     }
 }
 
@@ -336,7 +372,7 @@ function Assert-NoRunningProcess {
 # PRIVILEGE CHECK:
 # Most operations (installing to C:\, updating system binaries) require administrative rights.
 # We bypass this check if the user is only requesting help or environment info.
-$isHelpOrInfoRequest = $ShowHelp -or $ShowInfo -or (-not $UpdateAll -and -not $UpdateCygwin -and -not $UpdateMsys -and -not $InstallCygwin -and -not $InstallMsys)
+$isHelpOrInfoRequest = $ShowHelp -or $ShowInfo -or (-not $UpdateAll -and -not $UpdateCygwin -and -not $UpdateMsys -and -not $InstallCygwin -and -not $InstallMsys -and -not $CygwinCache)
 
 if (-not $isHelpOrInfoRequest) {
     $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -391,6 +427,116 @@ function Set-GlobalHomeVariable {
 
 <#
 .SYNOPSIS
+    Detects the configured Cygwin package directory or provides a default.
+
+.DESCRIPTION
+    Inspects the Cygwin setup configuration file (etc\setup\setup.rc) for an existing
+    'last-cache' entry. If a package directory was previously configured by Cygwin setup,
+    it returns that path. Otherwise, it defaults to CYGWIN_HOME\packages.
+
+.PARAMETER RootPath
+    The absolute path to the Cygwin installation root.
+
+.OUTPUTS
+    [string] The path to the configured or default local package directory.
+#>
+function Get-CygwinPackageDir {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RootPath
+    )
+    $defaultPkgDir = Join-Path -Path $RootPath -ChildPath "packages"
+    $setupRcPath = Join-Path -Path $RootPath -ChildPath "etc\setup\setup.rc"
+    if (Test-Path -Path $setupRcPath) {
+        try {
+            $lines = Get-Content -Path $setupRcPath -ErrorAction SilentlyContinue
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+                if ($lines[$i].Trim() -eq "last-cache" -and ($i + 1) -lt $lines.Count) {
+                    $cachedDir = $lines[$i + 1].Trim()
+                    if (-not [string]::IsNullOrWhiteSpace($cachedDir)) {
+                        return $cachedDir
+                    }
+                }
+            }
+        }
+        catch {
+            Write-Verbose "Failed to read setup.rc: $_"
+        }
+    }
+    return $defaultPkgDir
+}
+
+<#
+.SYNOPSIS
+    Persists a local package directory setting in the Cygwin setup configuration file.
+
+.DESCRIPTION
+    Creates or updates the etc\setup\setup.rc file under the Cygwin installation root
+    to record the specified package directory path in the 'last-cache' entry permanently.
+    Creates parent directories if Cygwin is not yet installed.
+
+.PARAMETER RootPath
+    The absolute path to the Cygwin installation root.
+
+.PARAMETER CachePath
+    The absolute path to the package directory to persist.
+#>
+function Set-CygwinPackageDir {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RootPath,
+        [Parameter(Mandatory = $true)]
+        [string]$CachePath
+    )
+    $setupDir = Join-Path -Path $RootPath -ChildPath "etc\setup"
+    $setupRcPath = Join-Path -Path $setupDir -ChildPath "setup.rc"
+
+    if (-not (Test-Path -Path $setupDir)) {
+        try {
+            $null = New-Item -ItemType Directory -Path $setupDir -Force -ErrorAction Stop
+        }
+        catch {
+            Write-Verbose "Failed to create setup directory '$setupDir': $_"
+            return
+        }
+    }
+
+    if ($PSCmdlet.ShouldProcess($setupRcPath, "Persist Cygwin package directory '$CachePath'")) {
+        try {
+            if (Test-Path -Path $setupRcPath) {
+                $lines = Get-Content -Path $setupRcPath -ErrorAction SilentlyContinue
+                $newLines = @()
+                $foundLastCache = $false
+                for ($i = 0; $i -lt $lines.Count; $i++) {
+                    $newLines += $lines[$i]
+                    if ($lines[$i].Trim() -eq "last-cache") {
+                        $newLines += "`t$CachePath"
+                        $foundLastCache = $true
+                        if (($i + 1) -lt $lines.Count -and $lines[$i + 1].StartsWith("`t")) {
+                            $i++ # Skip old value
+                        }
+                    }
+                }
+                if (-not $foundLastCache) {
+                    $newLines = @("last-cache", "`t$CachePath") + $newLines
+                }
+                $newLines | Out-File -FilePath $setupRcPath -Encoding UTF8 -Force
+            } else {
+                $newLines = @("last-cache", "`t$CachePath")
+                $newLines | Out-File -FilePath $setupRcPath -Encoding UTF8 -Force
+            }
+            Write-LogMessage -Message "Permanently configured Cygwin package cache directory: $CachePath" -Color Gray -Level "INFO"
+        }
+        catch {
+            Write-Verbose "Failed to write setup.rc: $_"
+        }
+    }
+}
+
+
+<#
+.SYNOPSIS
     Inspects and displays details about Cygwin and MSYS2 installations.
 
 .DESCRIPTION
@@ -427,6 +573,9 @@ function Show-EnvironmentInfo {
             msys2 = $msysDetails
             environmentVariables = $envVarsObj
         }
+        if ($cygDetails.installed) {
+            $infoResult.cygwin["packageDir"] = Get-CygwinPackageDir -RootPath $cygDetails.path
+        }
         $infoResult | ConvertTo-Json -Depth 5 | Write-Output
         exit 0
     }
@@ -435,9 +584,11 @@ function Show-EnvironmentInfo {
     Write-Output ""
 
     if ($cygDetails.installed) {
+        $cygCache = Get-CygwinPackageDir -RootPath $cygDetails.path
         Write-Output "Cygwin Installation:"
         Write-Output "  Path:    $($cygDetails.path)"
         Write-Output "  Version: $($cygDetails.version) $(if ($cygDetails.release) { '(Release: ' + $cygDetails.release + ')' })"
+        Write-Output "  Cache:   $cygCache"
     } else {
         Write-Output "Cygwin: Not detected."
     }
@@ -477,8 +628,8 @@ $null = $CygwinMirror
 
 # VALIDATION TIER:
 # Ensure that mode-specific parameters are correctly paired and paths are writeable.
-if ($Path -and -not $InstallCygwin -and -not $InstallMsys) {
-    Write-ScriptError -Message "The --path parameter is restricted to installation mode (--install-cygwin or --install-msys)."
+if ($Path -and -not $InstallCygwin -and -not $InstallMsys -and -not $CygwinCache) {
+    Write-ScriptError -Message "The --path parameter is restricted to installation mode (--install-cygwin or --install-msys) or --CygwinCache configuration."
     exit 4
 }
 
@@ -651,6 +802,9 @@ function Invoke-IsolatedAction {
 
 .PARAMETER OverrideRoot
     Optional directory path to overwrite the default Cygwin installation root.
+
+.PARAMETER ExplicitCache
+    Optional directory path to set as the local package cache.
 #>
 function Update-Cygwin {
     [CmdletBinding(SupportsShouldProcess = $true)]
@@ -658,14 +812,24 @@ function Update-Cygwin {
         [Parameter(Mandatory = $true)]
         [string]$Mirror,
         [Parameter(Mandatory = $false)]
-        [string]$OverrideRoot
+        [string]$OverrideRoot,
+        [Parameter(Mandatory = $false)]
+        [string]$ExplicitCache
     )
     # LINTER SYNC: Assign parameters to local variables to satisfy PSScriptAnalyzer scope checks.
     $m = $Mirror
     $o = $OverrideRoot
+    $c = if ($ExplicitCache) { $ExplicitCache } else { $CygwinCache }
     Invoke-IsolatedAction -Target "Cygwin" -Action {
         $rootPath = if ($o) { $o } else { $CYGWIN_HOME }
         Write-LogMessage -Message "Updating Cygwin at $rootPath" -Color Green -Level "INFO"
+
+        if ($c) {
+            Set-CygwinPackageDir -RootPath $rootPath -CachePath $c
+            $localPkgDir = $c
+        } else {
+            $localPkgDir = Get-CygwinPackageDir -RootPath $rootPath
+        }
 
         # Locate the setup utility locally or in the system path.
         $setupExe = Join-Path -Path $rootPath -ChildPath "setup-x86_64.exe"
@@ -731,6 +895,9 @@ function Update-Cygwin {
             # --quiet-mode: Unattended setup
             # --no-version-check is OMITTED to allow the utility to self-update if a new version is released.
             # --no-replaceonreboot: Suppress reboot warnings during background execution.
+            $localPkgDir = Get-CygwinPackageDir -RootPath $rootPath
+            Write-LogMessage -Message "Using Cygwin package directory: $localPkgDir" -Color Gray -Level "INFO"
+
             $setupArgs = @(
                 "--quiet-mode",
                 "--upgrade-also",
@@ -740,7 +907,7 @@ function Update-Cygwin {
                 "--no-replaceonreboot",
                 "--root", $rootPath,
                 "--site", $m,
-                "--local-package-dir", (Join-Path -Path $rootPath -ChildPath "packages")
+                "--local-package-dir", $localPkgDir
             )
 
             $stdoutPath = Join-Path -Path $env:TEMP -ChildPath "cygwin_setup_out_$([Guid]::NewGuid().ToString().Substring(0,8)).log"
@@ -808,6 +975,9 @@ function Update-Cygwin {
 
 .PARAMETER Mirror
     The mirror URL used for packages downloads.
+
+.PARAMETER ExplicitCache
+    Optional directory path to set as the local package cache.
 #>
 function Install-Cygwin {
     [CmdletBinding(SupportsShouldProcess = $true)]
@@ -815,7 +985,9 @@ function Install-Cygwin {
         [Parameter(Mandatory = $true)]
         [string]$InstallPath,
         [Parameter(Mandatory = $true)]
-        [string]$Mirror
+        [string]$Mirror,
+        [Parameter(Mandatory = $false)]
+        [string]$ExplicitCache
     )
     Write-LogMessage -Message "Installing Cygwin to $InstallPath..." -Color Cyan -Level "INFO"
 
@@ -826,7 +998,7 @@ function Install-Cygwin {
 
     # Use the existing update engine but with an explicit root.
     # The setup utility will perform a base install if the root is empty.
-    Update-Cygwin -Mirror $Mirror -OverrideRoot $InstallPath
+    Update-Cygwin -Mirror $Mirror -OverrideRoot $InstallPath -ExplicitCache $ExplicitCache
 
     # Persist the new home path to global environment.
     Set-GlobalHomeVariable -CygwinPath $InstallPath
@@ -970,7 +1142,7 @@ function Update-MSYS {
 # --- ORCHESTRATION TIER ---
 
 # HELP OUTPUT: Provides standardized usage guidance.
-if ($ShowHelp -or (-not $UpdateAll -and -not $UpdateCygwin -and -not $UpdateMsys -and -not $InstallCygwin -and -not $InstallMsys -and -not $ShowInfo)) {
+if ($ShowHelp -or (-not $UpdateAll -and -not $UpdateCygwin -and -not $UpdateMsys -and -not $InstallCygwin -and -not $InstallMsys -and -not $ShowInfo -and -not $CygwinCache)) {
     if ($Json) {
         $helpObj = [Ordered]@{
             utility = "WinPOSIX Auto-Updater/Installer"
@@ -982,6 +1154,7 @@ if ($ShowHelp -or (-not $UpdateAll -and -not $UpdateCygwin -and -not $UpdateMsys
                 @{ flag = "--install-cygwin"; description = "Install fresh Cygwin (Error if already present)" }
                 @{ flag = "--install-msys"; description = "Install fresh MSYS2 (Error if already present)" }
                 @{ flag = "--path <dir>"; description = "Explicit target directory for installation" }
+                @{ flag = "--CygwinCache <dir>"; description = "Set local Cygwin package cache path permanently" }
                 @{ flag = "--info"; description = "Inspect existing installations and environment" }
                 @{ flag = "--LogPath"; description = "Path to a log file" }
                 @{ flag = "--CygwinMirror"; description = "URL for Cygwin mirror" }
@@ -1005,6 +1178,7 @@ if ($ShowHelp -or (-not $UpdateAll -and -not $UpdateCygwin -and -not $UpdateMsys
     Write-Output "  --install-cygwin  Install fresh Cygwin (Error if already present)"
     Write-Output "  --install-msys    Install fresh MSYS2 (Error if already present)"
     Write-Output "  --path <dir>      Explicit target directory for installation"
+    Write-Output "  --CygwinCache <dir> Set local Cygwin package cache path permanently"
     Write-Output ""
     Write-Output "General Flags:"
     Write-Output "  --info            Inspect existing installations and environment"
@@ -1037,7 +1211,7 @@ if ($InstallCygwin) {
         Write-ScriptError -Message "Cygwin is already detected at $targetPath. To update, please use --update-cygwin or --update-all."
         exit 5
     }
-    Install-Cygwin -InstallPath $targetPath -Mirror $CygwinMirror
+    Install-Cygwin -InstallPath $targetPath -Mirror $CygwinMirror -ExplicitCache $CygwinCache
 }
 
 if ($InstallMsys) {
@@ -1049,10 +1223,17 @@ if ($InstallMsys) {
     Install-MSYS -InstallPath $targetPath
 }
 
+# STANDALONE CACHE SETTING:
+# If --CygwinCache was passed without update/install switches, set it for the specified --path or CYGWIN_HOME.
+if ($CygwinCache -and -not $InstallCygwin -and -not $UpdateAll -and -not $UpdateCygwin) {
+    $targetRoot = if ($Path) { $Path } else { $CYGWIN_HOME }
+    Set-CygwinPackageDir -RootPath $targetRoot -CachePath $CygwinCache
+}
+
 # UPDATE TIER:
 # Triggers isolated actions based on the mapped switches.
 if ($UpdateAll -or $UpdateCygwin) {
-    Update-Cygwin -Mirror $CygwinMirror
+    Update-Cygwin -Mirror $CygwinMirror -ExplicitCache $CygwinCache
 }
 
 if ($UpdateAll -or $UpdateMsys) {

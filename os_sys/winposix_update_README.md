@@ -21,6 +21,7 @@ The architecture of WinPOSIX Update is centered around the concept of **Process-
 - **Bootstrap-First Architecture**: For Cygwin, the script performs an intelligent version check via HTTP `HEAD` and automatically downloads the latest `setup-x86_64.exe` only when a newer version is available on the mirror.
 - **Dynamic Installer Discovery**: Fresh MSYS2 installations utilize the GitHub API to dynamically resolve and download the latest "base" SFX archive, ensuring a modern starting point.
 - **Temporary Path Sanitization**: To prevent critical runtime failures caused by DLL collisions and **tool name collisions** (e.g., conflicting versions of `grep`, `ls`, or `awk`), the script dynamically constructs a "Clean Room" `PATH` for each target. This ensures that a Cygwin update never "sees" an MSYS2 binary (and vice versa), guaranteeing that each process loads its specific, intended POSIX emulation DLL (`cygwin1.dll` vs `msys-2.0.dll`).
+- **Package Cache Directory Preservation**: Detects any previously configured Cygwin package directory from `etc/setup/setup.rc` (`last-cache` entry) and uses it, preserving user preferences before falling back to `CYGWIN_HOME\packages`.
 - **Headless GUI Suppression**: Utilizes `-WindowStyle Hidden` and unattended command-line flags to ensure the process remains entirely in the background.
 - **State-Aware Retries**: Specifically for MSYS2, the script supports a multi-pass update logic for pacman runtime stability.
 
@@ -89,6 +90,7 @@ WinPOSIX Update requires the following components to be present on the host:
 | `--install-cygwin`| `switch` | `$false` | Installs a fresh Cygwin environment (Errors if already present). |
 | `--install-msys` | `switch` | `$false` | Installs a fresh MSYS2 environment (Errors if already present). |
 | `--path`         | `string` | `$null`  | Explicit target directory for installation. |
+| `--CygwinCache`  | `string` | `$null`  | Sets local Cygwin package cache path permanently (creates configuration even before Cygwin installation). |
 | `--info`         | `switch` | `$false` | Inspects and displays details about existing installations. |
 | `--LogPath`      | `string` | `$null`  | Destination path for the session log file. |
 | `--CygwinMirror` | `string` | `mirrors.kernel.org` | URL of the mirror to be used for Cygwin package downloads. |
@@ -147,6 +149,24 @@ powershell.exe -ExecutionPolicy Bypass -File "C:\scripts\winposix_update.ps1" --
 Execute updates and pipe structured ndjson logs directly to an external ingest processor.
 ```powershell
 .\os_sys\winposix_update.ps1 --update-all --json
+```
+
+### **Scenario H: Pre-configuring Cygwin Package Cache**
+Set local package cache permanently for the default installation root (`C:\cygwin64`) before or after Cygwin installation:
+```powershell
+.\os_sys\winposix_update.ps1 --CygwinCache "D:\CygwinPackages"
+```
+
+### **Scenario I: Custom Root Path Package Cache Pre-configuration**
+Set local package cache permanently for a custom root path (`D:\mycygwin`) before or after Cygwin installation:
+```powershell
+.\os_sys\winposix_update.ps1 --CygwinCache "D:\CygwinPackages" --path "D:\mycygwin"
+```
+
+### **Scenario J: Fresh Environment Installation with Custom Package Cache**
+Install a fresh Cygwin environment to a custom root path using a custom package cache directory:
+```powershell
+.\os_sys\winposix_update.ps1 --install-cygwin --path "D:\mycygwin" --CygwinCache "D:\CygwinPackages"
 ```
 
 ---
