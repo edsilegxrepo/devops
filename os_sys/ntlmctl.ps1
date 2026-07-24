@@ -144,13 +144,14 @@ if ($EnableAudit -and $DisableAudit) {
 }
 
 $HasMutatingAction = $DisableV1 -or $EnableAudit -or $DisableAudit
+$HasAction = $HasMutatingAction -or $Detect
 
 if ($Batch -and -not $HasMutatingAction) {
     throw "Invalid parameter combination: -Batch (-b) cannot be specified by itself; it must be combined with a modifying switch (-DisableV1, -EnableAudit, or -DisableAudit)."
 }
 
 # If no action parameter is specified (e.g. .\ntlmctl.ps1 alone), display usage and exit cleanly
-if (-not $HasMutatingAction) {
+if (-not $HasAction) {
     Show-Help
     return
 }
