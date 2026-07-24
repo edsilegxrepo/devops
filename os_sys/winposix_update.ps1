@@ -68,6 +68,10 @@
 
 .EXAMPLE
     .\winposix_update.ps1 --install-cygwin --path "D:\mycygwin" --CygwinCache "D:\CygwinPackages"
+
+.NOTES
+    Version: 1.1.0
+    Date:    2026-07-24
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true, PositionalBinding = $false)]
@@ -122,6 +126,15 @@ Set-StrictMode -Version Latest
 
 # Suppress progress bars for Invoke-WebRequest/RestMethod to ensure headless execution.
 $ProgressPreference = 'SilentlyContinue'
+
+# Ensure modern SSL/TLS security protocols (TLS 1.2+) are enabled for WebRequests in Windows PowerShell.
+try {
+    # Bitwise OR with Tls12 (3072) and Tls13 (12288)
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12 -bor 12288
+} catch {
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+}
+
 
 # MANUAL ARGUMENT MAPPING:
 # This fail-safe block ensures that flags like --update-all are correctly captured
@@ -277,6 +290,47 @@ function Test-PathWriteable {
 
 <#
 .SYNOPSIS
+    Downloads a remote file with User-Agent headers and automatic retry logic.
+
+.DESCRIPTION
+    Wraps Invoke-WebRequest to include standard User-Agent headers and perform up to
+    3 retry attempts with delays to withstand transient network blips.
+
+.PARAMETER Uri
+    The target HTTP/HTTPS URL to download.
+
+.PARAMETER OutFile
+    The destination local file path.
+
+.PARAMETER MaxRetries
+    Maximum number of download attempts (defaults to 3).
+#>
+function Invoke-DownloadFileWithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Uri,
+        [Parameter(Mandatory = $true)]
+        [string]$OutFile,
+        [int]$MaxRetries = 3
+    )
+    $headers = @{ "User-Agent" = "WinPOSIX-Updater/1.0" }
+    for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
+        try {
+            Invoke-WebRequest -Uri $Uri -OutFile $OutFile -Headers $headers -UseBasicParsing -ErrorAction Stop
+            return
+        }
+        catch {
+            if ($attempt -ge $MaxRetries) {
+                throw $_
+            }
+            Write-Verbose "Download attempt $attempt failed ($Uri): $_. Retrying in 2s..."
+            Start-Sleep -Seconds 2
+        }
+    }
+}
+
+<#
+.SYNOPSIS
     Queries the directory path to check for version and uname release date.
 
 .DESCRIPTION
@@ -362,8 +416,13 @@ function Assert-NoRunningProcess {
             }
         }
         if ($runningProcesses) {
-            $names = $runningProcesses | ForEach-Object { "$($_.Name) (PID: $($_.Id))" }
-            Write-ScriptError -Message "Cannot proceed with update/install. Running $DisplayName processes detected under '$realPath': $($names -join ', '). Please close all processes and try again."
+            $procCount = $runningProcesses.Count
+            $displayProcs = if ($procCount -gt 5) {
+                (($runningProcesses | Select-Object -First 5 | ForEach-Object { "$($_.Name) (PID: $($_.Id))" }) -join ', ') + " ... and $($procCount - 5) more"
+            } else {
+                ($runningProcesses | ForEach-Object { "$($_.Name) (PID: $($_.Id))" }) -join ', '
+            }
+            Write-ScriptError -Message "Cannot proceed with update/install. Running $DisplayName processes detected under '$realPath': $displayProcs. Please close all processes and try again."
             exit 3
         }
     }
@@ -628,6 +687,11 @@ $null = $CygwinMirror
 
 # VALIDATION TIER:
 # Ensure that mode-specific parameters are correctly paired and paths are writeable.
+if ($CygwinMirror -and -not $CygwinMirror.StartsWith("https://", [System.StringComparison]::OrdinalIgnoreCase)) {
+    Write-ScriptError -Message "The --CygwinMirror URL must use HTTPS for security ($CygwinMirror). Non-HTTPS mirrors are disallowed."
+    exit 4
+}
+
 if ($Path -and -not $InstallCygwin -and -not $InstallMsys -and -not $CygwinCache) {
     Write-ScriptError -Message "The --path parameter is restricted to installation mode (--install-cygwin or --install-msys) or --CygwinCache configuration."
     exit 4
@@ -854,7 +918,8 @@ function Update-Cygwin {
 
         if (Test-Path -Path $setupExe) {
             try {
-                $lastModified = (Invoke-WebRequest -Uri $setupUrl -Method Head -UseBasicParsing -ErrorAction SilentlyContinue).Headers."Last-Modified"
+                $headers = @{ "User-Agent" = "WinPOSIX-Updater/1.0" }
+                $lastModified = (Invoke-WebRequest -Uri $setupUrl -Method Head -Headers $headers -UseBasicParsing -ErrorAction SilentlyContinue).Headers."Last-Modified"
                 if ($lastModified) {
                     $remoteTime = [DateTime]::Parse($lastModified)
                     $localTime = (Get-Item $setupExe).LastWriteTime
@@ -874,7 +939,7 @@ function Update-Cygwin {
             try {
                 if ($PSCmdlet.ShouldProcess($setupUrl, "Download latest setup-x86_64.exe")) {
                     Write-LogMessage -Message "Bootstrapping latest Cygwin setup from $setupUrl..." -Color Cyan -Level "INFO"
-                    Invoke-WebRequest -Uri $setupUrl -OutFile $setupExe -UseBasicParsing -ErrorAction Stop
+                    Invoke-DownloadFileWithRetry -Uri $setupUrl -OutFile $setupExe
                 }
             }
             catch {
@@ -1038,13 +1103,14 @@ function Install-MSYS {
             # Discovery: Find the latest SFX release from GitHub.
             Write-LogMessage -Message "Querying GitHub for latest MSYS2 base release..." -Color Gray -Level "INFO"
             $apiUri = "https://api.github.com/repos/msys2/msys2-installer/releases/latest"
-            $release = Invoke-RestMethod -Uri $apiUri
+            $headers = @{ "User-Agent" = "WinPOSIX-Updater/1.0" }
+            $release = Invoke-RestMethod -Uri $apiUri -Headers $headers
             $asset = $release.assets | Where-Object { $_.name -like "msys2-base-x86_64-*.sfx.exe" } | Select-Object -First 1
             if (-not $asset) { throw "Could not find SFX asset in latest release." }
 
             $downloadUrl = $asset.browser_download_url
             Write-LogMessage -Message "Downloading MSYS2 SFX from $downloadUrl..." -Color Cyan -Level "INFO"
-            Invoke-WebRequest -Uri $downloadUrl -OutFile $sfxPath -UseBasicParsing -ErrorAction Stop
+            Invoke-DownloadFileWithRetry -Uri $downloadUrl -OutFile $sfxPath
 
             if ($PSCmdlet.ShouldProcess($p, "Extract MSYS2 base system")) {
                 Write-LogMessage -Message "Extracting MSYS2 (this may take a minute)..." -Color Yellow -Level "LOG"
@@ -1146,6 +1212,8 @@ if ($ShowHelp -or (-not $UpdateAll -and -not $UpdateCygwin -and -not $UpdateMsys
     if ($Json) {
         $helpObj = [Ordered]@{
             utility = "WinPOSIX Auto-Updater/Installer"
+            version = "1.1.0"
+            date = "2026-07-24"
             usage = ".\winposix_update.ps1 [flags]"
             flags = @(
                 @{ flag = "--update-all"; description = "Update both Cygwin and MSYS2" }
@@ -1166,7 +1234,7 @@ if ($ShowHelp -or (-not $UpdateAll -and -not $UpdateCygwin -and -not $UpdateMsys
         exit 0
     }
 
-    Write-LogMessage -Message "WinPOSIX Auto-Updater/Installer Help Output" -Color Cyan
+    Write-LogMessage -Message "WinPOSIX Auto-Updater/Installer v1.1.0 (2026-07-24) Help Output" -Color Cyan
     Write-Output "Usage: .\winposix_update.ps1 [flags]"
     Write-Output ""
     Write-Output "Maintenance Flags:"

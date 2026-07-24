@@ -1,5 +1,7 @@
 # WinPOSIX Update Technical Specification & Orchestration Guide
 
+**Version**: `1.1.0` | **Date**: `2026-07-24`
+
 ## 1. Application Overview and Objectives
 
 **WinPOSIX Update** is an orchestration utility designed to automate the maintenance of Cygwin and MSYS2 environments on Windows systems. Its primary objective is to provide a headless, non-interactive update mechanism that ensures environment stability and prevents cross-contamination between different POSIX-like runtimes.
@@ -93,7 +95,7 @@ WinPOSIX Update requires the following components to be present on the host:
 | `--CygwinCache`  | `string` | `$null`  | Sets local Cygwin package cache path permanently (creates configuration even before Cygwin installation). |
 | `--info`         | `switch` | `$false` | Inspects and displays details about existing installations. |
 | `--LogPath`      | `string` | `$null`  | Destination path for the session log file. |
-| `--CygwinMirror` | `string` | `mirrors.kernel.org` | URL of the mirror to be used for Cygwin package downloads. |
+| `--CygwinMirror` | `string` | `https://mirrors.kernel.org/sourceware/cygwin/` | URL of the mirror to be used for Cygwin package downloads. Must use HTTPS. |
 | `--help`         | `switch` | `$false` | Displays the help output and exits. |
 | `--json`         | `switch` | `$false` | Formats all logs, warnings, errors, and environment info in structured ndjson (no colorization) for CI/CD pipelines. |
 
@@ -118,7 +120,7 @@ Perform a background update of all POSIX environments with logging.
 ### **Scenario B: Targetted Cygwin Update**
 Update only the Cygwin environment using a specific mirror.
 ```powershell
-.\os_sys\winposix_update.ps1 --update-cygwin --CygwinMirror "http://mirrors.sonic.net/cygwin/"
+.\os_sys\winposix_update.ps1 --update-cygwin --CygwinMirror "https://mirrors.sonic.net/cygwin/"
 ```
 
 ### **Scenario C: MSYS2 Only Update**
@@ -180,7 +182,13 @@ Install a fresh Cygwin environment to a custom root path using a custom package 
 ### **Running Process Prevention**
 > [!WARNING]
 > **No active POSIX environments should be running during updates.**
-> To prevent file-locking conflicts, installation corruption, or DLL collisions, the script checks for running processes under the target Cygwin and MSYS2 directories before performing any update or install operations. If blocking processes are detected, the script lists their names and PIDs and aborts execution with an error.
+> To prevent file-locking conflicts, installation corruption, or DLL collisions, the script checks for running processes under the target Cygwin and MSYS2 directories before performing any update or install operations. If blocking processes are detected, the script lists their names and PIDs (truncated to the first 5 processes) and aborts execution with an error.
+
+### **TLS 1.2+ & Network Resilience**
+To ensure reliable HTTPS connections on older Windows Server releases (e.g. Windows Server 2012–2022 using PowerShell 5.1):
+- **TLS 1.2/1.3 Protocol Initialization**: Automatically configures `.NET`'s `[ServicePointManager]::SecurityProtocol` for TLS 1.2+ at session start.
+- **Mandatory HTTPS Mirrors**: All `--CygwinMirror` URLs must begin with `https://`. Non-HTTPS mirror URLs are rejected during validation.
+- **Download Retries & User-Agent Headers**: Web requests to `cygwin.com` and `api.github.com` include standard `User-Agent` headers and execute up to 3 automatic retries with 2-second delays to withstand transient network blips.
 
 ### **Automatic Environment Variable Population**
 To ensure consistent environment discovery across the system, WinPOSIX Update manages **Machine-level** environment variables:
