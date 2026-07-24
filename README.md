@@ -53,7 +53,7 @@ Low-level system adjustments and service delegations.
 - `dnsmgr.ps1`: Robust, headless utility for Windows DNS server and search suffix management.
 - `winposix_update.ps1`: Automated, headless update utility for Cygwin and MSYS2 environments.
 - `defender_setup.ps1`: Audits and manages coexistence, passive mode, and uninstallation of Microsoft Defender on systems with SentinelOne.
-- `disable_ntlmv1.ps1`: Hardens LSA authentication by disabling NTLMv1/LM protocols (`LmCompatibilityLevel = 5`), enabling incoming NTLM auditing (`AuditReceiptEvents = 2`), activating NTLM Operational event logs, and generating pre/post execution state backups.
+- `ntlmctl.ps1`: NTLM Protocol & Audit Manager controlling NTLM authentication enforcement (disabling NTLMv1/LM via `LmCompatibilityLevel = 5`), incoming authentication auditing (`AuditReceiptEvents`), and event log channel enablement.
 - `procmgr.ps1`: Comprehensive PowerShell process management utility for listing, diagnosing, setting priority/affinity, and terminating processes.
 - `svcmgr.ps1`: Unified service control CLI for managing user-space Windows services (nginx, gitea, etc.) without requiring administrator privileges.
 - `nginx_ctl.cmd`: Native Windows command script wrapper managing the runtime lifecycle of the Nginx web server.
