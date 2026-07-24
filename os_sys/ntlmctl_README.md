@@ -191,11 +191,12 @@ sequenceDiagram
 | **`-DisableV1`** | `-dv1` | `[Switch]` | `$false` | Enforces NTLMv2 protocol hardening (`LmCompatibilityLevel = 5`). Can be combined with `-EnableAudit` or `-DisableAudit`. |
 | **`-EnableAudit`** | `-a` | `[Switch]` | `$false` | Sets `AuditReceiptEvents = 2` and enables `Microsoft-Windows-NTLM/Operational` event log channel. Mutually exclusive with `-DisableAudit`. |
 | **`-DisableAudit`** | `-da` | `[Switch]` | `$false` | Sets `AuditReceiptEvents = 0` and disables `Microsoft-Windows-NTLM/Operational` event log channel. Mutually exclusive with `-EnableAudit`. |
-| **`-Batch`** | `-b` | `[Switch]` | `$false` | Suppresses confirmation prompts by overriding `$ConfirmPreference = 'None'`. Requires a modifying switch (`-DisableV1`, `-EnableAudit`, or `-DisableAudit`). |
+| **`-Restore`** | `-r` | `[Switch]` | `$false` | Restores prior `LmCompatibilityLevel` and `AuditReceiptEvents` registry settings from the JSON backup file. |
+| **`-Batch`** | `-b` | `[Switch]` | `$false` | Suppresses confirmation prompts by overriding `$ConfirmPreference = 'None'`. Requires a modifying switch (`-DisableV1`, `-EnableAudit`, `-DisableAudit`, or `-Restore`). |
 | **`-Detect`** | `-d` | `[Switch]` | `$false` | Exclusive read-only compliance inspection switch. Cannot be combined with modifying switches or `-Batch`. |
 | **`-Help`** | `-h`, `-?` | `[Switch]` | `$false` | Exclusive help switch; renders usage documentation and parameter descriptions. |
 | **`-LogPath`** | | `[String]` | `%TEMP%\ntlmctl\NTLM_Hardening.log` | Target file path for execution logging. |
-| **`-BackupPath`** | | `[String]` | `%TEMP%\ntlmctl\NTLM_Registry_Backup.json` | Target file path for pre-execution JSON registry backup. |
+| **`-BackupPath`** | | `[String]` | `%TEMP%\ntlmctl\NTLM_Registry_Backup.json` | Target file path for pre-execution JSON registry backup or rollback. |
 | **`-WhatIf`** | | `[Switch]` | `$false` | Native PowerShell dry-run flag; previews registry and event log changes without executing mutations. |
 
 ---
@@ -275,7 +276,23 @@ Evaluates active registry configuration and event channel enablement without mak
 
 ---
 
-### 8.6 Pipeline JSON Serialization
+### 8.6 Registry Backup Restoration (`-Restore -Batch`)
+
+Restores `LmCompatibilityLevel` and `AuditReceiptEvents` from the pre-execution JSON backup file:
+
+```powershell
+.\ntlmctl.ps1 -Restore -Batch
+```
+
+Or restore from a specific backup file location:
+
+```powershell
+.\ntlmctl.ps1 -Restore -BackupPath "C:\backups\NTLM_Registry_Backup.json" -Batch
+```
+
+---
+
+### 8.7 Pipeline JSON Serialization
 
 Invokes state detection and pipe-serializes the resulting `PSCustomObject` to JSON:
 

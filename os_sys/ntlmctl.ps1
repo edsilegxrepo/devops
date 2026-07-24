@@ -51,6 +51,11 @@ param (
     [Alias('d')]
     [switch]$Detect,
 
+    # Switch parameter to restore prior NTLM registry settings from a JSON backup file
+    [Parameter(Mandatory = $false)]
+    [Alias('r')]
+    [switch]$Restore,
+
     # Switch parameter to disable NTLMv1 and enforce NTLMv2 (sets LmCompatibilityLevel = 5)
     [Parameter(Mandatory = $false)]
     [Alias('dv1')]
@@ -91,6 +96,7 @@ function Show-Help {
     Write-Host "    .\ntlmctl.ps1 -DisableV1 [-Batch] [-LogPath <String>] [-BackupPath <String>] [-WhatIf]"
     Write-Host "    .\ntlmctl.ps1 -EnableAudit [-Batch] [-LogPath <String>] [-BackupPath <String>] [-WhatIf]"
     Write-Host "    .\ntlmctl.ps1 -DisableAudit [-Batch] [-LogPath <String>] [-BackupPath <String>] [-WhatIf]"
+    Write-Host "    .\ntlmctl.ps1 -Restore [-Batch] [-LogPath <String>] [-BackupPath <String>] [-WhatIf]"
     Write-Host "    .\ntlmctl.ps1 -Detect"
     Write-Host "    .\ntlmctl.ps1 -Help"
     Write-Host ""
@@ -98,7 +104,7 @@ function Show-Help {
     Write-Host "    Disables NTLMv1 and enforces NTLMv2 and Kerberos authentication across Windows host systems."
     Write-Host "    Hardens LSA authentication by setting LmCompatibilityLevel = 5 (-DisableV1), or manages incoming NTLM"
     Write-Host "    audit logging (-EnableAudit to set AuditReceiptEvents = 2, -DisableAudit to set AuditReceiptEvents = 0),"
-    Write-Host "    and generates pre-execution JSON registry backups."
+    Write-Host "    restores settings from JSON backup (-Restore), and generates pre-execution JSON registry backups."
     Write-Host "    (Interactive confirmation prompts are active by default; use -Batch for non-interactive execution.)"
     Write-Host ""
     Write-Host "PARAMETERS / FLAGS:"
@@ -106,6 +112,7 @@ function Show-Help {
     Write-Host "    -DisableV1, -dv1     Disables NTLMv1 and enforces NTLMv2 (sets LmCompatibilityLevel = 5)."
     Write-Host "    -EnableAudit, -a     Enables incoming NTLM auditing (AuditReceiptEvents = 2) without modifying LmCompatibilityLevel."
     Write-Host "    -DisableAudit, -da   Disables incoming NTLM auditing (AuditReceiptEvents = 0) without modifying LmCompatibilityLevel."
+    Write-Host "    -Restore, -r         Restores prior registry settings from the JSON backup file."
     Write-Host "    -Batch, -b           Executes in non-interactive mode without confirmation prompts."
     Write-Host "    -Detect, -d          Inspects and displays current NTLM security state without modifying settings."
     Write-Host "    -LogPath <Path>      Target path for script execution log file."
@@ -119,6 +126,7 @@ function Show-Help {
     Write-Host "    .\ntlmctl.ps1 -DisableV1 -Batch"
     Write-Host "    .\ntlmctl.ps1 -EnableAudit -Batch"
     Write-Host "    .\ntlmctl.ps1 -DisableAudit -Batch"
+    Write-Host "    .\ntlmctl.ps1 -Restore -Batch"
     Write-Host "    .\ntlmctl.ps1 -Detect"
     Write-Host "    .\ntlmctl.ps1 -WhatIf"
     Write-Host ""
@@ -126,7 +134,7 @@ function Show-Help {
 
 # Validate parameter compatibility constraints
 if ($Help) {
-    if ($DisableV1 -or $EnableAudit -or $DisableAudit -or $Detect -or $Batch) {
+    if ($DisableV1 -or $EnableAudit -or $DisableAudit -or $Detect -or $Restore -or $Batch) {
         throw "Invalid parameter combination: -Help (-h) is an exclusive switch and cannot be combined with other parameters."
     }
     Show-Help
@@ -134,8 +142,14 @@ if ($Help) {
 }
 
 if ($Detect) {
-    if ($DisableV1 -or $EnableAudit -or $DisableAudit -or $Batch) {
+    if ($DisableV1 -or $EnableAudit -or $DisableAudit -or $Restore -or $Batch) {
         throw "Invalid parameter combination: -Detect (-d) is an exclusive read-only switch and cannot be combined with other parameters."
+    }
+}
+
+if ($Restore) {
+    if ($DisableV1 -or $EnableAudit -or $DisableAudit -or $Detect) {
+        throw "Invalid parameter combination: -Restore (-r) is a rollback switch and cannot be combined with modification switches (-DisableV1, -EnableAudit, -DisableAudit, or -Detect)."
     }
 }
 
@@ -143,7 +157,7 @@ if ($EnableAudit -and $DisableAudit) {
     throw "Invalid parameter combination: -EnableAudit (-a) and -DisableAudit (-da) are mutually exclusive."
 }
 
-$HasMutatingAction = $DisableV1 -or $EnableAudit -or $DisableAudit
+$HasMutatingAction = $DisableV1 -or $EnableAudit -or $DisableAudit -or $Restore
 $HasAction = $HasMutatingAction -or $Detect
 
 if ($Batch -and -not $HasMutatingAction) {
@@ -256,6 +270,84 @@ try {
             AppliedAuditEvents   = "Skipped (-Detect)"
             EventLogEnabled      = $EventLogEnabled
             Status               = $DetectStatus
+            Timestamp            = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+            OutputDir            = $LogDir
+            LogPath              = $LogPath
+            BackupPath           = $BackupPath
+        }
+        return
+    }
+
+    # Handle -Restore mode execution (restores state from JSON backup)
+    if ($Restore) {
+        Write-Log "-Restore flag specified. Reading registry backup file from: $BackupPath" "INFO"
+        if (-not (Test-Path -Path $BackupPath)) {
+            Write-Log "Backup file not found at '$BackupPath'. Restoration aborted." "ERROR"
+            throw "Backup file not found at '$BackupPath'."
+        }
+
+        $BackupContent = Get-Content -Path $BackupPath -Raw -ErrorAction Stop | ConvertFrom-Json
+        Write-Log "Loaded backup recorded on $($BackupContent.Timestamp) for computer $($BackupContent.ComputerName)." "INFO"
+
+        # Restore LmCompatibilityLevel
+        $RestoredLm = $BackupContent.LmCompatibilityLevel
+        if ($null -ne $RestoredLm) {
+            Write-Log "Restoring LmCompatibilityLevel to $RestoredLm under $LsaPath..." "INFO"
+            if ($PSCmdlet.ShouldProcess($LsaPath, "Restore LmCompatibilityLevel = $RestoredLm")) {
+                Set-ItemProperty -Path $LsaPath -Name "LmCompatibilityLevel" -Value $RestoredLm -Type DWord -Force -ErrorAction Stop
+                Write-Log "Restored LmCompatibilityLevel to $RestoredLm." "SUCCESS"
+            }
+        } else {
+            Write-Log "Original LmCompatibilityLevel was not set. Removing property under $LsaPath if present..." "INFO"
+            if ($PSCmdlet.ShouldProcess($LsaPath, "Remove LmCompatibilityLevel property")) {
+                Remove-ItemProperty -Path $LsaPath -Name "LmCompatibilityLevel" -ErrorAction SilentlyContinue
+                Write-Log "Removed LmCompatibilityLevel property." "SUCCESS"
+            }
+        }
+
+        # Restore AuditReceiptEvents
+        $RestoredAudit = $BackupContent.AuditReceiptEvents
+        if ($null -ne $RestoredAudit) {
+            if (-not (Test-Path -Path $MsvPath)) {
+                if ($PSCmdlet.ShouldProcess($MsvPath, "Create Registry Key")) {
+                    New-Item -Path $MsvPath -Force | Out-Null
+                }
+            }
+            Write-Log "Restoring AuditReceiptEvents to $RestoredAudit under $MsvPath..." "INFO"
+            if ($PSCmdlet.ShouldProcess($MsvPath, "Restore AuditReceiptEvents = $RestoredAudit")) {
+                Set-ItemProperty -Path $MsvPath -Name "AuditReceiptEvents" -Value $RestoredAudit -Type DWord -Force -ErrorAction Stop
+                Write-Log "Restored AuditReceiptEvents to $RestoredAudit." "SUCCESS"
+            }
+        } else {
+            if (Test-Path -Path $MsvPath) {
+                Write-Log "Original AuditReceiptEvents was not set. Removing property under $MsvPath if present..." "INFO"
+                if ($PSCmdlet.ShouldProcess($MsvPath, "Remove AuditReceiptEvents property")) {
+                    Remove-ItemProperty -Path $MsvPath -Name "AuditReceiptEvents" -ErrorAction SilentlyContinue
+                    Write-Log "Removed AuditReceiptEvents property." "SUCCESS"
+                }
+            }
+        }
+
+        # Query post-restore verification
+        $FinalLm = (Get-ItemProperty -Path $LsaPath -Name "LmCompatibilityLevel" -ErrorAction SilentlyContinue).LmCompatibilityLevel
+        $FinalLmStr = if ($null -ne $FinalLm) { $FinalLm } else { "Not Set" }
+        $FinalAudit = if (Test-Path -Path $MsvPath) {
+            (Get-ItemProperty -Path $MsvPath -Name "AuditReceiptEvents" -ErrorAction SilentlyContinue).AuditReceiptEvents
+        } else {
+            $null
+        }
+        $FinalAuditStr = if ($null -ne $FinalAudit) { $FinalAudit } else { "Not Set" }
+
+        Write-Log "RESTORED STATE -> LmCompatibilityLevel: $FinalLmStr | AuditReceiptEvents: $FinalAuditStr" "SUCCESS"
+
+        [PSCustomObject]@{
+            ComputerName         = $env:COMPUTERNAME
+            PriorLmLevel         = $PriorLmStr
+            AppliedLmLevel       = $FinalLmStr
+            PriorAuditEvents     = $PriorAuditStr
+            AppliedAuditEvents   = $FinalAuditStr
+            EventLogEnabled      = "Restored"
+            Status               = "RESTORED"
             Timestamp            = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
             OutputDir            = $LogDir
             LogPath              = $LogPath
