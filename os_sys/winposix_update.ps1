@@ -70,7 +70,7 @@
     .\winposix_update.ps1 --install-cygwin --path "D:\mycygwin" --CygwinCache "D:\CygwinPackages"
 
 .NOTES
-    Version: 1.1.0
+    Version: 1.1.2
     Date:    2026-07-24
 #>
 
@@ -116,6 +116,10 @@ param(
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSReviewUnusedParameter", "")]
     [string]$CygwinCache,
 
+    [Parameter(Mandatory = $false)]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSReviewUnusedParameter", "")]
+    [string]$CurlBin,
+
     # Capture any unbound arguments (like --update-cygwin) to support standard Linux-style flags.
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$RemainingArgs
@@ -126,14 +130,6 @@ Set-StrictMode -Version Latest
 
 # Suppress progress bars for Invoke-WebRequest/RestMethod to ensure headless execution.
 $ProgressPreference = 'SilentlyContinue'
-
-# Ensure modern SSL/TLS security protocols (TLS 1.2+) are enabled for WebRequests in Windows PowerShell.
-try {
-    # Bitwise OR with Tls12 (3072) and Tls13 (12288)
-    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12 -bor 12288
-} catch {
-    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
-}
 
 
 # MANUAL ARGUMENT MAPPING:
@@ -159,6 +155,14 @@ if ($null -ne $RemainingArgs -and $RemainingArgs.Count -gt 0) {
     for ($i = 0; $i -lt ($RemainingArgs.Count - 1); $i++) {
         if ($RemainingArgs[$i] -in @("--cygwincache", "--cygwin-cache", "--CygwinCache")) {
             $CygwinCache = $RemainingArgs[$i + 1]
+            break
+        }
+    }
+
+    # CurlBin mapping: captures the value after --curl-bin or --curlbin if present.
+    for ($i = 0; $i -lt ($RemainingArgs.Count - 1); $i++) {
+        if ($RemainingArgs[$i] -in @("--curlbin", "--curl-bin", "--CurlBin")) {
+            $CurlBin = $RemainingArgs[$i + 1]
             break
         }
     }
@@ -692,6 +696,11 @@ if ($CygwinMirror -and -not $CygwinMirror.StartsWith("https://", [System.StringC
     exit 4
 }
 
+if ($CurlBin -and -not (Test-Path $CurlBin)) {
+    Write-ScriptError -Message "The specified --curl-bin path does not exist: $CurlBin"
+    exit 4
+}
+
 if ($Path -and -not $InstallCygwin -and -not $InstallMsys -and -not $CygwinCache) {
     Write-ScriptError -Message "The --path parameter is restricted to installation mode (--install-cygwin or --install-msys) or --CygwinCache configuration."
     exit 4
@@ -895,19 +904,23 @@ function Update-Cygwin {
             $localPkgDir = Get-CygwinPackageDir -RootPath $rootPath
         }
 
+        # BOOTSTRAPPER / SELF-UPDATE:
+        # Ensures the setup utility is the latest version before proceeding.
+        $setupFileName = "setup-x86_64.exe"
+        $setupDomain   = "cygwin.com"
+        $httpsSetupUrl = "https://$setupDomain/$setupFileName"
+        $httpSetupUrl  = "http://$setupDomain/$setupFileName"
+
         # Locate the setup utility locally or in the system path.
-        $setupExe = Join-Path -Path $rootPath -ChildPath "setup-x86_64.exe"
+        $setupExe = Join-Path -Path $rootPath -ChildPath $setupFileName
         if (-not (Test-Path -Path $setupExe)) {
-            $setupExe = Get-Command -Name "setup-x86_64.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+            $setupExe = Get-Command -Name $setupFileName -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
         }
 
         if (-not $setupExe) {
-            $setupExe = Join-Path -Path $rootPath -ChildPath "setup-x86_64.exe"
+            $setupExe = Join-Path -Path $rootPath -ChildPath $setupFileName
         }
 
-        # BOOTSTRAPPER / SELF-UPDATE:
-        # Ensures the setup utility is the latest version before proceeding.
-        $setupUrl = "https://cygwin.com/setup-x86_64.exe"
         $needsUpdate = $true
 
         # Pre-flight: Ensure the directory for the setup utility exists.
@@ -919,7 +932,10 @@ function Update-Cygwin {
         if (Test-Path -Path $setupExe) {
             try {
                 $headers = @{ "User-Agent" = "WinPOSIX-Updater/1.0" }
-                $lastModified = (Invoke-WebRequest -Uri $setupUrl -Method Head -Headers $headers -UseBasicParsing -ErrorAction SilentlyContinue).Headers."Last-Modified"
+                $lastModified = (Invoke-WebRequest -Uri $httpsSetupUrl -Method Head -Headers $headers -UseBasicParsing -ErrorAction SilentlyContinue).Headers."Last-Modified"
+                if (-not $lastModified) {
+                    $lastModified = (Invoke-WebRequest -Uri $httpSetupUrl -Method Head -Headers $headers -UseBasicParsing -ErrorAction SilentlyContinue).Headers."Last-Modified"
+                }
                 if ($lastModified) {
                     $remoteTime = [DateTime]::Parse($lastModified)
                     $localTime = (Get-Item $setupExe).LastWriteTime
@@ -936,24 +952,42 @@ function Update-Cygwin {
         }
 
         if ($needsUpdate) {
-            try {
-                if ($PSCmdlet.ShouldProcess($setupUrl, "Download latest setup-x86_64.exe")) {
-                    Write-LogMessage -Message "Bootstrapping latest Cygwin setup from $setupUrl..." -Color Cyan -Level "INFO"
-                    Invoke-DownloadFileWithRetry -Uri $setupUrl -OutFile $setupExe
+            if ($PSCmdlet.ShouldProcess($httpsSetupUrl, "Download latest $setupFileName")) {
+                Write-LogMessage -Message "Bootstrapping latest Cygwin setup from $httpsSetupUrl..." -Color Cyan -Level "INFO"
+                try {
+                    Invoke-DownloadFileWithRetry -Uri $httpsSetupUrl -OutFile $setupExe
                 }
-            }
-            catch {
-                Write-LogMessage -Message "Manual bootstrap failed: $_. Proceeding with existing utility if available." -Color Yellow -Level "WARN"
+                catch {
+                    $bootstrapErr = $_
+                    $effectiveCurlBin = if ($CurlBin) { $CurlBin } elseif ($env:CURL_BIN) { $env:CURL_BIN } else { $null }
+
+                    if ($effectiveCurlBin -and (Test-Path $effectiveCurlBin)) {
+                        Write-LogMessage -Message "TLS bootstrap failed ($bootstrapErr). Attempting fallback using specified curl binary ($effectiveCurlBin)..." -Color Cyan -Level "INFO"
+                        try {
+                            $null = & $effectiveCurlBin -s -L $httpsSetupUrl -o $setupExe
+                            if ($LASTEXITCODE -eq 0 -and (Test-Path $setupExe) -and (Get-Item $setupExe).Length -gt 0) {
+                                Write-LogMessage -Message "Custom curl bootstrap completed successfully." -Color Green -Level "INFO"
+                            } else {
+                                throw "Curl process returned exit code $LASTEXITCODE or created an invalid binary."
+                            }
+                        }
+                        catch {
+                            Write-LogMessage -Message "Custom curl bootstrap failed: $_. Skipping setup utility upgrade." -Color Yellow -Level "WARN"
+                        }
+                    } else {
+                        Write-LogMessage -Message "TLS bootstrap failed ($bootstrapErr). No valid --curl-bin specified; skipping setup upgrade and proceeding with existing utility." -Color Gray -Level "INFO"
+                    }
+                }
             }
         }
 
         if (-not (Test-Path -Path $setupExe)) {
-            Write-LogMessage -Message "Cygwin setup-x86_64.exe not found and bootstrap failed." -Color Red -Level "ERR"
+            Write-LogMessage -Message "Cygwin $setupFileName not found and bootstrap failed." -Color Red -Level "ERR"
             if ($script:exitCode -eq 0) { $script:exitCode = 6 }
             return
         }
 
-        if ($PSCmdlet.ShouldProcess($rootPath, "Update packages via setup-x86_64.exe (Headless)")) {
+        if ($PSCmdlet.ShouldProcess($rootPath, "Update packages via $setupFileName (Headless)")) {
             Write-LogMessage -Message "Executing Cygwin setup (Mirror: $Mirror)..." -Color Yellow -Level "LOG"
 
             # Headless Configuration:
@@ -1212,7 +1246,7 @@ if ($ShowHelp -or (-not $UpdateAll -and -not $UpdateCygwin -and -not $UpdateMsys
     if ($Json) {
         $helpObj = [Ordered]@{
             utility = "WinPOSIX Auto-Updater/Installer"
-            version = "1.1.0"
+            version = "1.1.2"
             date = "2026-07-24"
             usage = ".\winposix_update.ps1 [flags]"
             flags = @(
@@ -1223,6 +1257,7 @@ if ($ShowHelp -or (-not $UpdateAll -and -not $UpdateCygwin -and -not $UpdateMsys
                 @{ flag = "--install-msys"; description = "Install fresh MSYS2 (Error if already present)" }
                 @{ flag = "--path <dir>"; description = "Explicit target directory for installation" }
                 @{ flag = "--CygwinCache <dir>"; description = "Set local Cygwin package cache path permanently" }
+                @{ flag = "--curl-bin <path>"; description = "Path to custom curl binary for TLS fallback" }
                 @{ flag = "--info"; description = "Inspect existing installations and environment" }
                 @{ flag = "--LogPath"; description = "Path to a log file" }
                 @{ flag = "--CygwinMirror"; description = "URL for Cygwin mirror" }
@@ -1234,7 +1269,7 @@ if ($ShowHelp -or (-not $UpdateAll -and -not $UpdateCygwin -and -not $UpdateMsys
         exit 0
     }
 
-    Write-LogMessage -Message "WinPOSIX Auto-Updater/Installer v1.1.0 (2026-07-24) Help Output" -Color Cyan
+    Write-LogMessage -Message "WinPOSIX Auto-Updater/Installer v1.1.2 (2026-07-24) Help Output" -Color Cyan
     Write-Output "Usage: .\winposix_update.ps1 [flags]"
     Write-Output ""
     Write-Output "Maintenance Flags:"
@@ -1247,6 +1282,7 @@ if ($ShowHelp -or (-not $UpdateAll -and -not $UpdateCygwin -and -not $UpdateMsys
     Write-Output "  --install-msys    Install fresh MSYS2 (Error if already present)"
     Write-Output "  --path <dir>      Explicit target directory for installation"
     Write-Output "  --CygwinCache <dir> Set local Cygwin package cache path permanently"
+    Write-Output "  --curl-bin <path> Explicit path to curl binary for TLS fallback"
     Write-Output ""
     Write-Output "General Flags:"
     Write-Output "  --info            Inspect existing installations and environment"

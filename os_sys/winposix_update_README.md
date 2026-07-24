@@ -1,6 +1,6 @@
 # WinPOSIX Update Technical Specification & Orchestration Guide
 
-**Version**: `1.1.0` | **Date**: `2026-07-24`
+**Version**: `1.1.2` | **Date**: `2026-07-24`
 
 ## 1. Application Overview and Objectives
 
@@ -93,6 +93,7 @@ WinPOSIX Update requires the following components to be present on the host:
 | `--install-msys` | `switch` | `$false` | Installs a fresh MSYS2 environment (Errors if already present). |
 | `--path`         | `string` | `$null`  | Explicit target directory for installation. |
 | `--CygwinCache`  | `string` | `$null`  | Sets local Cygwin package cache path permanently (creates configuration even before Cygwin installation). |
+| `--curl-bin`     | `string` | `$null`  | Explicit path to custom curl executable for TLS fallback in corporate networks. |
 | `--info`         | `switch` | `$false` | Inspects and displays details about existing installations. |
 | `--LogPath`      | `string` | `$null`  | Destination path for the session log file. |
 | `--CygwinMirror` | `string` | `https://mirrors.kernel.org/sourceware/cygwin/` | URL of the mirror to be used for Cygwin package downloads. Must use HTTPS. |
@@ -106,6 +107,7 @@ The script resolves installation directories by checking environment variables, 
 | :--- | :--- | :--- |
 | `CYGWIN_HOME` | `C:\admin\cygwin`, `C:\cygwin64` | Root directory of the Cygwin installation. |
 | `MSYS_HOME`<br>`MSYS2_HOME` | `C:\admin\msys2`, `C:\msys64`  | Root directory of the MSYS2 installation. |
+| `CURL_BIN`    | `$null`                          | Path to custom curl binary for corporate network TLS fallback. |
 
 ---
 
@@ -184,11 +186,12 @@ Install a fresh Cygwin environment to a custom root path using a custom package 
 > **No active POSIX environments should be running during updates.**
 > To prevent file-locking conflicts, installation corruption, or DLL collisions, the script checks for running processes under the target Cygwin and MSYS2 directories before performing any update or install operations. If blocking processes are detected, the script lists their names and PIDs (truncated to the first 5 processes) and aborts execution with an error.
 
-### **TLS 1.2+ & Network Resilience**
-To ensure reliable HTTPS connections on older Windows Server releases (e.g. Windows Server 2012–2022 using PowerShell 5.1):
-- **TLS 1.2/1.3 Protocol Initialization**: Automatically configures `.NET`'s `[ServicePointManager]::SecurityProtocol` for TLS 1.2+ at session start.
-- **Mandatory HTTPS Mirrors**: All `--CygwinMirror` URLs must begin with `https://`. Non-HTTPS mirror URLs are rejected during validation.
-- **Download Retries & User-Agent Headers**: Web requests to `cygwin.com` and `api.github.com` include standard `User-Agent` headers and execute up to 3 automatic retries with 2-second delays to withstand transient network blips.
+### **Network Resilience & Corporate Bootstrapping Fallback**
+To ensure reliable operation in corporate networks or environments where server-initiated TLS renegotiation or middlebox policies disrupt Windows Schannel:
+- **Primary TLS Attempt**: Attempts standard `https://cygwin.com/setup-x86_64.exe` via PowerShell `Invoke-WebRequest`.
+- **Explicit `--curl-bin` Fallback**: If standard TLS WebRequest fails, inspects for an explicitly configured `--curl-bin <path>` parameter or `$env:CURL_BIN` variable to download `setup-x86_64.exe` using an OpenSSL-backed `curl` executable.
+- **Graceful Skip**: If TLS WebRequest fails and no valid `--curl-bin` path is provided, the script gracefully logs an informational note, skips upgrading `setup-x86_64.exe`, and proceeds with package updates using the existing local setup utility.
+- **Download Retries & User-Agent Headers**: Web requests to `cygwin.com` and `api.github.com` include standard `User-Agent` headers (`WinPOSIX-Updater/1.0`) and execute up to 3 automatic retries with 2-second delays.
 
 ### **Automatic Environment Variable Population**
 To ensure consistent environment discovery across the system, WinPOSIX Update manages **Machine-level** environment variables:
