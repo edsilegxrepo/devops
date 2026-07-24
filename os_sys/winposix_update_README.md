@@ -94,6 +94,7 @@ WinPOSIX Update requires the following components to be present on the host:
 | `--path`         | `string` | `$null`  | Explicit target directory for installation. |
 | `--CygwinCache`  | `string` | `$null`  | Sets local Cygwin package cache path permanently (creates configuration even before Cygwin installation). |
 | `--curl-bin`     | `string` | `$null`  | Explicit path to custom curl executable for TLS fallback in corporate networks. |
+| `--bootstrap`    | `string` | `$null`  | Explicit URL or internal proxy to download setup-x86_64.exe bootstrapper. |
 | `--info`         | `switch` | `$false` | Inspects and displays details about existing installations. |
 | `--LogPath`      | `string` | `$null`  | Destination path for the session log file. |
 | `--CygwinMirror` | `string` | `https://mirrors.kernel.org/sourceware/cygwin/` | URL of the mirror to be used for Cygwin package downloads. Must use HTTPS. |
@@ -108,6 +109,7 @@ The script resolves installation directories by checking environment variables, 
 | `CYGWIN_HOME` | `C:\admin\cygwin`, `C:\cygwin64` | Root directory of the Cygwin installation. |
 | `MSYS_HOME`<br>`MSYS2_HOME` | `C:\admin\msys2`, `C:\msys64`  | Root directory of the MSYS2 installation. |
 | `CURL_BIN`    | `$null`                          | Path to custom curl binary for corporate network TLS fallback. |
+| `BOOTSTRAP_URL`| `$null`                          | Custom URL/proxy to download setup-x86_64.exe bootstrapper. |
 
 ---
 
@@ -173,6 +175,18 @@ Install a fresh Cygwin environment to a custom root path using a custom package 
 .\os_sys\winposix_update.ps1 --install-cygwin --path "D:\mycygwin" --CygwinCache "D:\CygwinPackages"
 ```
 
+### **Scenario K: Corporate Network Maintenance with OpenSSL Curl Fallback**
+Perform Cygwin update in a corporate network where Schannel is restricted, using an explicit OpenSSL-backed `curl` binary:
+```powershell
+.\os_sys\winposix_update.ps1 --update-cygwin --curl-bin "D:\admin\net\curl.exe"
+```
+
+### **Scenario L: Internal Corporate Proxy Bootstrapper & Package Mirror**
+Perform a completely internal update by specifying an internal corporate proxy/mirror for both the installer binary and packages:
+```powershell
+.\os_sys\winposix_update.ps1 --update-cygwin --bootstrap "https://artifactory.corp.domain/cygwin/setup-x86_64.exe" --CygwinMirror "https://artifactory.corp.domain/cygwin/packages/"
+```
+
 ---
 
 ## 7. Important Technical Notes
@@ -188,7 +202,8 @@ Install a fresh Cygwin environment to a custom root path using a custom package 
 
 ### **Network Resilience & Corporate Bootstrapping Fallback**
 To ensure reliable operation in corporate networks or environments where server-initiated TLS renegotiation or middlebox policies disrupt Windows Schannel:
-- **Primary TLS Attempt**: Attempts standard `https://cygwin.com/setup-x86_64.exe` via PowerShell `Invoke-WebRequest`.
+- **Primary TLS Attempt**: Attempts standard `https://cygwin.com/setup-x86_64.exe` (or custom `--bootstrap <url>`) via PowerShell `Invoke-WebRequest`.
+- **Internal Proxy Support**: Supports `--bootstrap <url>` (or `$env:BOOTSTRAP_URL`) to redirect bootstrapper downloads directly to an internal corporate mirror or artifact repository.
 - **Explicit `--curl-bin` Fallback**: If standard TLS WebRequest fails, inspects for an explicitly configured `--curl-bin <path>` parameter or `$env:CURL_BIN` variable to download `setup-x86_64.exe` using an OpenSSL-backed `curl` executable.
 - **Graceful Skip**: If TLS WebRequest fails and no valid `--curl-bin` path is provided, the script gracefully logs an informational note, skips upgrading `setup-x86_64.exe`, and proceeds with package updates using the existing local setup utility.
 - **Download Retries & User-Agent Headers**: Web requests to `cygwin.com` and `api.github.com` include standard `User-Agent` headers (`WinPOSIX-Updater/1.0`) and execute up to 3 automatic retries with 2-second delays.

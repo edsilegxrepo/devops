@@ -120,6 +120,10 @@ param(
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSReviewUnusedParameter", "")]
     [string]$CurlBin,
 
+    [Parameter(Mandatory = $false)]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSReviewUnusedParameter", "")]
+    [string]$BootstrapUrl,
+
     # Capture any unbound arguments (like --update-cygwin) to support standard Linux-style flags.
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$RemainingArgs
@@ -163,6 +167,14 @@ if ($null -ne $RemainingArgs -and $RemainingArgs.Count -gt 0) {
     for ($i = 0; $i -lt ($RemainingArgs.Count - 1); $i++) {
         if ($RemainingArgs[$i] -in @("--curlbin", "--curl-bin", "--CurlBin")) {
             $CurlBin = $RemainingArgs[$i + 1]
+            break
+        }
+    }
+
+    # BootstrapUrl mapping: captures the value after --bootstrap or --bootstrap-url if present.
+    for ($i = 0; $i -lt ($RemainingArgs.Count - 1); $i++) {
+        if ($RemainingArgs[$i] -in @("--bootstrap", "--bootstrap-url", "--BootstrapUrl")) {
+            $BootstrapUrl = $RemainingArgs[$i + 1]
             break
         }
     }
@@ -908,8 +920,8 @@ function Update-Cygwin {
         # Ensures the setup utility is the latest version before proceeding.
         $setupFileName = "setup-x86_64.exe"
         $setupDomain   = "cygwin.com"
-        $httpsSetupUrl = "https://$setupDomain/$setupFileName"
-        $httpSetupUrl  = "http://$setupDomain/$setupFileName"
+        $effectiveBootstrap = if ($BootstrapUrl) { $BootstrapUrl } elseif ($env:BOOTSTRAP_URL) { $env:BOOTSTRAP_URL } else { "https://$setupDomain/$setupFileName" }
+        $httpsSetupUrl = $effectiveBootstrap
 
         # Locate the setup utility locally or in the system path.
         $setupExe = Join-Path -Path $rootPath -ChildPath $setupFileName
@@ -932,10 +944,36 @@ function Update-Cygwin {
         if (Test-Path -Path $setupExe) {
             try {
                 $headers = @{ "User-Agent" = "WinPOSIX-Updater/1.0" }
-                $lastModified = (Invoke-WebRequest -Uri $httpsSetupUrl -Method Head -Headers $headers -UseBasicParsing -ErrorAction SilentlyContinue).Headers."Last-Modified"
+                $lastModified = $null
+
+                # Step 1: WebRequest HEAD over HTTPS
+                try {
+                    $resp = Invoke-WebRequest -Uri $httpsSetupUrl -Method Head -Headers $headers -UseBasicParsing -ErrorAction Stop
+                    $lastModified = $resp.Headers."Last-Modified"
+                } catch {}
+
+                # Step 2: Curl HEAD sweep (checking explicit --curl-bin first, then any available curl in PATH/POSIX)
                 if (-not $lastModified) {
-                    $lastModified = (Invoke-WebRequest -Uri $httpSetupUrl -Method Head -Headers $headers -UseBasicParsing -ErrorAction SilentlyContinue).Headers."Last-Modified"
+                    $curlCandidates = @()
+                    if ($CurlBin) { $curlCandidates += $CurlBin }
+                    if ($env:CURL_BIN) { $curlCandidates += $env:CURL_BIN }
+                    $pathCurls = Get-Command curl -All -ErrorAction SilentlyContinue | Where-Object { $_.CommandType -eq "Application" } | Select-Object -ExpandProperty Path
+                    if ($pathCurls) { $curlCandidates += $pathCurls }
+
+                    foreach ($cBin in ($curlCandidates | Select-Object -Unique)) {
+                        if ($cBin -and (Test-Path $cBin)) {
+                            try {
+                                $curlHeaders = & $cBin -sI -L $httpsSetupUrl 2>&1
+                                $lmLine = $curlHeaders | Where-Object { $_ -match "(?i)^Last-Modified:\s*(.+)$" } | Select-Object -First 1
+                                if ($lmLine -match "(?i)^Last-Modified:\s*(.+)$") {
+                                    $lastModified = $Matches[1].Trim()
+                                    break
+                                }
+                            } catch {}
+                        }
+                    }
                 }
+
                 if ($lastModified) {
                     $remoteTime = [DateTime]::Parse($lastModified)
                     $localTime = (Get-Item $setupExe).LastWriteTime
@@ -946,7 +984,6 @@ function Update-Cygwin {
                 }
             }
             catch {
-                # Fallback to update if check fails, but don't block.
                 Write-Verbose "Could not verify remote setup version: $_"
             }
         }
@@ -1258,6 +1295,7 @@ if ($ShowHelp -or (-not $UpdateAll -and -not $UpdateCygwin -and -not $UpdateMsys
                 @{ flag = "--path <dir>"; description = "Explicit target directory for installation" }
                 @{ flag = "--CygwinCache <dir>"; description = "Set local Cygwin package cache path permanently" }
                 @{ flag = "--curl-bin <path>"; description = "Path to custom curl binary for TLS fallback" }
+                @{ flag = "--bootstrap <url>"; description = "Custom URL/proxy to fetch setup-x86_64.exe" }
                 @{ flag = "--info"; description = "Inspect existing installations and environment" }
                 @{ flag = "--LogPath"; description = "Path to a log file" }
                 @{ flag = "--CygwinMirror"; description = "URL for Cygwin mirror" }
@@ -1283,6 +1321,7 @@ if ($ShowHelp -or (-not $UpdateAll -and -not $UpdateCygwin -and -not $UpdateMsys
     Write-Output "  --path <dir>      Explicit target directory for installation"
     Write-Output "  --CygwinCache <dir> Set local Cygwin package cache path permanently"
     Write-Output "  --curl-bin <path> Explicit path to curl binary for TLS fallback"
+    Write-Output "  --bootstrap <url> Explicit URL/proxy to download setup-x86_64.exe"
     Write-Output ""
     Write-Output "General Flags:"
     Write-Output "  --info            Inspect existing installations and environment"
