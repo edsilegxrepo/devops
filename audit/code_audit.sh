@@ -1,7 +1,7 @@
 #!/bin/bash
 # -----------------------------------------------------------------------------
 # Code Audit Pipeline (code_audit.sh)
-# v1.1.5xg  2026/07/18  XDG
+# v1.1.6xg  2026/07/31  XDG
 #
 # -----------------------------------------------------------------------------
 # OBJECTIVE:
@@ -109,7 +109,7 @@ setup_environment() {
   # These variables eliminate hardcoding within the audit execution phases.
 
   # 1. COMMON CONFIGURATION
-  CONF_SEARCH_DEPTH=3     # Max depth for heuristic language detection.
+  CONF_SEARCH_DEPTH=5     # Max depth for heuristic language detection.
   CONF_GENERAL_TARGET="." # Target pattern for workspace-wide tools.
   CURL_OPTS=(-sSfL)       # Silent, fail-on-error, follow-redirects logic.
   CONF_BIN_DIR="${CONF_SCRIPT_ROOT}/bin"
@@ -686,7 +686,7 @@ resolve_context() {
     [ -n "$(find . -maxdepth "${CONF_SEARCH_DEPTH:-3}" -name "*.go" 2> /dev/null | head -n 1)" ] && PROCESS_GOLANG=true || PROCESS_GOLANG=false
 
     # Node.js: Look for package.json or common JS/TS extensions.
-    [ -n "$(find . -maxdepth "${CONF_SEARCH_DEPTH:-3}" \( -name "package.json" -o -name "*.js" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" \) 2> /dev/null | head -n 1)" ] && PROCESS_NODEJS=true || PROCESS_NODEJS=false
+    [ -n "$(find . -maxdepth "${CONF_SEARCH_DEPTH:-3}" \( -name "package.json" -o -name "*.js" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" -o -name "*.mjs" -o -name "*.mts" -o -name "*.cjs" -o -name "*.cts" -o -name "*.vue" -o -name "*.svelte" -o -name "*.astro" \) 2> /dev/null | head -n 1)" ] && PROCESS_NODEJS=true || PROCESS_NODEJS=false
 
     # Bash: Look for .sh files.
     [ -n "$(find . -maxdepth "${CONF_SEARCH_DEPTH:-3}" -name "*.sh" 2> /dev/null | head -n 1)" ] && PROCESS_BASH=true || PROCESS_BASH=false

@@ -1,7 +1,7 @@
 #!/bin/bash
 # -----------------------------------------------------------------------------
 #  e:/data/devel/build/code/private/devops/build_tasks/chromium_upgrade.sh
-#  v1.0.0  2026/07/30  XDG / MIS Center
+#  v1.0.1  2026/08/05  XDG / MIS Center
 # -----------------------------------------------------------------------------
 #  Purpose:
 #    Automates downloading, repackaging, and deploying Chromium browser builds
@@ -284,7 +284,7 @@ function show_help() {
   echo "  --from-url <url>         Source release page or direct download URL."
   echo "  --release-path <path>    Reference archive path to evaluate current release version."
   echo "  --archive-path <path>    Target destination directory for generated packaged archive."
-  echo "  --from-folder <folder>   Source folder containing packaged archive to deploy."
+  echo "  --from-folder <folder>   Source folder (auto-detects latest archive) or exact archive file path."
   echo "  --to-folder <folder>     Destination directory for extraction and deployment."
   echo "  --with-7z <path>         Path to 7z executable or directory (Windows)."
   echo "  --force                  Force packaging or deployment even if up to date."
@@ -548,7 +548,7 @@ function cleanup_workspace() {
   fi
 }
 
-trap cleanup_workspace EXIT ERR
+trap cleanup_workspace EXIT INT TERM
 
 function create_temp_workspace() {
   local base_tmp="${TMPDIR:-${TMP:-${TEMP:-/tmp}}}"
@@ -633,7 +633,7 @@ function resolve_reference_version() {
   base_name=$(basename "${target_file}")
 
   local ver
-  ver=$(extract_version_from_string "$(echo "${listing}" | grep -i "chromium-" | grep -v -F "${base_name}")")
+  ver=$(extract_version_from_string "$(echo "${listing}" | grep -i "chromium-" | grep -v -F "${base_name}" || true)")
   [ -n "${ver}" ] && echo "${ver}" && return 0
 
   ver=$(extract_version_from_string "${base_name}")
@@ -729,23 +729,24 @@ function prune_locales() {
   local target_dir="$1"
   log_info "Pruning non-English locales in: $(format_path "${target_dir}")"
 
-  local locales_dir
-  locales_dir=$(find "${target_dir}" -type d \( -iname "locales" -o -iname "Locales" \) | head -n 1 || true)
+  local found_any="false"
+  while IFS= read -r locales_dir; do
+    [ -z "${locales_dir}" ] || [ ! -d "${locales_dir}" ] && continue
+    found_any="true"
+    log_info "Target locales directory: $(format_path "${locales_dir}")"
+    local count_before
+    count_before=$(find "${locales_dir}" -maxdepth 1 -type f | wc -l || echo 0)
 
-  if [ -z "${locales_dir}" ] || [ ! -d "${locales_dir}" ]; then
-    log_warn "Locales directory not found under $(format_path "${target_dir}"). Skipping locale pruning."
-    return 0
+    find "${locales_dir}" -maxdepth 1 -type f ! -iname "en-US*" -delete
+
+    local count_after
+    count_after=$(find "${locales_dir}" -maxdepth 1 -type f | wc -l || echo 0)
+    log_info "Locale pruning complete for $(format_path "${locales_dir}"): files reduced from ${count_before} to ${count_after} (retained en-US*)."
+  done < <(find "${target_dir}" -type d \( -iname "locales" -o -iname "Locales" \) || true)
+
+  if [ "${found_any}" = "false" ]; then
+    log_warn "No locales directory found under $(format_path "${target_dir}"). Skipping locale pruning."
   fi
-
-  log_info "Target locales directory: $(format_path "${locales_dir}")"
-  local count_before
-  count_before=$(find "${locales_dir}" -maxdepth 1 -type f | wc -l || echo 0)
-
-  find "${locales_dir}" -maxdepth 1 -type f ! -iname "en-US*" -delete
-
-  local count_after
-  count_after=$(find "${locales_dir}" -maxdepth 1 -type f | wc -l || echo 0)
-  log_info "Locale pruning complete. Files reduced from ${count_before} to ${count_after} (retained en-US*)."
 }
 
 # -----------------------------------------------------------------------------
@@ -839,10 +840,50 @@ function extract_package_archive() {
       fi
     fi
   elif [[ "${posix_archive}" == *.tar.xz ]] || [[ "${posix_archive}" == *.tar.gz ]]; then
-    log_info "Extracting archive using tar..."
-    if ! tar -xf "${posix_archive}" -C "${posix_target}"; then
-      log_error "Extraction of tar archive failed."
-      exit 5
+    if [ "${IS_WINDOWS}" = "true" ] || [ -n "${RESOLVED_7Z_BIN:-}" ] || command -v 7z &> /dev/null; then
+      log_info "Extracting tar archive using 7z..."
+      local extract_ok="false"
+      if [ "${IS_WINDOWS}" = "true" ] || [ -n "${RESOLVED_7Z_BIN:-}" ]; then
+        if exec_7z x -y "-o${posix_target}" "${posix_archive}" > /dev/null; then
+          extract_ok="true"
+        fi
+      else
+        if 7z x -y "-o${posix_target}" "${posix_archive}" > /dev/null; then
+          extract_ok="true"
+        fi
+      fi
+
+      if [ "${extract_ok}" = "true" ]; then
+        local expected_tar
+        expected_tar="${posix_target}/$(basename "${posix_archive%.*}")"
+        local intermediate_tar=""
+        if [ -f "${expected_tar}" ]; then
+          intermediate_tar="${expected_tar}"
+        else
+          intermediate_tar=$(find "${posix_target}" -maxdepth 1 -type f -name "*.tar" | head -n 1 || true)
+        fi
+
+        if [ -n "${intermediate_tar}" ] && [ -f "${intermediate_tar}" ]; then
+          if [ "${IS_WINDOWS}" = "true" ] || [ -n "${RESOLVED_7Z_BIN:-}" ]; then
+            exec_7z x -y "-o${posix_target}" "${intermediate_tar}" > /dev/null
+          else
+            7z x -y "-o${posix_target}" "${intermediate_tar}" > /dev/null
+          fi
+          rm -f "${intermediate_tar}"
+        fi
+      else
+        log_warn "7z extraction failed, falling back to tar..."
+        if ! tar -xf "${posix_archive}" -C "${posix_target}"; then
+          log_error "Extraction of tar archive failed."
+          exit 5
+        fi
+      fi
+    else
+      log_info "Extracting archive using tar..."
+      if ! tar -xf "${posix_archive}" -C "${posix_target}"; then
+        log_error "Extraction of tar archive failed."
+        exit 5
+      fi
     fi
   else
     # Fallback extraction attempt
@@ -980,11 +1021,7 @@ function do_package_linux() {
   fi
 
   log_info "Extracting archive..."
-  mkdir -p "${posix_ws}/extracted"
-  if ! tar -xf "${posix_ws}/chromium.tar.xz" -C "${posix_ws}/extracted"; then
-    log_error "Extraction of tar.xz archive failed."
-    exit 5
-  fi
+  extract_package_archive "${posix_ws}/chromium.tar.xz" "${posix_ws}/extracted"
 
   normalize_extracted_layout "${posix_ws}"
   prune_locales "${posix_ws}/chromium"
@@ -1048,7 +1085,7 @@ function do_deploy() {
       if [ "${PLATFORM}" = "windows" ]; then
         archive_file=$(find "${posix_src}" -maxdepth 1 -type f \( -name "chromium-*-x64.7z" -o -name "chromium-*-w64.zip" \) | sort -V | tail -n 1 || true)
       else
-        archive_file=$(find "${posix_src}" -maxdepth 1 -type f \( -name "chromium-*-x86_64_linux.tar.xz" -o -name "chromium-*-lnx.zip" \) | sort -V | tail -n 1 || true)
+        archive_file=$(find "${posix_src}" -maxdepth 1 -type f \( -name "chromium-*-ungoogled-x86_64_linux.tar.xz" -o -name "chromium-*-x86_64_linux.tar.xz" -o -name "chromium-*-lnx.zip" \) | sort -V | tail -n 1 || true)
       fi
 
       if [ -z "${archive_file}" ]; then
@@ -1143,7 +1180,8 @@ function display_deployed_version() {
     if [ -n "${exe_path}" ]; then
       local win_exe
       win_exe=$(format_path "${exe_path}")
-      version_str=$(powershell.exe -NoProfile -Command "(Get-Item -LiteralPath '${win_exe}').VersionInfo.ProductVersion" 2> /dev/null | tr -d '\r' || true)
+      local ps_win_exe="${win_exe//\'/\'\'}"
+      version_str=$(powershell.exe -NoProfile -Command "(Get-Item -LiteralPath '${ps_win_exe}').VersionInfo.ProductVersion" 2> /dev/null | tr -d '\r' || true)
     fi
   else
     local bin_path

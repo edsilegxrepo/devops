@@ -31,9 +31,9 @@ This document provides architectural specifications, design workflows, and execu
 
 ### 1.2 Deployment Pipeline (`--action deploy`)
 * Target installation directory specified via `--to-folder <folder>`.
-* **Sub-mode 2.1 (From Folder)**: Accepts `--from-folder <folder>` (folder containing packaged archive or direct path to archive file).
+* **Sub-mode 2.1 (From Folder)**: Accepts `--from-folder <folder>` (folder path to automatically pick up the latest package: `chromium-*-x64.7z` on Windows, `chromium-*-ungoogled-x86_64_linux.tar.xz` on Linux, or direct file path to a specific archive).
 * **Sub-mode 2.2 (From URL)**: Accepts `--from-url <url>` (direct download link for packaged archive).
-* **Isolated Staging & Locale Pruning**: Unpacks archive into isolated temporary workspace (`TEMP/workspace/deploy_payload`), stripping top-level directory containers and pruning non-English locales.
+* **Isolated Staging & Locale Pruning**: Unpacks archive into isolated temporary workspace (`TEMP/workspace/deploy_payload`) using 7-Zip (supporting `.7z`, `.zip`, `.tar.xz`, `.tar.gz` with 2-stage extraction) or native `tar`/`unzip` fallback, stripping top-level directory containers and iteratively pruning non-English locales across all detected `locales` directories.
 * **Process Safety**: Executes `terminate_running_chrome_processes` using exact process binary matching (`pkill -x` / `taskkill /IM`) to release active file locks before directory replacement.
 * **Resilient Destination Update**: Swaps target directory atomically as primary strategy; if target container directory root is CWD-locked by an active shell handle, automatically falls back to in-place content wiping (`find -delete`) and payload copying (`cp -af`).
 * **Extraction & Version Display**: Verifies installed build and outputs product version query:
@@ -60,7 +60,7 @@ graph TD
     E -->|Yes| G[Download Release Archive to TEMP/chromium-YYYYMMDDhhmmss]
     G --> H{Platform Target}
     H -->|Windows| I[Extract 7z -> Normalize layout to chromium -> Delete locales except en-US.* -> Pack 7z -mx=9]
-    H -->|Linux| J[Extract tar.xz -> Normalize layout to chromium -> Delete locales except en-US.* -> Pack tar.xz -9]
+    H -->|Linux| J[Extract 7z/tar -> Normalize layout to chromium -> Delete locales except en-US.* -> Pack tar.xz -9]
     I --> K[Move Package Archive to --archive-path f:/stage/upload/pending/]
     J --> K
     K --> L[Delete Temporary Workspace]
@@ -69,7 +69,7 @@ graph TD
     M --> N{Source Type}
     N -->|--from-url| O[Download Archive to Workspace]
     N -->|--from-folder| P[Locate Packaged Archive File]
-    O --> Q[Extract & Prune Locales in Isolated Staging TEMP/workspace/deploy_payload]
+    O --> Q[Extract 7z/tar & Prune Locales in Isolated Staging TEMP/workspace/deploy_payload]
     P --> Q
     Q --> R[Terminate Active Chrome Processes: taskkill / pkill -x]
     R --> S{Replace Target Destination}
@@ -92,7 +92,7 @@ graph TD
 | `--from-url` | `<url>` | Optional | Source release page (packaging) or direct download URL (deployment). |
 | `--release-path` | `<path>` | Optional | Reference path/file to compare installed version against (packaging). |
 | `--archive-path` | `<path>` | Optional | Destination directory for final generated packaged archive (default: `f:/stage/upload/pending/`). |
-| `--from-folder` | `<folder>` | Mandatory (Deploy 2.1) | Source directory containing packaged archive or direct file path. |
+| `--from-folder` | `<folder>` | Mandatory (Deploy 2.1) | Source directory (auto-picks latest build) or direct archive file path. |
 | `--to-folder` | `<folder>` | Mandatory (Deploy) | Destination directory for extraction and deployment. |
 | `--with-7z` | `<path>` | Optional (Win) | Custom 7z executable or directory path (e.g. `c:/tls/arc/7zip/`). |
 | `--force` | None | Optional | Force packaging or deployment even if reference version matches. |
