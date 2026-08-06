@@ -96,6 +96,7 @@ graph TD
 | `--to-folder` | `<folder>` | Mandatory (Deploy) | Destination directory for extraction and deployment. |
 | `--with-7z` | `<path>` | Optional (Win) | Custom 7z executable or directory path (e.g. `c:/tls/arc/7zip/`). |
 | `--force` | None | Optional | Force packaging or deployment even if reference version matches. |
+| `--purge` | None | Optional (Deploy) | Delete source archive file after successful deployment (prohibited with `--action package`). |
 | `-h, --help` | None | Optional | Displays execution syntax and usage manual. |
 
 ---

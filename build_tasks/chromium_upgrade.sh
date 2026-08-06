@@ -25,7 +25,7 @@
 #
 #    chromium_upgrade.sh --action deploy
 #                        [--from-folder <folder>] [--from-url <url>]
-#                        --to-folder <folder> [--with-7z <path>]
+#                        --to-folder <folder> [--with-7z <path>] [--purge]
 #
 #  Examples:
 #    [WINDOWS]
@@ -288,6 +288,7 @@ function show_help() {
   echo "  --to-folder <folder>     Destination directory for extraction and deployment."
   echo "  --with-7z <path>         Path to 7z executable or directory (Windows)."
   echo "  --force                  Force packaging or deployment even if up to date."
+  echo "  --purge                  Delete source archive file after successful deployment (--action deploy only)."
   echo "  -h, --help               Display this help menu."
   echo ""
   echo "Examples:"
@@ -312,6 +313,7 @@ ARCHIVE_PATH=""
 FROM_FOLDER=""
 TO_FOLDER=""
 FORCE="false"
+PURGE="false"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -364,6 +366,10 @@ while [ $# -gt 0 ]; do
       FORCE="true"
       shift
       ;;
+    --purge)
+      PURGE="true"
+      shift
+      ;;
     -h | --help)
       show_help
       exit 0
@@ -414,6 +420,11 @@ if [ "${ACTION}" = "deploy" ]; then
   log_info "Auto-detected deployment platform target: ${PLATFORM}"
 else
   # Packaging mode: default to both windows and linux if not specified
+  if [ "${PURGE}" = "true" ]; then
+    log_error "--purge option is prohibited for packaging mode. It is only allowed with --action deploy."
+    exit 2
+  fi
+
   if [ -z "${PLATFORM:-}" ]; then
     PLATFORM="windows,linux"
     log_info "Packaging platform target not specified; defaulting to both: windows, linux"
@@ -1162,6 +1173,16 @@ function do_deploy() {
 
   log_info "Deployment extraction complete. Verifying installed Chromium version..."
   display_deployed_version "${posix_target}"
+
+  if [ "${PURGE}" = "true" ]; then
+    log_info "--purge flag specified: Purging deployed archive file..."
+    if [ -f "${archive_file}" ]; then
+      log_info "  -> Purging archive: $(format_path "${archive_file}")"
+      rm -f "${archive_file}"
+    else
+      log_warn "Archive file not found or already removed: $(format_path "${archive_file}")"
+    fi
+  fi
 }
 
 # -----------------------------------------------------------------------------
