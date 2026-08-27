@@ -22,6 +22,8 @@ Hardened frameworks for system security and code quality assurance.
 
 ### 2. Build & Validation Tasks (`/build_tasks`)
 Automation for building, and validating core system components.
+- `build_all.sh`: Top-level orchestrator for batch module compilation, repository template governance (`.gitignore`, `SECURITY.md`, `LICENSE`), and parallel Git synchronizations across sub-projects.
+- `build_go.sh`: Go compilation, static analysis (`go vet`, `golangci-lint`), vulnerability scanning (`govulncheck`, `gosec`), ASLR PIE binary hardening, and distribution packaging with automated `SHA256SUMS` generation.
 - `bun_upgrade.sh`: Automated lifecycle management, installation, upgrading, caching, and package registry tool for the Bun JavaScript runtime across Windows (Cygwin/MSYS2) and Linux environments.
 - `chromium_upgrade.sh`: Automates downloading, locale-pruning, repackaging, and deploying Chromium browser builds across Windows (Cygwin/MSYS2) and Linux environments.
 - `javacmd_build.sh`: Unified, generic Java compilation and packaging wrapper integrating Checkstyle, PMD, and SpotBugs validation.
