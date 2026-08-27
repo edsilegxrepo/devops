@@ -22,9 +22,11 @@ This document provides architectural specifications, design workflows, and execu
 * **Linux Packaging Pipeline**:
   * **Inspect URL**: Checks `--from-url` (default: `https://ungoogled-software.github.io/ungoogled-chromium-binaries/`) for new Portable Linux 64-bit releases.
   * **Version Check**: Evaluates reference release path (e.g., `n:/softlib/software/public/inet/www/browser/chrome/chromium-150.0-lnx.zip`).
-  * **Download & Workspace**: Downloads release archive (e.g., `https://github.com/ungoogled-software/ungoogled-chromium-portablelinux/releases/download/150.0.7871.186-1/ungoogled-chromium-150.0.7871.186-1-x86_64_linux.tar.xz`) into `TEMP/unique_workspace` (`chromium-YYYYMMDDhhmmss`).
+  * **WSL Delegation (Windows Hosts)**: When executed on a Windows host, the script automatically delegates the Linux download, extraction, locale pruning, attribute preservation, and tar repackaging into **WSL (Windows Subsystem for Linux)**. This avoids NTFS file mode flattening and guarantees that native Linux executable bits (`chmod 755`), file capabilities, and library attributes are preserved.
+  * **Download & Workspace**: Downloads release archive (e.g., `https://github.com/ungoogled-software/ungoogled-chromium-portablelinux/releases/download/150.0.7871.186-1/ungoogled-chromium-150.0.7871.186-1-x86_64_linux.tar.xz`) into isolated Linux `/tmp` workspace.
   * **Directory Normalization**: Creates internal directory `chromium/` and moves all extracted files into `chromium/`.
   * **Locale Pruning**: In `locales/`, deletes all files except `en-US*.pak` (retaining `en-US.pak`, `en-US_FEMININE.pak`, `en-US_MASCULINE.pak`, and `en-US_NEUTER.pak`).
+  * **POSIX Permissions Enforcement**: Explicitly enforces `chmod 755` on all executable binaries (`chrome`, `chrome_crashpad_handler`, `chrome-sandbox`, `nacl_helper`, `nacl_helper_bootstrap`) and shared objects (`*.so*`).
   * **Repackaging**: Repacks tree as `tar.xz` maximum compression (`XZ_OPT="-9 -T0" tar -cJf`) into packaged archive `chromium-150.0.7871.186-1-ungoogled-x86_64_linux.tar.xz`.
   * **Staging**: Moves packaged archive to `--archive-path` (`f:/stage/upload/pending/`).
   * **Cleanup**: Deletes temporary workspace upon successful completion.
@@ -42,7 +44,7 @@ This document provides architectural specifications, design workflows, and execu
 
 ### 1.3 Key Operating Constraints & Notes
 1. **Mandatory Platform Flag & Detection**: `--platform <windows|linux>` (with automatic environment/path hint detection if omitted).
-2. **Prerequisites Verification & Fail-Fast**: All required environmental prerequisites (`curl`, `grep`, `sed`, `cygpath`, `powershell`, `tar`, `xz`, `7z`) must be present or execution aborts (exit code `3`). On Windows, `7z` location is inspected via `--with-7z <path>` (e.g. `c:/tls/arc/7zip/`), `7Z_HOME`, `PATH`, and standard installation paths (`c:/tls/arc/7zip/7z.exe`, `C:/Program Files/7-Zip/7z.exe`).
+2. **Prerequisites Verification & Fail-Fast**: All required environmental prerequisites (`curl`, `grep`, `sed`, `cygpath`, `powershell`, `tar`, `xz`, `7z`, `wsl`) must be present or execution aborts (exit code `3`). On Windows, `7z` location is inspected via `--with-7z <path>` (e.g. `c:/tls/arc/7zip/`), `7Z_HOME`, `PATH`, and standard installation paths (`c:/tls/arc/7zip/7z.exe`, `C:/Program Files/7-Zip/7z.exe`), while `wsl.exe` is required for Linux target packaging.
 3. **Windows Path Format**: All Windows paths are output/formatted in mixed drive prefix notation: `<drive>:/path/sub`.
 
 ---
@@ -53,15 +55,18 @@ This document provides architectural specifications, design workflows, and execu
 graph TD
     A[CLI Invocation] --> B{Action Router}
     
-    B -->|--action package| C[Verify Prerequisites: curl, 7z/tar, xz, cygpath, powershell]
+    B -->|--action package| C[Verify Prerequisites: curl, 7z, powershell, WSL on Win]
     C --> D[Inspect Remote vs Reference Release Path]
     D --> E{New Version / --force?}
     E -->|No| F[Log Up-to-Date & Return 1 / Skip]
-    E -->|Yes| G[Download Release Archive to TEMP/chromium-YYYYMMDDhhmmss]
-    G --> H{Platform Target}
-    H -->|Windows| I[Extract 7z -> Normalize layout to chromium -> Delete locales except en-US.* -> Pack 7z -mx=9]
-    H -->|Linux| J[Extract 7z/tar -> Normalize layout to chromium -> Delete locales except en-US.* -> Pack tar.xz -9]
-    I --> K[Move Package Archive to --archive-path f:/stage/upload/pending/]
+    E -->|Yes| G{Host & Target Platform}
+    
+    G -->|Windows Target| H[Download to Windows TEMP -> Extract 7z -> Normalize -> Prune locales -> Pack 7z -mx=9]
+    G -->|Linux Target on Win| I[WSL Bridge: Download in WSL /tmp -> Extract tar -> Normalize -> Prune locales -> chmod 755 -> Pack tar.xz -9]
+    G -->|Linux Target on Linux| J[Native Linux: Download -> Extract tar -> Normalize -> Prune locales -> chmod 755 -> Pack tar.xz -9]
+    
+    H --> K[Move Package Archive to --archive-path f:/stage/upload/pending/]
+    I --> K
     J --> K
     K --> L[Delete Temporary Workspace]
 

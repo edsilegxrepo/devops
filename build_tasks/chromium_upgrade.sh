@@ -1,7 +1,7 @@
 #!/bin/bash
 # -----------------------------------------------------------------------------
 #  e:/data/devel/build/code/private/devops/build_tasks/chromium_upgrade.sh
-#  v1.0.1  2026/08/05  XDG / MIS Center
+#  v1.0.2  2026/08/27  XDG / MIS Center
 # -----------------------------------------------------------------------------
 #  Purpose:
 #    Automates downloading, repackaging, and deploying Chromium browser builds
@@ -130,6 +130,57 @@ function log_error() {
 
 WITH_7Z_PATH=""
 RESOLVED_7Z_BIN=""
+RESOLVED_WSL_BIN=""
+
+function find_wsl_binary() {
+  local cand=""
+  if cand=$(command -v wsl.exe 2> /dev/null || command -v wsl 2> /dev/null) && [ -n "${cand}" ]; then
+    echo "${cand}"
+    return 0
+  fi
+  if [ -f "/c/Windows/System32/wsl.exe" ]; then
+    echo "/c/Windows/System32/wsl.exe"
+    return 0
+  fi
+  if [ -f "C:/Windows/System32/wsl.exe" ]; then
+    echo "C:/Windows/System32/wsl.exe"
+    return 0
+  fi
+  return 1
+}
+
+# Translate Windows/Cygwin path to WSL mount path (/mnt/<drive>/...)
+function win_to_wsl_path() {
+  local p="${1:-}"
+  [ -z "${p}" ] && echo "" && return 0
+  local wsl_bin="${RESOLVED_WSL_BIN:-wsl.exe}"
+
+  local wsl_p=""
+  if [ -n "${wsl_bin}" ] && command -v "${wsl_bin}" &> /dev/null; then
+    local win_fmt
+    win_fmt=$(format_path "${p}")
+    wsl_p=$("${wsl_bin}" -e wslpath -u "${win_fmt}" 2> /dev/null | tr -d '\r\n' || true)
+    if [ -n "${wsl_p}" ]; then
+      echo "${wsl_p}"
+      return 0
+    fi
+  fi
+
+  local clean_p="${p//\\//}"
+  if [[ "${clean_p}" =~ ^([a-zA-Z]):/(.*) ]]; then
+    local drive="${BASH_REMATCH[1],,}"
+    local rest="${BASH_REMATCH[2]}"
+    echo "/mnt/${drive}/${rest}"
+    return 0
+  elif [[ "${clean_p}" =~ ^/([a-zA-Z])/(.*) ]] || [[ "${clean_p}" =~ ^/cygdrive/([a-zA-Z])/(.*) ]]; then
+    local drive="${BASH_REMATCH[1],,}"
+    local rest="${BASH_REMATCH[2]}"
+    echo "/mnt/${drive}/${rest}"
+    return 0
+  fi
+
+  echo "${clean_p}"
+}
 
 function find_7z_binary() {
   local cand=""
@@ -212,9 +263,10 @@ function verify_prerequisites() {
 
   if [ "${IS_WINDOWS}" = "true" ]; then
     RESOLVED_7Z_BIN=$(find_7z_binary || true)
+    RESOLVED_WSL_BIN=$(find_wsl_binary || true)
   fi
 
-  if [ "${target_platform}" = "windows" ]; then
+  if [[ "${target_platform}" == *"windows"* ]]; then
     if ! command -v cygpath &> /dev/null; then missing+=("cygpath"); fi
     if ! command -v powershell &> /dev/null && ! command -v powershell.exe &> /dev/null; then
       missing+=("powershell")
@@ -225,11 +277,21 @@ function verify_prerequisites() {
     else
       log_info "Using 7z binary: $(format_path "${RESOLVED_7Z_BIN}")"
     fi
-  elif [ "${target_platform}" = "linux" ]; then
-    if ! command -v tar &> /dev/null; then missing+=("tar"); fi
-    if ! command -v xz &> /dev/null; then missing+=("xz"); fi
-    if [ -n "${RESOLVED_7Z_BIN}" ]; then
-      log_info "Using 7z binary: $(format_path "${RESOLVED_7Z_BIN}")"
+  fi
+
+  if [[ "${target_platform}" == *"linux"* ]]; then
+    if [ "${IS_WINDOWS}" = "true" ]; then
+      if [ -z "${RESOLVED_WSL_BIN}" ]; then
+        missing+=("wsl (WSL is required on Windows to preserve Linux POSIX execution attributes)")
+      else
+        log_info "Using WSL binary for Linux packaging: $(format_path "${RESOLVED_WSL_BIN}")"
+      fi
+    else
+      if ! command -v tar &> /dev/null; then missing+=("tar"); fi
+      if ! command -v xz &> /dev/null; then missing+=("xz"); fi
+      if [ -n "${RESOLVED_7Z_BIN}" ]; then
+        log_info "Using 7z binary: $(format_path "${RESOLVED_7Z_BIN}")"
+      fi
     fi
   fi
 
@@ -984,11 +1046,121 @@ function do_package_windows() {
 }
 
 # -----------------------------------------------------------------------------
+# Function: do_package_linux_wsl
+# Objective: Executes the Linux packaging pipeline within WSL to guarantee native
+#            Linux ext4 POSIX permissions, executable bits, and symlinks are preserved.
+# -----------------------------------------------------------------------------
+function do_package_linux_wsl() {
+  local download_url="$1"
+  local remote_ver="$2"
+  local arch_path="$3"
+  local pkg_filename="$4"
+
+  local wsl_bin="${RESOLVED_WSL_BIN:-wsl.exe}"
+  local wsl_arch_dest
+  wsl_arch_dest=$(win_to_wsl_path "${arch_path}")
+
+  log_info "Delegating Linux packaging to WSL to preserve POSIX executable attributes..."
+  log_info "WSL Destination: ${wsl_arch_dest}"
+  log_info "Target Package: ${pkg_filename}"
+
+  if ! "${wsl_bin}" -e true 2> /dev/null; then
+    log_error "WSL is installed but failed to execute. Ensure a default WSL distribution is installed and running."
+    exit 3
+  fi
+
+  local wsl_script
+  wsl_script=$(cat << 'EOF_WSL'
+set -euo pipefail
+
+DOWNLOAD_URL="$1"
+REMOTE_VER="$2"
+WSL_DEST_DIR="$3"
+PKG_FILENAME="$4"
+
+WSL_WS="$(mktemp -d /tmp/chromium-linux-pkg-XXXXXX)"
+trap 'rm -rf "${WSL_WS}"' EXIT INT TERM
+
+echo "[WSL] Created isolated Linux workspace: ${WSL_WS}"
+echo "[WSL] Downloading Linux release archive from ${DOWNLOAD_URL}..."
+if ! curl -f -s -S -L "${DOWNLOAD_URL}" -o "${WSL_WS}/chromium.tar.xz"; then
+  echo "[WSL ERROR] Failed to download Linux release archive." >&2
+  exit 4
+fi
+
+echo "[WSL] Extracting Linux release archive with native Linux tar..."
+mkdir -p "${WSL_WS}/extracted"
+if ! tar -xf "${WSL_WS}/chromium.tar.xz" -C "${WSL_WS}/extracted"; then
+  echo "[WSL ERROR] Extraction failed." >&2
+  exit 5
+fi
+
+mkdir -p "${WSL_WS}/chromium"
+SRC_DIR=""
+if [ -d "${WSL_WS}/extracted/chromium" ]; then
+  SRC_DIR="${WSL_WS}/extracted/chromium"
+else
+  ROOT_DIR="$(find "${WSL_WS}/extracted" -mindepth 1 -maxdepth 1 -type d | head -n 1 || true)"
+  while [ -n "${ROOT_DIR}" ]; do
+    SUB_COUNT="$(find "${ROOT_DIR}" -mindepth 1 -maxdepth 1 | wc -l || echo 0)"
+    INNER_DIR="$(find "${ROOT_DIR}" -mindepth 1 -maxdepth 1 -type d | head -n 1 || true)"
+    if [ "${SUB_COUNT}" -eq 1 ] && [ -n "${INNER_DIR}" ]; then
+      ROOT_DIR="${INNER_DIR}"
+    else
+      break
+    fi
+  done
+  SRC_DIR="${ROOT_DIR:-${WSL_WS}/extracted}"
+fi
+
+cp -af "${SRC_DIR}/." "${WSL_WS}/chromium/"
+
+echo "[WSL] Pruning non-English locales..."
+while IFS= read -r loc_dir; do
+  [ -z "${loc_dir}" ] || [ ! -d "${loc_dir}" ] && continue
+  find "${loc_dir}" -maxdepth 1 -type f ! -iname "en-US*" -delete
+done < <(find "${WSL_WS}/chromium" -type d \( -iname "locales" -o -iname "Locales" \) || true)
+
+echo "[WSL] Enforcing POSIX executable attributes and permissions on Linux binaries..."
+chmod 755 "${WSL_WS}/chromium" 2>/dev/null || true
+find "${WSL_WS}/chromium" -type d -exec chmod 755 {} + 2>/dev/null || true
+find "${WSL_WS}/chromium" -type f -exec chmod 644 {} + 2>/dev/null || true
+
+for bin in chrome chromium chrome_crashpad_handler chrome-sandbox nacl_helper nacl_helper_bootstrap; do
+  [ -f "${WSL_WS}/chromium/${bin}" ] && chmod 755 "${WSL_WS}/chromium/${bin}"
+done
+find "${WSL_WS}/chromium" -type f -name "*.so*" -exec chmod 755 {} + 2>/dev/null || true
+
+echo "[WSL] Repacking package with native Linux tar.xz maximum compression: ${PKG_FILENAME}..."
+if ! XZ_OPT="-9 -T0" tar -cJf "${WSL_WS}/${PKG_FILENAME}" -C "${WSL_WS}" chromium; then
+  echo "[WSL ERROR] Failed to compress tar.xz package." >&2
+  exit 6
+fi
+
+echo "[WSL] Moving finalized archive to staging destination: ${WSL_DEST_DIR}..."
+mkdir -p "${WSL_DEST_DIR}"
+cp -f "${WSL_WS}/${PKG_FILENAME}" "${WSL_DEST_DIR}/${PKG_FILENAME}"
+
+echo "[WSL] Linux package build and attribute preservation completed successfully."
+EOF_WSL
+)
+
+  if ! "${wsl_bin}" -e bash -c "${wsl_script}" -- "${download_url}" "${remote_ver}" "${wsl_arch_dest}" "${pkg_filename}"; then
+    log_error "Linux packaging in WSL failed."
+    exit 6
+  fi
+
+  log_info "Package successfully created via WSL and staged to destination:"
+  log_info "  -> $(format_path "${arch_path}/${pkg_filename}")"
+}
+
+# -----------------------------------------------------------------------------
 # Function: do_package_linux
 # Objective: Orchestrates the Linux Chromium packaging workflow: downloads Portable
 #            Linux tar.xz from ungoogled-software/ungoogled-chromium-portablelinux,
 #            normalizes tree layout to 'chromium', prunes non-English locales,
 #            repacks with tar.xz maximum compression (XZ_OPT="-9 -T0"), and finalizes archive.
+#            Delegates to WSL on Windows hosts to ensure POSIX attributes are preserved.
 # Data Flow: Remote URL -> Download tar.xz -> Extract & Normalize -> Prune Locales -> tar.xz repacked archive -> Stage archive.
 # -----------------------------------------------------------------------------
 function do_package_linux() {
@@ -1021,32 +1193,45 @@ function do_package_linux() {
     return 0
   fi
 
-  create_temp_workspace
-  local posix_ws
-  posix_ws=$(to_posix_path "${TEMP_WORKSPACE}")
-
-  log_info "Downloading Linux tar.xz archive..."
-  if ! curl "${CURL_OPTS[@]}" "${download_url}" -o "${posix_ws}/chromium.tar.xz"; then
-    log_error "Failed to download tar.xz from ${download_url}"
-    exit 4
-  fi
-
-  log_info "Extracting archive..."
-  extract_package_archive "${posix_ws}/chromium.tar.xz" "${posix_ws}/extracted"
-
-  normalize_extracted_layout "${posix_ws}"
-  prune_locales "${posix_ws}/chromium"
-
   local pkg_filename="chromium-${remote_ver}-ungoogled-x86_64_linux.tar.xz"
-  local output_archive="${posix_ws}/${pkg_filename}"
 
-  log_info "Repacking package with tar.xz maximum compression: ${pkg_filename}..."
-  if ! XZ_OPT="-9 -T0" tar -cJf "${output_archive}" -C "${posix_ws}" chromium; then
-    log_error "Failed to create tar.xz compressed package archive."
-    exit 6
+  if [ "${IS_WINDOWS}" = "true" ]; then
+    do_package_linux_wsl "${download_url}" "${remote_ver}" "${arch_path}" "${pkg_filename}"
+  else
+    create_temp_workspace
+    local posix_ws
+    posix_ws=$(to_posix_path "${TEMP_WORKSPACE}")
+
+    log_info "Downloading Linux tar.xz archive..."
+    if ! curl "${CURL_OPTS[@]}" "${download_url}" -o "${posix_ws}/chromium.tar.xz"; then
+      log_error "Failed to download tar.xz from ${download_url}"
+      exit 4
+    fi
+
+    log_info "Extracting archive..."
+    extract_package_archive "${posix_ws}/chromium.tar.xz" "${posix_ws}/extracted"
+
+    normalize_extracted_layout "${posix_ws}"
+    prune_locales "${posix_ws}/chromium"
+
+    chmod 755 "${posix_ws}/chromium" 2>/dev/null || true
+    find "${posix_ws}/chromium" -type d -exec chmod 755 {} + 2>/dev/null || true
+    find "${posix_ws}/chromium" -type f -exec chmod 644 {} + 2>/dev/null || true
+    for bin in chrome chromium chrome_crashpad_handler chrome-sandbox nacl_helper nacl_helper_bootstrap; do
+      [ -f "${posix_ws}/chromium/${bin}" ] && chmod 755 "${posix_ws}/chromium/${bin}"
+    done
+    find "${posix_ws}/chromium" -type f -name "*.so*" -exec chmod 755 {} + 2>/dev/null || true
+
+    local output_archive="${posix_ws}/${pkg_filename}"
+
+    log_info "Repacking package with tar.xz maximum compression: ${pkg_filename}..."
+    if ! XZ_OPT="-9 -T0" tar -cJf "${output_archive}" -C "${posix_ws}" chromium; then
+      log_error "Failed to create tar.xz compressed package archive."
+      exit 6
+    fi
+
+    finalize_package_archive "${output_archive}" "${arch_path}"
   fi
-
-  finalize_package_archive "${output_archive}" "${arch_path}"
 }
 
 # =============================================================================
