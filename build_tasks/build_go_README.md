@@ -90,7 +90,7 @@ graph TD
 2. **Metadata Auto-Discovery:**
    - Detects `APP_NAME` from `$(basename "$(pwd)")`.
    - Reads version numbers from `version.txt` (falling back to `dev`) and attaches the build timestamp: `${VERSION_VAL}-$(date +%Y%m%d)`.
-   - Inspects `main.txt` to dynamically route custom entrypoint packages and custom version variable targets (`VERSION_PKG`).
+   - Inspects `main.txt` to dynamically route custom entrypoint packages, custom version variable targets (`VERSION_PKG`), and Git commit hash variable targets (`BUILD_PKG`).
 3. **Hardened Compiler Flags:**
    - `-s -w`: Strips symbol tables and DWARF debug info to shrink binaries and deter reverse-engineering.
    - `-trimpath`: Strips absolute file system paths from panic traces and binary metadata.
@@ -107,6 +107,51 @@ graph TD
 * **Missing Tooling Fallbacks:** Optional analyzers (`golangci-lint`, `govulncheck`, `gosec`) emit descriptive warnings instead of failing the build if not installed.
 * **Cross-Compilation:** Detects when `GOOS` or `GOARCH` deviates from `$(go env GOOS)`/`$(go env GOARCH)` and gracefully bypasses binary execution validation (`--version`).
 * **Line Ending Normalization:** Uses `dos2unix` across code and config files (`.go`, `.mod`, `.sum`, `.txt`, `.md`, `LICENSE`) to prevent CRLF-related build artifacts or checksum discrepancies across operating systems.
+
+### 2.5. Metadata Configuration Specification (`version.txt` and `main.txt`)
+
+The build engine dynamically discovers project and compiler metadata from configuration files in the active module root:
+
+#### `version.txt`
+Specifies the base semantic version string (e.g., `1.4.0`). The script sanitizes input by stripping non-numeric and non-dot characters (`tr -cd '0-9.'`), defaulting to `dev` if absent. The active build date (`YYYYMMDD`) is appended automatically to produce `${APP_VERSION}` (e.g., `1.4.0-20260909`).
+
+#### `main.txt` Format Specification
+`main.txt` is an optional line-delimited configuration file that configures the application entrypoint path and `-X` variable injection targets for the Go linker:
+
+```text
+<Line 1: Entrypoint Package Path>
+<Line 2: Version Symbol Target>
+<Line 3: Git Hash Symbol Target>
+```
+
+| Line | Target Variable | Sanitization Filter | Default | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| **Line 1** | `MAIN_PATH` | `tr -cd 'a-zA-Z0-9./_-'` | `""` (root package) | Relative path to the Go main package / entrypoint (e.g., `./cmd/dirpoller`). Can be overridden on the command line via `--main-path=<path>`. |
+| **Line 2** | `VERSION_PKG` | `tr -cd 'a-zA-Z0-9./_-'` | `main.version` | Target Go variable symbol for version injection (`-X ${VERSION_PKG}=${APP_VERSION}`). |
+| **Line 3** | `BUILD_PKG` | `tr -cd 'a-zA-Z0-9./_-'` | `""` (disabled) | Target Go variable symbol for Git commit hash injection (`-X ${BUILD_PKG}=${GIT_HASH}`). When defined, the short commit hash (`git rev-parse --short HEAD`) is automatically queried and injected. |
+
+##### Example `main.txt`
+```text
+./cmd/dirpoller
+main.version
+main.build
+```
+
+##### Corresponding Go Code Example
+```go
+package main
+
+import "fmt"
+
+var (
+    version = "dev"
+    build   = "unknown" // Populated at compile time via -X main.build
+)
+
+func printVersion() {
+    fmt.Printf("Version: %s (commit: %s)\n", version, build)
+}
+```
 
 ---
 

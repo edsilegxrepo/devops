@@ -1,7 +1,7 @@
 #!/bin/bash
 # -----------------------------------------------------------------------------
 #  e:/data/devel/build/code/private/devops/build_tasks/chromium_upgrade.sh
-#  v1.0.2  2026/08/27  XDG / MIS Center
+#  v1.0.3  2026/09/08  XDG / MIS Center
 # -----------------------------------------------------------------------------
 #  Purpose:
 #    Automates downloading, repackaging, and deploying Chromium browser builds
@@ -32,7 +32,7 @@
 #    - package:
 #      ./chromium_upgrade.sh --action package --platform windows,linux --with-7z c:/tls/arc/7zip/
 #    - deploy:
-#      ./chromium_upgrade.sh --action deploy --from-folder f:/stage/upload/pending/chromium-150.0.7871.187_1639810-x64.7z --to-folder d:/inet/www/chromium/bin/
+#      ./chromium_upgrade.sh --action deploy --from-folder f:/stage/upload/pending/chromium-150.0.7871.187_1639810-x64.7z --to-folder d:/inet/www/chromium/
 #
 #    [LINUX]
 #    - deploy:

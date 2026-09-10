@@ -19,7 +19,7 @@
 #    3. Strict Error Boundaries: Asserts exit codes of compiler builds and linter
 #       runs, preventing invalid packages.
 #    4. Version Fallback: Reads version.txt or falls back to 'dev'.
-#    5. Entry Point Autodetect: Reads main.txt for entrypoint location and version ldflags target.
+#    5. Entry Point Autodetect: Reads main.txt for entrypoint location, version, and git hash ldflags targets.
 #
 #  Syntax:
 #    ./build_go.sh [--main-path=<path>] [--update-modules] [--publish]
@@ -100,12 +100,25 @@ APP_VERSION="${VERSION_VAL}-$(date +%Y%m%d)"
 
 MAIN_PATH=""
 VERSION_PKG="main.version"
+BUILD_PKG=""
+GIT_HASH=""
 if [ -f main.txt ]; then
   MAIN_PATH="$(sed -n '1p' main.txt | tr -cd 'a-zA-Z0-9./_-')"
   _VER_PKG="$(sed -n '2p' main.txt | tr -cd 'a-zA-Z0-9./_-')"
   if [ -n "${_VER_PKG}" ]; then
     VERSION_PKG="${_VER_PKG}"
   fi
+  _BLD_PKG="$(sed -n '3p' main.txt | tr -cd 'a-zA-Z0-9./_-')"
+  if [ -n "${_BLD_PKG}" ]; then
+    BUILD_PKG="${_BLD_PKG}"
+  fi
+fi
+
+if [ -n "${BUILD_PKG}" ]; then
+  if command -v git &> /dev/null && git rev-parse --is-inside-work-tree &> /dev/null; then
+    GIT_HASH="$(git rev-parse --short HEAD 2>/dev/null)"
+  fi
+  GIT_HASH="${GIT_HASH:-unknown}"
 fi
 
 # Determine Go module canonical import path
@@ -195,13 +208,18 @@ fi
 # ==============================================================================
 #  Compilation Phase
 # ==============================================================================
-echo "Build Module ${APP_MODULE} - Version: ${APP_VERSION} [${VERSION_PKG}] - Main Module: ${MAIN_PATH:-generic}"
+LDFLAGS="-s -w -X ${VERSION_PKG}=${APP_VERSION}"
+if [ -n "${BUILD_PKG}" ]; then
+  LDFLAGS="${LDFLAGS} -X ${BUILD_PKG}=${GIT_HASH}"
+fi
+
+echo "Build Module ${APP_MODULE} - Version: ${APP_VERSION} [${VERSION_PKG}]${BUILD_PKG:+ - Build: ${GIT_HASH} [${BUILD_PKG}]} - Main Module: ${MAIN_PATH:-generic}"
 
 # Build with optimization flags:
 # -s -w       Strips symbols and debug tables to reduce binary footprint
 # -trimpath   Strips developer path metadata from panic traces
 # -buildmode  Emits Position Independent Executable (PIE) binaries
-if ! go build -v -buildvcs=false -ldflags "-s -w -X ${VERSION_PKG}=${APP_VERSION}" -trimpath -buildmode=pie -o "${BINDIR}/${APP_NAME}${BIN_EXT}" ${MAIN_PATH:+"${MAIN_PATH}"}; then
+if ! go build -v -buildvcs=false -ldflags "${LDFLAGS}" -trimpath -buildmode=pie -o "${BINDIR}/${APP_NAME}${BIN_EXT}" ${MAIN_PATH:+"${MAIN_PATH}"}; then
   echo "ERROR: Compilation failed!"
   exit 1
 fi

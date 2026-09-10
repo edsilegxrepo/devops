@@ -1,9 +1,10 @@
 #!/bin/bash
+# ----------------------------------------
+# /opt/scripts/ubuntu_kernel_updater.sh
+# v1.0.5xg  2026/08/31  XDG / MIS Center
+# ----------------------------------------
+
 # ==============================================================================
-# FILE: ubuntu_kernel_updater.sh
-# VERSION: 1.0.0
-# DATE: 2026-06-22
-#
 # SUMMARY:
 # ------------------------------------------------------------------------------
 # Hardened Automated Mainline Kernel Deployment Script (Enterprise Edition)
@@ -64,6 +65,7 @@ set -euo pipefail
 
 MAINLINE_INDEX_URL="https://kernel.ubuntu.com/mainline/"
 LOG_FILE="/var/log/kernel_updater.log"
+CURL_OPTS=(-sSf -C - --connect-timeout 15 --speed-limit 10240 --speed-time 30 --max-time 900 --retry 5 --retry-delay 3 --retry-all-errors)
 
 # ==============================================================================
 # UTILITY: LOGGING ARCHITECTURE
@@ -698,7 +700,7 @@ fi
 # 3. Stable Kernel Auto-Detection
 # Queries Ubuntu mainline index and extracts the newest non-RC version string.
 log_info "Auto-detecting latest stable upstream kernel..."
-LATEST_VERSION=$(curl -sSf --connect-timeout 10 --max-time 30 "$MAINLINE_INDEX_URL" | \
+LATEST_VERSION=$(curl "${CURL_OPTS[@]}" "$MAINLINE_INDEX_URL" | \
     grep -oE 'v[0-9]+\.[0-9]+[^"/ ]*' | \
     grep -vE '(-rc|-git|-wip)' | \
     sort -V | \
@@ -771,7 +773,7 @@ fi
 
 # 5. Asset URL Discovery
 # Queries the targeted release folder structure for generic amd64 .deb packages.
-VERSION_PAYLOAD=$(curl -sSf --connect-timeout 10 --max-time 30 "$BASE_URL/" || true)
+VERSION_PAYLOAD=$(curl "${CURL_OPTS[@]}" "$BASE_URL/" || true)
 if [ -z "$VERSION_PAYLOAD" ]; then
     log_error "Target folder ${LATEST_VERSION} exists, but the amd64 directory is unreachable."
     exit 1
@@ -817,7 +819,7 @@ fi
 log_info "Downloading core components..."
 for file in "${DOWNLOADS_TO_BE_DONE[@]}"; do
     log_info "   -> Downloading: $file"
-    curl -sSf --connect-timeout 10 --max-time 120 -O "${BASE_URL}/${file}"
+    curl "${CURL_OPTS[@]}" -O "${BASE_URL}/${file}"
 done
 
 # Locate downloaded image, modules, and headers deb files

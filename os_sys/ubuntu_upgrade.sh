@@ -1,9 +1,10 @@
 #!/bin/bash
+# ----------------------------------------
+# /opt/scripts/ubuntu_upgrade.sh
+# v1.0.8xg  2026/08/31  XDG / MIS Center
+# ----------------------------------------
+
 # ==============================================================================
-# FILE: ubuntu_upgrade.sh
-# VERSION: 1.0.0
-# DATE: 2026-06-22
-#
 # SUMMARY & OBJECTIVES:
 # ------------------------------------------------------------------------------
 # Robust Automated System Upgrade & Hardening Utility (Debian/Ubuntu/Linux Mint)
@@ -63,10 +64,6 @@
 #      Logging output redirected concurrently to standard output and the persistent log file:
 #      File: /var/log/ubuntu_upgrade.log
 # ==============================================================================
-# ----------------------------------------
-# /opt/scripts/ubuntu_upgrade.sh
-# v1.0.7xg  2026/06/18  XDG / MIS Center
-# ----------------------------------------
 set -euo pipefail
 
 # ------------------------------------------------------------------------------
@@ -128,7 +125,7 @@ source /opt/scripts/settings.sh
 # Sanitize hostname to prevent malicious word splitting or character injections
 SAFE_HOSTNAME=$( (hostname -s 2>/dev/null || uname -n || echo "localhost") | tr -dc 'a-zA-Z0-9_-')
 NODE_TAG="PRD|prd|wks|${SAFE_HOSTNAME}"
-APT_OPTS=(-qy -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold -o APT::Get::Always-Include-Phased-Updates=true)
+APT_OPTS=(-qy -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold -o APT::Get::Always-Include-Phased-Updates=true -o Acquire::http::No-Cache=true -o Acquire::http::Max-Age=0)
 APT_REPO_BASE="/etc/apt"
 APT_AUTO_PROC="apt-news.service esm-cache.service motd-news.service motd-news.timer ubuntu-advantage.service"
 MOTD_UPDATE_BASE="/etc/update-motd.d"
