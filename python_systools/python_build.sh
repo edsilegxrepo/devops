@@ -1,7 +1,7 @@
 #!/bin/bash
 # -----------------------------------------------------------------------------
 #  python_build.sh
-#  v2.0.5  2026/06/10  XdG (Orchestrator)
+#  v2.0.6  2026/09/10  XdG (Orchestrator)
 # -----------------------------------------------------------------------------
 # OBJECTIVE:
 #   Achieve a fully isolated, relocatable, and production-grade Python 3.13+
@@ -25,17 +25,17 @@
 #   Final redistributable artifact (.tar.xz)
 #
 # USAGE EXAMPLES:
-#   - Build latest 3.13 (Full Lifecycle):
-#       ./python_build.sh --python-version=3.13.13 --custom-libs --all
+#   - Build latest 3.13.x/3.14.x (Full Lifecycle):
+#       ./python_build.sh --python-version=3.13.15 --custom-libs --all
 #
 #   - Specialized Build (RPM Phase):
-#       ./python_build.sh --python-version=3.13.13 --step=compile
+#       ./python_build.sh --python-version=3.13.15 --step=compile
 #
 #   - Maintenance Re-validation:
-#       ./python_build.sh --python-version=3.13.13 --step=validate
+#       ./python_build.sh --python-version=3.13.15 --step=validate
 #
 #   - Production Purge (Clean up after build):
-#       ./python_build.sh --python-version=3.13.13 --purge --all
+#       ./python_build.sh --python-version=3.13.15 --purge --all
 # -----------------------------------------------------------------------------
 
 set -euo pipefail
@@ -589,7 +589,7 @@ bootstrap() {
   pushd "${target_root}/bin" &> /dev/null
 
   # Tool List: Binaries to be version-suffixed and symlinked.
-  local tools=(pip wheel virtualenv cython cythonize cygdb pip-compile pip-sync pyproject-build normalizer idna)
+  local tools=(pip wheel virtualenv cython cythonize cygdb pip-compile pip-sync pyproject-build normalizer idna cffi-gen-src)
 
   # 0. Interpreter Aliases: Ensure generic 'python' exists.
   # Standard GIL installs provide 'python3' and 'python3.14' by default.
