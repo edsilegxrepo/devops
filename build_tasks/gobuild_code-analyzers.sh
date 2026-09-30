@@ -681,6 +681,8 @@ function build_golangci-lint() {
     PKG_VER_LDFLAG=""
     goUpdateModules
     go get github.com/denis-tingaikin/go-header@v0.5.0
+    go get github.com/gobwas/glob@v0.2.3
+    go get github.com/nishanths/predeclared@v0.2.2
     codeAnalysis
     codeBuild "CMD"
     pkgVersion "--v"
