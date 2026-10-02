@@ -1,0 +1,23 @@
+<div style="background-color: #fffbeb; border: 1px solid #fde68a; border-left: 4px solid #f59e0b; border-radius: 8px; padding: 16px 18px;">
+  <h3 style="margin: 0 0 8px 0; font-size: 14px; font-weight: 700; color: #92400e;">⚠️ Recommended Update Instructions for Detected Image(s)</h3>
+  <p style="margin: 0 0 12px 0; font-size: 12px; line-height: 1.5; color: #78350f;">
+    New container version(s) have been detected in the registry. Because this is a production environment, updates must be reviewed and applied manually during your approved maintenance window on <code>{{HOST_NAME}}</code>:
+  </p>
+
+  <h4 style="margin: 12px 0 6px 0; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: #92400e;">Option A: Update Detected Service(s) Individually</h4>
+  <div style="background-color: #0b1120; border-radius: 6px; padding: 12px 14px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; color: #e2e8f0; line-height: 1.7; overflow-x: auto;">
+    {{SPECIFIC_COMMANDS}}
+  </div>
+
+  <h4 style="margin: 14px 0 6px 0; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: #92400e;">Option B: Batch Update All Pending Quadlet Containers</h4>
+  <div style="background-color: #0b1120; border-radius: 6px; padding: 10px 14px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; color: #e2e8f0; line-height: 1.6;">
+    <span style="color: #94a3b8;"># Downloads latest images and automatically restarts the systemd units:</span><br>
+    <span style="color: #38bdf8;">sudo podman auto-update</span>
+  </div>
+
+  <h4 style="margin: 14px 0 6px 0; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: #92400e;">Rollback Procedure (If Any Regressions Occur)</h4>
+  <div style="background-color: #0b1120; border-radius: 6px; padding: 10px 14px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; color: #e2e8f0; line-height: 1.6;">
+    <span style="color: #94a3b8;"># Reverts containers to the previous working image version:</span><br>
+    <span style="color: #f87171;">sudo podman auto-update --rollback</span>
+  </div>
+</div>

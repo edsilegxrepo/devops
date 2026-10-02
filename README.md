@@ -64,6 +64,10 @@ Low-level system adjustments and service delegations.
 - `os_service_account.sh`: Provisions unprivileged OS service accounts (e.g., `gfaudit`) for compliance audit automation.
 - `ubuntu_upgrade.sh`: Orchestrates non-interactive system package updates, telemetry/ESM disabling, parallel Flatpak upgrades, and mainline kernel updates.
 - `ubuntu_kernel_updater.sh`: Detects, installs, and manages mainline upstream kernels bypassing APT dependency checks, and purges older kernels.
+- `dnf_check.sh`: Production-hardened DNF wrapper with cross-version SQLite integrity checks, safe cache clearing, and post-transaction kernel sync.
+- `kernel-default.sh`: Deterministic GRUB boot kernel manager and cleanup utility for Enterprise Linux.
+- `vm-backup-gdrive.sh`: Virtual Machine snapshot and disaster recovery orchestrator managing live SQLite backups, system manifests, streaming zstd/AES-256 GPG encryption, Google Drive sync, and dual retention.
+- `check-container-updates.sh`: Container lifecycle monitor and update automation tool for systemd Quadlets with registry dry-run inspection and email alerts.
 
 ### 6. Python Engineering & Lifecycle (`/python_systools`)
 A comprehensive suite for managing multi-version Python environments and package health.

@@ -1,0 +1,38 @@
+<h2 style="font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; margin: 0 0 14px 0; font-weight: 700;">Inspection Summary</h2>
+<table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0" style="border-collapse: separate; border-spacing: 0 6px;">
+  <tr>
+    <td style="width: 26%; padding: 9px 12px; background-color: #f8fafc; border-radius: 6px 0 0 6px; font-size: 13px; color: #64748b; font-weight: 600;">Host</td>
+    <td style="padding: 9px 12px; background-color: #f8fafc; border-radius: 0 6px 6px 0; font-size: 13px; color: #0f172a; font-weight: 600; font-family: ui-monospace, Menlo, Consolas, monospace;">{{HOST_NAME}}</td>
+  </tr>
+  <tr>
+    <td style="padding: 9px 12px; background-color: #f8fafc; border-radius: 6px 0 0 6px; font-size: 13px; color: #64748b; font-weight: 600;">Inspection Time</td>
+    <td style="padding: 9px 12px; background-color: #f8fafc; border-radius: 0 6px 6px 0; font-size: 13px; color: #0f172a;">{{CHECK_TIME}}</td>
+  </tr>
+  <tr>
+    <td style="padding: 9px 12px; background-color: #f8fafc; border-radius: 6px 0 0 6px; font-size: 13px; color: #64748b; font-weight: 600;">Monitored Containers</td>
+    <td style="padding: 9px 12px; background-color: #f8fafc; border-radius: 0 6px 6px 0; font-size: 13px; color: #0f172a; font-weight: 600;">{{TOTAL_COUNT}} services scanned</td>
+  </tr>
+  <tr>
+    <td style="padding: 9px 12px; background-color: #f8fafc; border-radius: 6px 0 0 6px; font-size: 13px; color: #64748b; font-weight: 600;">Updates Pending Review</td>
+    <td style="padding: 9px 12px; background-color: #f8fafc; border-radius: 0 6px 6px 0; font-size: 13px; color: #0f172a; font-weight: 700;">{{PENDING_SUMMARY}}</td>
+  </tr>
+  <tr>
+    <td style="padding: 9px 12px; background-color: #f8fafc; border-radius: 6px 0 0 6px; font-size: 13px; color: #64748b; font-weight: 600;">Policy Mode</td>
+    <td style="padding: 9px 12px; background-color: #f8fafc; border-radius: 0 6px 6px 0; font-size: 13px; color: #0f172a;">{{POLICY_MODE}}</td>
+  </tr>
+</table>
+
+<h2 style="font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; margin: 20px 0 10px 0; font-weight: 700;">Monitored Quadlet Services</h2>
+<table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0" style="border-collapse: collapse; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden;">
+  <thead>
+    <tr style="background-color: #f8fafc;">
+      <th style="padding: 10px 12px; text-align: left; font-size: 11px; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid #e2e8f0;">Systemd Service</th>
+      <th style="padding: 10px 12px; text-align: left; font-size: 11px; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid #e2e8f0;">Container</th>
+      <th style="padding: 10px 12px; text-align: left; font-size: 11px; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid #e2e8f0;">Image / Tag</th>
+      <th style="padding: 10px 12px; text-align: right; font-size: 11px; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid #e2e8f0;">Status</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{CONTAINER_TABLE_ROWS}}
+  </tbody>
+</table>

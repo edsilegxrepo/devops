@@ -1,0 +1,19 @@
+<div style="background-color: #ecfdf5; border: 1px solid #a7f3d0; border-left: 4px solid #10b981; border-radius: 8px; padding: 16px 18px;">
+  <h3 style="margin: 0 0 8px 0; font-size: 14px; font-weight: 700; color: #065f46;">🚀 Automatic Container Update Executed Successfully</h3>
+  <p style="margin: 0 0 12px 0; font-size: 12px; line-height: 1.5; color: #047857;">
+    The <code>--auto-update</code> flag is active. New container images were detected, downloaded from the registry, and the corresponding Quadlet systemd services were automatically restarted on <code>{{HOST_NAME}}</code>.
+  </p>
+
+  <h4 style="margin: 12px 0 6px 0; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: #065f46;">Auto-Update Execution Output</h4>
+  <div style="background-color: #0b1120; border-radius: 6px; padding: 12px 14px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; color: #e2e8f0; line-height: 1.6; overflow-x: auto;">
+    <pre style="margin: 0; white-space: pre-wrap;">{{AUTO_UPDATE_OUTPUT}}</pre>
+  </div>
+
+  <h4 style="margin: 14px 0 6px 0; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: #065f46;">Verification & Rollback Commands</h4>
+  <div style="background-color: #0b1120; border-radius: 6px; padding: 10px 14px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; color: #e2e8f0; line-height: 1.6;">
+    <span style="color: #94a3b8;"># Verify active running containers:</span><br>
+    <span style="color: #38bdf8;">sudo podman ps</span><br><br>
+    <span style="color: #94a3b8;"># Immediate rollback if any service experiences issues:</span><br>
+    <span style="color: #f87171;">sudo podman auto-update --rollback</span>
+  </div>
+</div>
