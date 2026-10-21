@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Script: /opt/scripts/dnf_check.sh
-# Version: 1.3.0  2026/10/02
+# Version: 1.3.1  2026/10/21
 # Compatibility: Enterprise Linux 8, 9, 10 (RHEL, AlmaLinux, Rocky Linux, CentOS)
 # Standard: DRY Architecture Framework
 # Description: Production-hardened DNF wrapper with cross-version SQLite integrity
@@ -35,6 +35,11 @@ fi
 # Determine primary package manager binary (dnf on EL8/9/10, fallback to yum)
 PKG_MGR="$(command -v dnf 2> /dev/null || command -v yum 2> /dev/null || echo "dnf")"
 
+# Common paths and relaxed dependency options
+DNF_RELAX_OPTS=(--skip-broken --nobest)
+DNF_BASE="/var/lib/dnf"
+DNF_CACHE="/var/cache/dnf"
+
 # ------------------------------------------------------------------------------
 # 2. CLI Usage & Help
 # ------------------------------------------------------------------------------
@@ -45,6 +50,7 @@ Usage: $(basename "$0") [OPTION] | [DNF_COMMAND...]
 Options:
   --sqlite-check      Verify SQLite database integrity for DNF caches and history
   --purge-cache       Safely purge DNF package and metadata cache via native clean
+  --relax             Permit non-best packages and skip broken dependencies (--skip-broken --nobest)
   -h, --help          Display this help message and exit
 
 DNF Pass-Through:
@@ -81,8 +87,8 @@ sqliteWalCheck() {
   fi
 
   local databases=(
-    "/var/cache/dnf/packages.db"
-    "/var/lib/dnf/history.sqlite"
+    "${DNF_CACHE}/packages.db"
+    "${DNF_BASE}/history.sqlite"
   )
 
   local errors=0
@@ -144,19 +150,39 @@ esac
 # ------------------------------------------------------------------------------
 # 5. DNF Execution & Post-Transaction Synchronization
 # ------------------------------------------------------------------------------
-# Determine if command invocation represents a mutating package transaction
+# Parse arguments: extract wrapper-specific flags (--relax) and detect mutating commands
 is_mutating=0
+relax_deps=0
+dnf_args=()
+
 for arg in "$@"; do
   case "${arg}" in
-    update | upgrade | distro-sync | install | reinstall | remove | erase | upgrade-minimal)
-      is_mutating=1
-      break
+    --relax)
+      relax_deps=1
+      ;;
+    *)
+      dnf_args+=("${arg}")
+      case "${arg}" in
+        update | upgrade | distro-sync | install | reinstall | remove | erase | upgrade-minimal)
+          is_mutating=1
+          ;;
+      esac
       ;;
   esac
 done
 
+if [[ ${#dnf_args[@]} -eq 0 ]]; then
+  show_usage >&2
+  exit 2
+fi
+
+# Append relaxed dependency options if requested
+if [[ ${relax_deps} -eq 1 ]]; then
+  dnf_args+=("${DNF_RELAX_OPTS[@]}")
+fi
+
 # Execute package manager with exact arguments preserved
-"${PKG_MGR}" "$@"
+"${PKG_MGR}" "${dnf_args[@]}"
 DNF_STATUS=$?
 
 # If command failed, abort immediately and preserve its exit code
