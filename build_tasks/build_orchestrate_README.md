@@ -24,7 +24,7 @@ This document provides the architectural specification, operational flow analysi
 ```
 
 ### Core Components
-1. **Execution Router:** Parses CLI arguments and routes execution across operational modes (`--exec`, `--clean`, `--sync-templates`, `--git-sync`, `--generate-key`).
+1. **Execution Router:** Parses CLI arguments and routes execution across operational modes (`--exec`, `--clean`, `--sync-templates`, `--git-sync`, `--genkey`).
 2. **Sub-Project Discovery Engine:** Automatically discovers active Git repositories within `CODE_BASE` (default: `private/`, configurable via `--code-base=<path>`), enforcing exclusion filters (`CODE_EXCLUDES="devops"`).
 3. **Process Orchestrator & Workpool:** Dispatches jobs sequentially or manages concurrent background workers up to maximum capacity (`--parallel`, `--jobs=N`).
 4. **Log Multiplexer & Buffer:** In parallel mode, isolates per-module `stdout` and `stderr` into dedicated temporary log files, eliminating terminal output interleaving while flushing error traces immediately on failure.
@@ -52,7 +52,7 @@ graph TD
     Sourcing --> Parser{"Parse CLI Arguments"}
     
     Parser -->|--clean| CleanEngine["Clean Artifacts (../bin, ../distrib)"]
-    Parser -->|--generate-key| KeyGen["SSH Keypair Generator (generate_signing_key)"]
+    Parser -->|--genkey| KeyGen["SSH Keypair Generator (generate_signing_key)"]
     Parser -->|--sync-templates| SyncEngine["Template Sync Engine (sync_templates)"]
     Parser -->|--git-sync| GitEngine["Git Autosync Engine (git_sync)"]
     Parser -->|--exec / default| BuildEngine["Build Orchestrator (run_builds)"]
@@ -96,8 +96,8 @@ graph TD
 3. **Selective Exclusion Matrix:** Maintains a declarative `CODE_EXCLUDES="devops"` filter to prevent recursive build loops or attempting compilation on infrastructure-only repositories.
 4. **Log Multiplexing & Isolation:** During parallel execution (`--parallel`, `--jobs=N`), standard output and error streams are captured into isolated per-module temporary files (`LOG_FILE=$(make_temp_dir "orch_log_${MODULE_NAME}")/build.log`). On success, a clean one-line status is printed; on failure, the trailing error log is flushed to `stderr` without corrupting terminal output.
 5. **Signal & Process Reaper Trap:** Traps `EXIT`, `INT`, and `TERM` signals to terminate any active background worker PIDs (`kill -TERM "${pids[@]}"`) and wipe tracked temporary log directories (`cleanup_tracked_temp_dirs`).
-6. **Pre-Clean & Standalone Clean:** Supports `--clean` to cleanly purge built artifacts across `../bin/` and `../distrib/`. Operates standalone (wiping outputs and exiting) or additively prior to running `--exec`.
-7. **Flag Forwarding:** Seamlessly forwards target platform (`--windows`, `--linux`), packaging (`--archive`, `--rpm`, `--deb`, `--all`), code quality (`--compile-only`, `--lint-only`, `--ignore-audit`, `--testsuite`), signing (`--sign`, `--identity`), and logging (`--log=<file>`) options directly to the underlying [build_go.sh](build_go.sh) compiler engine.
+6. **Pre-Clean & Standalone Clean:** Supports `--clean` to cleanly purge built artifacts across `../bin/` and `../distrib/` (relative to `CODE_HOME`). Operates standalone (wiping outputs and exiting) or additively prior to running `--exec`.
+7. **Flag Forwarding:** Seamlessly forwards target platform (`--windows`, `--linux`, `--all-platform`), packaging (`--archive`, `--rpm`, `--deb`, `--all-pkg`), code quality (`--compile-only`, `--lint-only`, `--ignore-audit`, `--testsuite`), signing (`--sign`, `--identity`), and logging (`--log=<file>`) options directly to the underlying [build_go.sh](build_go.sh) compiler engine.
 
 ---
 
@@ -115,7 +115,7 @@ sequenceDiagram
     participant FS as Local Filesystem & Distrib
     participant GitMgr as git_autosync.sh
 
-    CI->>Orchestrator: ./build_orchestrate.sh --exec --parallel --jobs=4 --linux --all --sign
+    CI->>Orchestrator: ./build_orchestrate.sh --exec --parallel --jobs=4 --linux --all-pkg --sign
     Orchestrator->>Include: Source build.inc & Register Traps
     Orchestrator->>FS: Pre-clean outputs if --clean specified
     Orchestrator->>FS: Scan ./private (excluding devops)
@@ -255,15 +255,16 @@ graph LR
 | :--- | :--- | :--- | :--- |
 | `--windows` | Target Windows builds across all sub-projects (builds `../bin/<name>.exe`). | Flag | Host default on Windows |
 | `--linux` | Target Linux builds across all sub-projects (builds static `../bin/<name>`). | Flag | Host default on Linux |
+| `--all-platform` | Target both Windows and Linux builds across all sub-projects. | Flag | `false` |
 | `--archive` | Package release archives inside `../distrib/` across all sub-projects. | Flag | Active |
 | `--rpm` | Build RPM packages in `../distrib/` across all sub-projects (Linux only). | Flag | `false` |
 | `--deb` | Build DEB packages in `../distrib/` across all sub-projects (Linux only). | Flag | `false` |
-| `--all` | Build all release artifacts (`--archive --rpm --deb`) across all sub-projects. | Flag | `false` |
-| `--sign` | Sign release archives (`<archive>.sig`) with default SSH key (`~/.ssh/signing/release_key`). See [SIGNING.md](SIGNING.md). | Flag | `false` |
-| `--sign=<path>` | Sign release archives (`<archive>.sig`) with specified SSH private key or directory. See [SIGNING.md](SIGNING.md). | String | *Disabled* |
-| `--generate-key` | Generate Ed25519 signing key pair at `~/.ssh/signing/release_key` and exit (requires `--identity=<id>`). See [SIGNING.md](SIGNING.md). | Flag | *None* |
-| `--generate-key=<path>` | Generate a new Ed25519 SSH signing key pair at `<path>` and exit (requires `--identity=<id>`). See [SIGNING.md](SIGNING.md). | String | *None* |
-| `--identity=<id>` | Signer identity email/name (mandatory with `--generate-key`, e.g. `mis@criticalsys.net`). | String | *None* |
+| `--all-pkg` | Build all release artifacts (`--archive --rpm --deb`) across all sub-projects. Alias: `--all`. | Flag | `false` |
+| `--sign` | Sign release archives (`<archive>.sig`) with default SSH key (`~/.ssh/signing/release_key`). See [build_SIGNING.md](build_SIGNING.md). | Flag | `false` |
+| `--sign=<path>` | Sign release archives (`<archive>.sig`) with specified SSH private key or directory. See [build_SIGNING.md](build_SIGNING.md). | String | *Disabled* |
+| `--genkey` | Generate Ed25519 signing key pair at `~/.ssh/signing/release_key` and exit (requires `--identity=<id>`). Alias: `--generate-key`. See [build_SIGNING.md](build_SIGNING.md). | Flag | *None* |
+| `--genkey=<path>` | Generate a new Ed25519 SSH signing key pair at `<path>` and exit (requires `--identity=<id>`). Alias: `--generate-key=<path>`. See [build_SIGNING.md](build_SIGNING.md). | String | *None* |
+| `--identity=<id>` | Signer identity email/name (mandatory with `--genkey`, e.g. `mis@criticalsys.net`). | String | *None* |
 | `--comment=<text>` | Human-readable key comment embedded in `.pub` (optional, defaults to `Critical Systems Release Signing <<id>>`). | String | Formatted from `<id>` |
 
 ### Quality Assurance & Operational Flags (Forwarded to `build_go.sh`)
@@ -288,7 +289,7 @@ graph LR
 ./build_orchestrate.sh --clean
 
 # Pristine clean rebuild: wipes outputs first, then compiles and packages all artifacts
-./build_orchestrate.sh --clean --exec --all
+./build_orchestrate.sh --clean --exec --all-pkg
 ```
 
 ### 8.2. Parallel Multi-Module Build
@@ -300,7 +301,10 @@ graph LR
 ### 8.3. Full Release Artifact Suite (Tarballs, DEBs, RPMs, Checksums)
 ```bash
 # Builds complete distribution artifacts across all modules
-./build_orchestrate.sh --exec --all
+./build_orchestrate.sh --exec --all-pkg
+
+# Builds complete distribution artifacts across all modules for both platforms
+./build_orchestrate.sh --exec --all-platform --all-pkg
 ```
 
 ### 8.4. Automated Test Suite Execution Across All Modules
@@ -326,12 +330,12 @@ The orchestration suite provides native integration with OpenSSH Ed25519 digital
 
 ```bash
 # 1. Generate a dedicated Ed25519 signing keypair with mandatory identity binding
-./build_orchestrate.sh --generate-key=/home/users/builder/.ssh/signing/release_key \
+./build_orchestrate.sh --genkey=/home/users/builder/.ssh/signing/release_key \
   --identity=mis@criticalsys.net \
   --comment="Critical Systems Orchestrated Release Signing"
 
 # 2. Compile, package, and cryptographically sign release artifacts across all modules in parallel
-./build_orchestrate.sh --exec --parallel --jobs=4 --linux --all --sign=/home/users/builder/.ssh/signing/release_key
+./build_orchestrate.sh --exec --parallel --jobs=4 --linux --all-pkg --sign=/home/users/builder/.ssh/signing/release_key
 
 # 3. Verify signatures against an allowed_signers trust anchor (example on checkcert archive)
 ssh-keygen -Y verify -f /home/users/builder/.ssh/signing/allowed_signers \
@@ -341,7 +345,7 @@ ssh-keygen -Y verify -f /home/users/builder/.ssh/signing/allowed_signers \
 ```
 
 > [!NOTE]
-> For in-depth cryptographic specifications, key rotation policies, automated CI/CD signing workflows, and verification scripts, consult **[SIGNING.md](SIGNING.md)**.
+> For in-depth cryptographic specifications, key rotation policies, automated CI/CD signing workflows, and verification scripts, consult **[build_SIGNING.md](build_SIGNING.md)**.
 
 ### 8.8. Configurable Codebase Tree
 ```bash
@@ -354,25 +358,25 @@ Force-update dependencies to their latest upstream releases across all sub-proje
 
 ```bash
 # Update modules and package full release suite (.tar.xz, .deb, .rpm) across all projects in parallel
-./build_orchestrate.sh --exec --parallel --jobs=4 --all --update-modules
+./build_orchestrate.sh --exec --parallel --jobs=4 --all-pkg --update-modules
 
 # Sequential dependency update and full release build
-./build_orchestrate.sh --exec --all --update-modules
+./build_orchestrate.sh --exec --all-pkg --update-modules
 
 # Update modules and compile static binaries only in parallel (skipping packaging)
 ./build_orchestrate.sh --exec --parallel --jobs=4 --update-modules
 
 # Update modules and package while ignoring non-fatal linter/vulnerability audit warnings
-./build_orchestrate.sh --exec --parallel --jobs=4 --all --update-modules --ignore-audit
+./build_orchestrate.sh --exec --parallel --jobs=4 --all-pkg --update-modules --ignore-audit
 
 # Update modules, build full release packages, and cryptographically sign in parallel
-./build_orchestrate.sh --exec --parallel --jobs=4 --all --update-modules --sign
+./build_orchestrate.sh --exec --parallel --jobs=4 --all-pkg --update-modules --sign
 ```
 
 ---
 
 ## 9. References & Related Documentation
 
-* **[SIGNING.md](SIGNING.md)**: Master architectural guide and reference manual for OpenSSH Ed25519 release artifact signing, key generation, trust anchors (`allowed_signers`), automated verification scripts, and CI/CD security policies.
+* **[build_SIGNING.md](build_SIGNING.md)**: Master architectural guide and reference manual for OpenSSH Ed25519 release artifact signing, key generation, trust anchors (`allowed_signers`), automated verification scripts, and CI/CD security policies.
 * **[build_go_README.md](build_go_README.md)**: In-depth documentation for the module compilation engine (`build_go.sh`), covering `build.json` schema specifications, multi-stage static analysis, dependency vendoring, and packaging mechanics.
 * **[build.inc](build.inc)**: Core include library providing standardized exit codes, host detection, NDJSON audit logging, directory lifecycle tracking, and cryptographic helper routines.

@@ -29,15 +29,15 @@ This document provides the architectural specification, operational sequence bre
 * **Cygwin / MSYS2 Windows Support:** Native Windows execution without WSL requirements; cross-compiles for Linux natively via Go (`GOOS=linux`) and builds Windows executables (`.exe`) and Zip archives using host utilities.
 * **Metadata Autodetection via `build.json`:** Extracts application settings, semantic versions, entrypoints, and packaging metadata dynamically from `build.json`, backed by a robust multi-engine fallback parser.
 * **Zero-Trust Quality Assurance & Testing:** Enforces automated test suites with coverage (`--testsuite`), formatting (`gofumpt`), static analysis (`go vet`, `golangci-lint`), and security vulnerability detection (`govulncheck`, `gosec`).
-* **Orthogonal Platform & Packaging Controls:** Decouples platform targets (`--windows`, `--linux`) from packaging formats (`--archive`, `--rpm`, `--deb`, `--all`), allowing flexible matrix builds.
+* **Orthogonal Platform & Packaging Controls:** Decouples platform targets (`--windows`, `--linux`, `--all-platform`) from packaging formats (`--archive`, `--rpm`, `--deb`, `--all-pkg`), allowing flexible matrix builds.
 * **Parallel-Safe Integrity & Code Signing:** Generates dedicated per-archive `.sha256` checksums and optional Ed25519 OpenSSH digital signatures (`.sig`) without concurrency locking.
-* **Intermediate Binary Cleanup:** Automatically cleans intermediate binaries in `../bin/` after packaging into `../distrib/`, preserving disk space and preventing stale binary reuse.
+* **Intermediate Binary Cleanup:** Automatically cleans intermediate binaries in `../bin/` (relative to `CODE_HOME`) after packaging into `../distrib/`, preserving disk space and preventing stale binary reuse.
 * **Artifact Lifecycle Management:** Supports `--clean` to cleanly wipe previously built module binaries and distribution packages.
 
 ### Related Documentation & Toolchain Links
 * **[build.inc](build.inc)**: Shared library providing diagnostic exit codes, logging primitives, temporary directory tracking, OS detection, and cryptographic helpers.
 * **[build_orchestrate_README.md](build_orchestrate_README.md)**: Technical reference for the multi-module orchestrator, parallel workpool scheduler, and template governance engine.
-* **[SIGNING.md](SIGNING.md)**: Complete guide covering OpenSSH release artifact signing and verification workflows.
+* **[build_SIGNING.md](build_SIGNING.md)**: Complete guide covering OpenSSH release artifact signing and verification workflows.
 
 ---
 
@@ -78,7 +78,7 @@ graph TD
         TargetBuild -->|Windows| BuildWin["CGO_ENABLED=0 GOOS=windows go build -> ../bin/<app>.exe"]
     end
 
-    CompilePhase --> PkgCheck{"Packaging Requested? (--archive, --rpm, --deb, --all)"}
+    CompilePhase --> PkgCheck{"Packaging Requested? (--archive, --rpm, --deb, --all-pkg)"}
     
     subgraph PackagingPhase ["Distribution Packaging & Cryptographic Finalization"]
         PkgCheck -->|--archive Linux| ArcLinux["Stage & Build .tar.xz (XZ_OPT=-T0)"]
@@ -203,20 +203,20 @@ func main() {
 
 ## 5. Multi-Format Distribution Packaging
 
-When packaging flags are supplied, artifacts are staged in isolated temporary directories created via [make_temp_dir](build.inc#L282-L300) and emitted directly to `../distrib/`:
+When packaging flags are supplied, artifacts are staged in isolated temporary directories created via [make_temp_dir](build.inc#L282-L300) and emitted directly to `../distrib/` (relative to `CODE_HOME`):
 
 ### 1. Linux Tarball Release Archive (`.tar.xz`)
-* **Trigger:** `--linux --archive` (or `--all`)
+* **Trigger:** `--linux --archive` (or `--all-pkg`)
 * **Structure:** Includes static binary and documentation files (`LICENSE`, `README.md`, `CHANGELOG.md` via `DEFAULT_DOC_FILES`) staged under `doc/`.
 * **Compression:** Multi-threaded XZ compression (`tar -C ${STAGE} -Jcf ${ARC_FILE} <app> doc`).
 
 ### 2. Windows Zipball Release Archive (`.zip`)
-* **Trigger:** `--windows --archive` (or `--all` on Windows)
+* **Trigger:** `--windows --archive` (or `--all-pkg` on Windows)
 * **Structure:** Includes Windows executable (`<app>.exe`) and documentation (`LICENSE`, `README.md`, `CHANGELOG.md`) converted to CRLF line endings via `unix2dos`.
 * **Compression:** Maximum zip compression (`zip -9rq ${WIN_ARC_FILE} <app>.exe doc`).
 
 ### 3. Debian Package (`.deb`)
-* **Trigger:** `--linux --deb` (or `--all`)
+* **Trigger:** `--linux --deb` (or `--all-pkg`)
 * **Structure:** 
   - Binary installed to `${INSTALL_PATH}/${APP_NAME}` (`chmod 0755`)
   - Documentation installed to `/usr/share/doc/${APP_NAME}/`
@@ -225,7 +225,7 @@ When packaging flags are supplied, artifacts are staged in isolated temporary di
 * **Builder:** `dpkg-deb --build --root-owner-group ${STAGE_DEB} ${DEB_FILE}`
 
 ### 4. Red Hat Package (`.rpm`)
-* **Trigger:** `--linux --rpm` (or `--all`)
+* **Trigger:** `--linux --rpm` (or `--all-pkg`)
 * **Structure:**
   - Generates standalone RPM spec file in `${RPM_TOPDIR}/SPECS/${APP_NAME}.spec`
   - Sanitizes `%` macros in summary, description, URL, and license
@@ -234,7 +234,7 @@ When packaging flags are supplied, artifacts are staged in isolated temporary di
 * **Builder:** `rpmbuild --define "_topdir ${RPM_TOPDIR}" -bb ${SPEC_FILE}`
 
 ### 5. Sanitized Source Archive (`-src.tar.xz` / `-src.zip`)
-* **Trigger:** `--archive` (or `--all`)
+* **Trigger:** `--archive` (or `--all-pkg`)
 * **Security Filter:** Enforces `SOURCE_EXCLUDES` denylist from [build.inc](build.inc#L168-L200) to strip `.git`, `.env*`, `*.key`, `*.pem`, `*.token`, `id_*`, binaries, and temporary files.
 
 ---
@@ -286,6 +286,7 @@ When packaging flags are supplied, artifacts are staged in isolated temporary di
 | :--- | :--- | :--- | :--- |
 | `--windows` | Target Windows binary (`../bin/<name>.exe`). Default on Windows hosts. | Flag | Host default |
 | `--linux` | Target static Linux binary (`../bin/<name>`). Default on Linux hosts. | Flag | Host default |
+| `--all-platform` | Target both Windows and Linux binaries. | Flag | `false` |
 
 ### Packaging Actions
 
@@ -294,12 +295,12 @@ When packaging flags are supplied, artifacts are staged in isolated temporary di
 | `--archive` | Package release archive (`.zip` on Windows, `.tar.xz` on Linux) + source archive + dedicated `.sha256`. | Flag | `false` |
 | `--rpm` | Build RPM package in `../distrib/` via `rpmbuild` (Linux target only; ignored on Windows). | Flag | `false` |
 | `--deb` | Build DEB package in `../distrib/` via `dpkg-deb` (Linux target only; ignored on Windows). | Flag | `false` |
-| `--all` | Build all release artifacts (`--archive --rpm --deb` on Linux, `--archive` on Windows). | Flag | `false` |
+| `--all-pkg` | Build all release artifacts (`--archive --rpm --deb` on Linux, `--archive` on Windows). Alias: `--all`. | Flag | `false` |
 | `--sign` | Sign release archives (`<archive>.sig`) with default SSH key (`~/.ssh/signing/release_key`). | Flag | `false` |
 | `--sign=<path>` | Sign release archives (`<archive>.sig`) with specified SSH private key or directory. | String | *Disabled* |
-| `--generate-key` | Generate Ed25519 signing key pair at `~/.ssh/signing/release_key` and exit (requires `--identity=<id>`). | Flag | *None* |
-| `--generate-key=<path>` | Generate a new Ed25519 SSH signing key pair at `<path>` and exit (requires `--identity=<id>`). | String | *None* |
-| `--identity=<id>` | Signer identity email/name (mandatory with `--generate-key`, e.g. `mis@criticalsys.net`). | String | *None* |
+| `--genkey` | Generate Ed25519 signing key pair at `~/.ssh/signing/release_key` and exit (requires `--identity=<id>`). Alias: `--generate-key`. | Flag | *None* |
+| `--genkey=<path>` | Generate a new Ed25519 SSH signing key pair at `<path>` and exit (requires `--identity=<id>`). Alias: `--generate-key=<path>`. | String | *None* |
+| `--identity=<id>` | Signer identity email/name (mandatory with `--genkey`, e.g. `mis@criticalsys.net`). | String | *None* |
 | `--comment=<text>` | Human-readable key comment embedded in `.pub` (optional, defaults to `Critical Systems Release Signing <<id>>`). | String | Formatted from `<id>` |
 
 ### Operational Options
@@ -347,7 +348,7 @@ Wipe previously compiled binaries and distribution packages for this module:
 ./build_go.sh --clean
 
 # Pristine clean rebuild
-./build_go.sh --clean --linux --all
+./build_go.sh --clean --linux --all-pkg
 ```
 
 ### 9.4. Automated Unit & Coverage Testing
@@ -365,7 +366,7 @@ Execute formatting, static checks, and vulnerability scanning inside CI/CD:
 ### 9.6. Full Release Artifact Suite (Tarballs, DEBs, RPMs, Checksums)
 Compile static binary, build all Linux packages in `../distrib/`, generate per-archive `.sha256` files, and clean intermediate binaries:
 ```bash
-./build_go.sh --linux --all
+./build_go.sh --linux --all-pkg
 ```
 Verify generated archive checksums:
 ```bash
@@ -377,10 +378,10 @@ sha256sum -c <module_name>-1.0.5-linux_amd64.tar.xz.sha256
 Compile, package, and sign all release archives with an isolated Ed25519 signing key:
 ```bash
 # 1. Generate dedicated release signing key pair (run once)
-./build_go.sh --generate-key --identity=mis@criticalsys.net
+./build_go.sh --genkey --identity=mis@criticalsys.net
 
 # 2. Build and sign release artifacts
-./build_go.sh --linux --all --sign
+./build_go.sh --linux --all-pkg --sign
 ```
 Verify artifact signature:
 ```bash
@@ -394,14 +395,14 @@ ssh-keygen -Y verify -f allowed_signers -I mis@criticalsys.net -n file \
   -s <module_name>-1.0.5-linux_amd64.tar.xz.sig \
   < <module_name>-1.0.5-linux_amd64.tar.xz
 ```
-*(For comprehensive security guidelines and CI/CD signing workflows, see [SIGNING.md](SIGNING.md).)*
+*(For comprehensive security guidelines and CI/CD signing workflows, see [build_SIGNING.md](build_SIGNING.md).)*
 
 ### 9.8. Dependency Updates (`--update-modules`)
 Force-update dependencies to their latest upstream releases while packaging or compiling:
 
 ```bash
 # Update module dependencies and build full release packages (.tar.xz, .deb, .rpm)
-../../build_go.sh --linux --all --update-modules
+../../build_go.sh --linux --all-pkg --update-modules
 
 # Compile static binary only with updated dependencies
 ../../build_go.sh --compile-only --update-modules
@@ -413,4 +414,4 @@ Force-update dependencies to their latest upstream releases while packaging or c
 
 * **[build.inc](build.inc)**: Shared library providing diagnostic exit codes, logging primitives, temporary directory tracking, OS detection, and cryptographic helpers.
 * **[build_orchestrate_README.md](build_orchestrate_README.md)**: Technical reference for the multi-module orchestrator, parallel workpool scheduler, and template governance engine.
-* **[SIGNING.md](SIGNING.md)**: Complete guide covering OpenSSH release artifact signing and verification workflows.
+* **[build_SIGNING.md](build_SIGNING.md)**: Complete guide covering OpenSSH release artifact signing and verification workflows.

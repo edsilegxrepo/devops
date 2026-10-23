@@ -63,10 +63,10 @@
 #      '--compile-only'.
 #
 #  Syntax:
-#    ./build_go.sh [--windows] [--linux]
-#                  [--archive] [--rpm] [--deb] [--all]
+#    ./build_go.sh [--windows] [--linux] [--all-platform]
+#                  [--archive] [--rpm] [--deb] [--all-pkg]
 #                  [--clean] [--compile-only] [--lint-only] [--ignore-audit] [--testsuite]
-#                  [--sign[=<key>]] [--generate-key[=<path>]] [--identity=<id>]
+#                  [--sign[=<key>]] [--genkey[=<path>]] [--identity=<id>]
 #                  [--update-modules] [--vendor] [--main-path=<path>] [--log=<file>]
 # ==============================================================================
 
@@ -207,7 +207,7 @@ check_dependencies() {
       missing+=("ssh-keygen (OpenSSH)")
     fi
     if [ ! -f "${SIGN_KEY}" ]; then
-      log_error "SSH signing key not found at '${SIGN_KEY}'. Run '--generate-key' to create one."
+      log_error "SSH signing key not found at '${SIGN_KEY}'. Run '--genkey' to create one."
       exit "${EXIT_CONFIG}"
     fi
   fi
@@ -232,18 +232,19 @@ Usage: $0 [platforms...] [packaging...] [options...]
 Target Platforms:
   --windows           Target Windows (builds ../bin/<name>.exe; default on Windows)
   --linux             Target Linux (builds static ../bin/<name>; default on Linux)
+  --all-platform      Target both Windows and Linux
 
 Packaging Actions:
   --archive           Build release archive (.zip for Windows, .tar.xz for Linux)
                       plus source archive and dedicated .sha256 hash files
   --rpm               Build RPM package in ../distrib/ (Linux target only)
   --deb               Build DEB package in ../distrib/ (Linux target only)
-  --all               Build all release artifacts (--archive --rpm --deb on Linux)
+  --all-pkg           Build all release artifacts (--archive --rpm --deb on Linux)
   --sign              Sign release archives with default SSH key (~/.ssh/signing/release_key)
   --sign=<path>       Sign release archives with specified SSH private key
-  --generate-key      Generate Ed25519 signing key pair at ~/.ssh/signing/release_key and exit (requires --identity=<id>)
-  --generate-key=<path> Generate a new Ed25519 SSH signing key pair at <path> and exit (requires --identity=<id>)
-  --identity=<id>     Signer identity email/name (mandatory with --generate-key, e.g. mis@criticalsys.net)
+  --genkey            Generate Ed25519 signing key pair at ~/.ssh/signing/release_key and exit (requires --identity=<id>)
+  --genkey=<path>     Generate a new Ed25519 SSH signing key pair at <path> and exit (requires --identity=<id>)
+  --identity=<id>     Signer identity email/name (mandatory with --genkey, e.g. mis@criticalsys.net)
   --comment=<text>    Custom key comment (optional, defaults to 'Critical Systems Release Signing <<id>>')
 
 Operational Options:
@@ -304,8 +305,8 @@ if [ "${HOST_OS}" == "WIN" ]; then
 fi
 
 # Directory Resolution
-BINDIR="${BIN_DIR:-${SCRIPT_DIR}/${DEFAULT_BIN_DIR}}"
-DISTDIR="${DIST_DIR:-${SCRIPT_DIR}/${DEFAULT_DIST_DIR}}"
+BINDIR="${BIN_DIR:-${DEFAULT_BIN_DIR}}"
+DISTDIR="${DIST_DIR:-${DEFAULT_DIST_DIR}}"
 
 if [ "${HOST_OS}" == "WIN" ] && command -v cygpath &> /dev/null; then
   BINDIR="$(cygpath -m "${BINDIR}")"
@@ -356,6 +357,12 @@ while [ $# -gt 0 ]; do
       HAS_ACTION=true
       shift
       ;;
+    --all-platform)
+      TARGET_WIN=true
+      TARGET_LINUX=true
+      HAS_ACTION=true
+      shift
+      ;;
     --archive)
       DO_ARCHIVE=true
       HAS_ACTION=true
@@ -371,7 +378,7 @@ while [ $# -gt 0 ]; do
       HAS_ACTION=true
       shift
       ;;
-    --all)
+    --all-pkg|--all)
       DO_ARCHIVE=true
       HAS_ACTION=true
       if [ "${HOST_OS}" == "LINUX" ]; then
@@ -451,12 +458,12 @@ while [ $# -gt 0 ]; do
       log_error "--comment requires a value. Format: --comment=<text>"
       usage "${EXIT_USAGE}"
       ;;
-    --generate-key)
+    --genkey|--generate-key)
       GENERATE_KEY=true
       GENERATE_KEY_PATH="${DEFAULT_SIGN_KEY}"
       shift
       ;;
-    --generate-key=*)
+    --genkey=*|--generate-key=*)
       GENERATE_KEY=true
       GENERATE_KEY_PATH="${1#*=}"
       shift
@@ -986,8 +993,8 @@ fi
 # 6. Intermediate Binary Cleanup (if packaging was requested)
 if [ "${HAS_PACKAGING}" = true ]; then
   log_info "Cleaning up intermediate binaries for ${APP_NAME} in ${BINDIR}"
-  rm -f "${BINDIR}/${APP_NAME}" "${BINDIR}/${APP_NAME}.exe" 2>/dev/null || true
-  rmdir "${BINDIR}" 2>/dev/null || true
+  rm -f "${BINDIR}/${APP_NAME}" "${BINDIR}/${APP_NAME}.exe" "${BINDIR}/${APP_NAME}.tmp."* 2>/dev/null || true
+  mkdir -p "${BINDIR}" 2>/dev/null || true
 fi
 
 echo "================================================================================"

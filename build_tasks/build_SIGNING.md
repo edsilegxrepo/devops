@@ -43,10 +43,10 @@ You can generate a dedicated Ed25519 signing key pair using the build toolchain 
 From the repository root, run:
 
 ```bash
-./build_orchestrate.sh --generate-key --identity=mis@criticalsys.net
+./build_orchestrate.sh --genkey --identity=mis@criticalsys.net
 ```
-*(Or specify a custom comment: `./build_orchestrate.sh --generate-key --identity=mis@criticalsys.net --comment="Critical Systems Release Signing <mis@criticalsys.net>"`)*
-*(Or specify a custom path: `./build_orchestrate.sh --generate-key=~/.ssh/signing/release_key --identity=mis@criticalsys.net`)*
+*(Or specify a custom comment: `./build_orchestrate.sh --genkey --identity=mis@criticalsys.net --comment="Critical Systems Release Signing <mis@criticalsys.net>"`)*
+*(Or specify a custom path: `./build_orchestrate.sh --genkey=~/.ssh/signing/release_key --identity=mis@criticalsys.net`)*
 
 > [!IMPORTANT]
 > The `--identity=<email-or-id>` flag is **mandatory** when generating a signing key. It defines your cryptographic principal in `allowed_signers`. By default, a human-readable comment (`Critical Systems Release Signing <<identity>>`) is automatically embedded in the public key, which can also be customized via `--comment="<text>"`.
@@ -95,16 +95,16 @@ chmod 644 ~/.ssh/signing/release_key.pub
 To compile, package, and sign all 20 modules simultaneously using the default key (`~/.ssh/signing/release_key`):
 
 ```bash
-./build_orchestrate.sh --exec --parallel --jobs=4 --linux --all --sign
+./build_orchestrate.sh --exec --parallel --jobs=4 --linux --all-pkg --sign
 ```
-*(Or with an explicit path: `./build_orchestrate.sh --exec --parallel --jobs=4 --linux --all --sign=~/.ssh/signing/release_key`)*
+*(Or with an explicit path: `./build_orchestrate.sh --exec --parallel --jobs=4 --linux --all-pkg --sign=~/.ssh/signing/release_key`)*
 
 ### Individual Sub-Project Build with Signing
 To build and sign a single project:
 
 ```bash
 cd private/<module_name>
-../../build_go.sh --linux --all --sign
+../../build_go.sh --linux --all-pkg --sign
 ```
 
 ### Key Path Resolution
@@ -262,7 +262,7 @@ jobs:
 
       - name: Build and Sign All Modules
         run: |
-          ./build_orchestrate.sh --exec --parallel --jobs=4 --linux --all --sign
+          ./build_orchestrate.sh --exec --parallel --jobs=4 --linux --all-pkg --sign
 
       - name: Publish Release Assets
         uses: softprops/action-gh-release@v2
@@ -277,7 +277,7 @@ jobs:
 1. **Keep Private Keys Out of Version Control**:
    `SOURCE_EXCLUDES` in [`build_go.sh`](build_go.sh) strictly excludes `*.key`, `*.pem`, `*.token`, and `.env*` files to ensure signing keys are never bundled into `-src.tar.xz` or `-src.zip`.
 2. **Key Rotation**:
-   To rotate your signing key, run `./build_orchestrate.sh --generate-key=<new_key_path> --identity=mis@criticalsys.net`, upload the new public key to your forge profile, and keep the old public key in your `allowed_signers` file with appropriate date/version annotations.
+   To rotate your signing key, run `./build_orchestrate.sh --genkey=<new_key_path> --identity=mis@criticalsys.net`, upload the new public key to your forge profile, and keep the old public key in your `allowed_signers` file with appropriate date/version annotations.
 3. **Namespace Isolation**:
    The `-n file` flag enforces that this SSH key is only recognized for signing file payloads, preventing signature cross-protocol re-use (e.g. Git commit signatures or SSH login handshakes).
 4. **SSH Client & Agent Isolation**:

@@ -100,9 +100,16 @@ export DEFAULT_PARALLEL_JOBS
 # ------------------------------------------------------------------------------
 # 4. Workspace, Directory & Toolchain Search Defaults
 # ------------------------------------------------------------------------------
+# Resolve Code Home (3 levels above private/devops/build_tasks)
+_BUILD_INC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+CODE_HOME="$(cd "${_BUILD_INC_DIR}/../../.." &> /dev/null && pwd)"
+export CODE_HOME
+export BUILD_HOME="${CODE_HOME}"
+export WORKSPACE_ROOT="${CODE_HOME}"
+
 export DEFAULT_CODE_BASE="private"
-export DEFAULT_BIN_DIR="../bin"
-export DEFAULT_DIST_DIR="../distrib"
+export DEFAULT_BIN_DIR="$(cd "${CODE_HOME}/../bin" 2>/dev/null && pwd || echo "${CODE_HOME}/../bin")"
+export DEFAULT_DIST_DIR="$(cd "${CODE_HOME}/../distrib" 2>/dev/null && pwd || echo "${CODE_HOME}/../distrib")"
 export DEFAULT_BUILD_GO_SCRIPT="build_go.sh"
 CODE_BASE="${DEFAULT_CODE_BASE}"
 CODE_EXCLUDES=("devops")
@@ -152,10 +159,10 @@ DEFAULT_DOC_FILES=(
 # ------------------------------------------------------------------------------
 # 6. Template Synchronization & Git Management Defaults (build_orchestrate.sh)
 # ------------------------------------------------------------------------------
-export DEFAULT_TEMPLATE_GITIGNORE="./TMPL.gitignore"
-export DEFAULT_TEMPLATE_SECURITY="./SECURITY.md"
-export DEFAULT_TEMPLATE_LICENSE="./LICENSE"
-export DEFAULT_GIT_AUTOSYNC_SCRIPT="./private/devops/git_repomgr/git_autosync.sh"
+export DEFAULT_TEMPLATE_GITIGNORE="${CODE_HOME}/TMPL.gitignore"
+export DEFAULT_TEMPLATE_SECURITY="${CODE_HOME}/SECURITY.md"
+export DEFAULT_TEMPLATE_LICENSE="${CODE_HOME}/LICENSE"
+export DEFAULT_GIT_AUTOSYNC_SCRIPT="${CODE_HOME}/private/devops/git_repomgr/git_autosync.sh"
 export DEFAULT_GIT_SYNC_MESSAGE="Module Updates"
 
 # ------------------------------------------------------------------------------
@@ -198,10 +205,12 @@ clean_workspace_artifacts() {
     rm -rf "${bin_dir:?}"/* 2>/dev/null || true
     log_success "Cleaned binary directory: ${bin_dir}"
   fi
+  mkdir -p "${bin_dir}" 2>/dev/null || true
   if [ -d "${dist_dir}" ]; then
     rm -rf "${dist_dir:?}"/* 2>/dev/null || true
     log_success "Cleaned distribution directory: ${dist_dir}"
   fi
+  mkdir -p "${dist_dir}" 2>/dev/null || true
 }
 
 # Function: clean_module_artifacts
@@ -522,7 +531,7 @@ generate_signing_key() {
 
   if [ -z "${key_identity}" ]; then
     log_error "--identity=<id> is MANDATORY when generating a signing key."
-    log_error "Example: --generate-key --identity=${DEFAULT_IDENTITY}"
+    log_error "Example: --genkey --identity=${DEFAULT_IDENTITY}"
     exit "${EXIT_USAGE}"
   fi
 

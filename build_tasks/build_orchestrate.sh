@@ -55,16 +55,17 @@
 #
 #  Syntax:
 #    ./build_orchestrate.sh [--exec] [--clean] [--parallel] [--jobs=N] [--fail-fast]
-#                   [--windows] [--linux] [--archive] [--rpm] [--deb] [--all]
+#                   [--windows] [--linux] [--all-platform] [--archive] [--rpm] [--deb] [--all-pkg]
 #                   [--compile-only] [--lint-only] [--ignore-audit] [--testsuite]
 #                   [--sync-templates] [--git-sync]
 # ==============================================================================
 
 set -euo pipefail
 
-# Resolve absolute path of workspace root
+# Resolve script directory and code home root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
-cd "${SCRIPT_DIR}" || exit 1
+CODE_HOME="$(cd "${SCRIPT_DIR}/../../.." &> /dev/null && pwd)"
+cd "${CODE_HOME}" || exit 1
 
 # Load central build include (constants, exit codes, defaults, and shared utilities)
 if [ ! -f "${SCRIPT_DIR}/build.inc" ]; then
@@ -75,8 +76,10 @@ fi
 source "${SCRIPT_DIR}/build.inc"
 
 BUILD_GO_SCRIPT="${SCRIPT_DIR}/${DEFAULT_BUILD_GO_SCRIPT}"
-BIN_DIR="${SCRIPT_DIR}/${DEFAULT_BIN_DIR}"
-DIST_DIR="${SCRIPT_DIR}/${DEFAULT_DIST_DIR}"
+BIN_DIR="${DEFAULT_BIN_DIR}"
+DIST_DIR="${DEFAULT_DIST_DIR}"
+export BIN_DIR
+export DIST_DIR
 
 # Function: cleanup_bin_dir
 # Objective: Removes intermediate compiled binaries from the binary directory
@@ -84,8 +87,8 @@ DIST_DIR="${SCRIPT_DIR}/${DEFAULT_DIST_DIR}"
 cleanup_bin_dir() {
   if [ -d "${BIN_DIR}" ]; then
     rm -rf "${BIN_DIR:?}"/* 2>/dev/null || true
-    rmdir "${BIN_DIR}" 2>/dev/null || true
   fi
+  mkdir -p "${BIN_DIR}" 2>/dev/null || true
 }
 
 # ------------------------------------------------------------------------------
@@ -251,7 +254,7 @@ run_builds() {
   local has_packaging=false
   for flag in "${target_flags[@]}"; do
     case "${flag}" in
-      --archive|--rpm|--deb|--all)
+      --archive|--rpm|--deb|--all-pkg|--all)
         has_packaging=true
         ;;
     esac
@@ -470,18 +473,19 @@ Parallel Execution Options:
 Platform Flags (forwarded to build_go.sh):
   --windows          Target Windows (builds ../bin/<name>.exe; default on Windows)
   --linux            Target Linux (builds static ../bin/<name>; default on Linux)
+  --all-platform     Target both Windows and Linux
 
 Packaging Flags (forwarded to build_go.sh):
   --archive          Build release archive (.zip for Windows, .tar.xz for Linux)
                      and dedicated .sha256 hash files (default packaging action)
   --rpm              Build RPM package in ../distrib/ (Linux target only)
   --deb              Build DEB package in ../distrib/ (Linux target only)
-  --all              Build all release artifacts (--archive --rpm --deb on Linux)
+  --all-pkg          Build all release artifacts (--archive --rpm --deb on Linux)
   --sign             Sign release archives with default SSH key (~/.ssh/signing/release_key)
   --sign=<path>      Sign release archives with specified SSH private key
-  --generate-key     Generate Ed25519 signing key pair at ~/.ssh/signing/release_key and exit (requires --identity=<id>)
-  --generate-key=<path> Generate a new Ed25519 SSH signing key pair at <path> and exit (requires --identity=<id>)
-  --identity=<id>    Signer identity email/name (mandatory with --generate-key, e.g. mis@criticalsys.net)
+  --genkey           Generate Ed25519 signing key pair at ~/.ssh/signing/release_key and exit (requires --identity=<id>)
+  --genkey=<path>    Generate a new Ed25519 SSH signing key pair at <path> and exit (requires --identity=<id>)
+  --identity=<id>    Signer identity email/name (mandatory with --genkey, e.g. mis@criticalsys.net)
   --comment=<text>   Custom key comment (optional, defaults to 'Critical Systems Release Signing <<id>>')
 
 Operational Flags (forwarded to build_go.sh):
@@ -606,11 +610,11 @@ main() {
         log_error "--comment requires a value. Format: --comment=<text>"
         exit "${EXIT_USAGE}"
         ;;
-      --generate-key)
-        generate_key_cmd="--generate-key"
+      --genkey|--generate-key)
+        generate_key_cmd="--genkey"
         shift
         ;;
-      --generate-key=*)
+      --genkey=*|--generate-key=*)
         generate_key_cmd="$1"
         shift
         ;;
