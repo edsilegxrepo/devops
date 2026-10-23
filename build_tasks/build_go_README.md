@@ -1,435 +1,416 @@
 # Architecture Reference: Go Compilation & Quality Pipeline Engine (`build_go.sh`)
 
-This document provides an architectural specification, operational sequence breakdown, and technical reference for [build_go.sh](build_go.sh), the core Go compilation, quality auditing, and packaging pipeline engine within the DevOps infrastructure.
+This document provides the architectural specification, operational sequence breakdown, and technical reference for [build_go.sh](build_go.sh), the core Go compilation, quality auditing, and packaging pipeline engine within the DevOps toolchain.
 
 ---
 
 ## 1. Application Overview and Objectives
 
-`build_go.sh` provides an enterprise-grade automated pipeline for Go applications. It enforces standardized formatting, executes multi-tier static code analysis and vulnerability scanning, compiles stripped Position Independent Executable (PIE) binaries with ASLR hardening, sanitizes codebases, and packages distribution archives accompanied by automated `SHA256SUMS` generation.
+[build_go.sh](build_go.sh) provides a hardened, module-agnostic build engine for Go applications. It enforces standardized formatting, executes multi-tier static code analysis and security vulnerability scanning, runs automated unit tests with coverage, compiles stripped static binaries (`CGO_ENABLED=0`), and packages standardized distribution artifacts (Tarball, Zipball, Debian `.deb`, and Red Hat `.rpm`) with parallel-safe `.sha256` checksums and optional OpenSSH digital signatures.
 
 ```
-+-------------------------------------------------------------------------------------------------------+
-|                                              build_go.sh                                              |
-|                                                                                                       |
-|  +---------------------+   +---------------------+   +---------------------+   +-------------------+  |
-|  | Quality & Audit     |   | Compiler Engine     |   | Sanitation Phase    |   | Packaging Engine  |  |
-|  | gofumpt, go vet     |-->| go build (-s -w,    |-->| dos2unix, chmod 644 |-->| zip / tar.xz      |  |
-|  | golangci-lint,      |   |  -trimpath, -build- |   | chmod 755 binary    |   | SHA256 calculation|  |
-|  | govulncheck, gosec  |   |  mode=pie, ldflags) |   | --version validation|   | (SHA256SUMS)      |  |
-|  +---------------------+   +---------------------+   +---------------------+   +-------------------+  |
-+-------------------------------------------------------------------------------------------------------+
++---------------------------------------------------------------------------------------------------------------+
+|                                                  build_go.sh                                                  |
+|                                                                                                               |
+|  +---------------------+   +---------------------+   +-----------------------+   +-------------------------+  |
+|  | Quality & Test Gate |   | Static Compiler     |   | Multi-Format Packager |   | Integrity & Signing     |  |
+|  | go test (-cover),   |-->| CGO_ENABLED=0,      |-->| .tar.xz (Linux),      |-->| <artifact>.sha256,      |  |
+|  | go vet, gofumpt,    |   | -trimpath, ldflags  |   | .zip (Windows),       |   | <artifact>.sig          |  |
+|  | golangci-lint,      |   | (Version, Git hash),|   | .deb (dpkg-deb),      |   | (ssh-keygen -Y sign),   |  |
+|  | govulncheck, gosec  |   | output to ../bin    |   | .rpm (rpmbuild)       |   | cleanup intermediate    |  |
+|  +---------------------+   +---------------------+   +-----------------------+   +-------------------------+  |
+|                                                                                                               |
+|  Sources: build.inc (Constants, Exit Codes, Host OS Detection, Logging, Sanitizers, Temp Trackers)            |
++---------------------------------------------------------------------------------------------------------------+
 ```
 
 ### Core Objectives
-* **Universal Path Normalization:** Transparently translates UNIX-like paths across Windows/MSYS2/Cygwin environments into Windows-native/mixed formats via `cygpath`, preventing compiler path resolution bugs and colon-separator collisions in `PATH`.
-* **Zero-Trust Quality Assurance:** Enforces formatting standards (`gofumpt`), static analysis (`go vet`, `golangci-lint`), and security vulnerability detection (`govulncheck`, `gosec`) prior to binary compilation.
-* **Hardened Binary Optimization:** Produces optimized, stripped (`-s -w`), path-trimmed (`-trimpath`), position-independent (`-buildmode=pie`) production binaries injected with version metadata via `-ldflags`.
-* **Reproducible Packaging & Integrity:** Automates source and binary distribution bundle generation (`.zip` on Windows, `.tar.xz` on Linux) with computed `SHA256SUMS` files.
-* **Cross-Compilation Awareness:** Automatically skips post-build runtime `--version` validation when target `GOOS`/`GOARCH` differs from the host environment.
+* **Single Static Binary Parity:** Compiles 100% static binaries (`CGO_ENABLED=0`) on Linux, eliminating external `glibc`/`musl` dependencies and reusing a single binary across Tarball archives, Debian packages, and RPM packages.
+* **Cygwin / MSYS2 Windows Support:** Native Windows execution without WSL requirements; cross-compiles for Linux natively via Go (`GOOS=linux`) and builds Windows executables (`.exe`) and Zip archives using host utilities.
+* **Metadata Autodetection via `build.json`:** Extracts application settings, semantic versions, entrypoints, and packaging metadata dynamically from `build.json`, backed by a robust multi-engine fallback parser.
+* **Zero-Trust Quality Assurance & Testing:** Enforces automated test suites with coverage (`--testsuite`), formatting (`gofumpt`), static analysis (`go vet`, `golangci-lint`), and security vulnerability detection (`govulncheck`, `gosec`).
+* **Orthogonal Platform & Packaging Controls:** Decouples platform targets (`--windows`, `--linux`) from packaging formats (`--archive`, `--rpm`, `--deb`, `--all`), allowing flexible matrix builds.
+* **Parallel-Safe Integrity & Code Signing:** Generates dedicated per-archive `.sha256` checksums and optional Ed25519 OpenSSH digital signatures (`.sig`) without concurrency locking.
+* **Intermediate Binary Cleanup:** Automatically cleans intermediate binaries in `../bin/` after packaging into `../distrib/`, preserving disk space and preventing stale binary reuse.
+* **Artifact Lifecycle Management:** Supports `--clean` to cleanly wipe previously built module binaries and distribution packages.
+
+### Related Documentation & Toolchain Links
+* **[build.inc](build.inc)**: Shared library providing diagnostic exit codes, logging primitives, temporary directory tracking, OS detection, and cryptographic helpers.
+* **[build_orchestrate_README.md](build_orchestrate_README.md)**: Technical reference for the multi-module orchestrator, parallel workpool scheduler, and template governance engine.
+* **[SIGNING.md](SIGNING.md)**: Complete guide covering OpenSSH release artifact signing and verification workflows.
 
 ---
 
-## 2. Architecture and Design Choices, Assumptions, Edge Cases, Performance
+## 2. Architecture and Design Choices
 
 ### 2.1. Architectural Layout
 
 ```mermaid
 graph TD
-    A["CLI Invocation (./build_go.sh)"] --> B["Environment & Toolchain Setup"]
-    B --> C["Path Normalization (cygpath / MinGW / Git)"]
-    C --> D["Metadata Autodetection (version.txt, main.txt)"]
+    CLI["CLI Invocation (./build_go.sh)"] --> SourceInc["Source build.inc & Register Traps"]
+    SourceInc --> CheckDeps["Check Toolchain Dependencies (check_dependencies)"]
+    CheckDeps --> ParseArgs{"Parse CLI Flags"}
     
-    D --> E{"Skip Audit? (--compile-only)"}
-    E -->|No| F["QA & Audit Gate"]
-    E -->|Yes| G["Compilation Phase"]
+    ParseArgs -->|--clean| CleanEngine["Clean Module Artifacts (clean_module_artifacts)"]
+    ParseArgs --> LoadConfig["Load & Parse build.json (parse_json_field)"]
     
-    subgraph QAGate ["Quality Assurance & Security Gate"]
-        F --> F1["go mod download & tidy"]
-        F1 --> F2["gofumpt formatting"]
-        F2 --> F3["go vet analysis"]
-        F3 --> F4["golangci-lint suite"]
-        F4 --> F5["govulncheck vulnerability scan"]
-        F5 --> F6["gosec AST security analysis"]
-        F6 --> F7{"--lint-only?"}
-        F7 -->|Yes| ExitLint["Exit with LINT_ERR Status"]
-        F7 -->|No| G
+    LoadConfig --> SkipAudit{"Skip Audit? (--compile-only)"}
+    SkipAudit -->|No| QAPhase["Quality Assurance & Audit Phase"]
+    SkipAudit -->|Yes| CompilePhase["Compilation Phase"]
+    
+    subgraph QAGate ["Quality Assurance, Test Suite & Security Gate"]
+        QAPhase --> TestSuite{"--testsuite?"}
+        TestSuite -->|Yes| RunTests["go test -v -cover ./... -> Exit 0/6"]
+        TestSuite -->|No| DepSync["go mod download & tidy"]
+        DepSync --> Vet["go vet static analysis"]
+        Vet --> Linters["Optional Linters: golangci-lint, govulncheck, gosec"]
+        Linters --> LintOnly{"--lint-only?"}
+        LintOnly -->|Yes| ExitLint["Exit with LINT_ERR Status"]
+        LintOnly -->|No| GateCheck{"LINT_ERR > 0?"}
+        GateCheck -->|Yes & !--ignore-audit| AbortAudit["Halt Build (Exit 5)"]
+        GateCheck -->|No or --ignore-audit| CompilePhase
     end
 
-    subgraph CompileGate ["Hardened Compilation Engine"]
-        G --> G1["go build -s -w -trimpath -buildmode=pie"]
-        G1 --> G2["Inject Version Metadata via -X ldflags"]
-        G2 --> G3["Output to BINDIR (bin/)"]
+    subgraph CompilePhase ["Static Compilation Engine"]
+        CompilePhase --> Flags["Resolve LDFLAGS (-X version, -X git_hash) & -trimpath"]
+        Flags --> TargetBuild{"Target Platforms"}
+        TargetBuild -->|Linux| BuildLinux["CGO_ENABLED=0 GOOS=linux go build -> ../bin/<app>"]
+        TargetBuild -->|Windows| BuildWin["CGO_ENABLED=0 GOOS=windows go build -> ../bin/<app>.exe"]
     end
 
-    CompileGate --> H["Workspace & File Permission Sanitation"]
-    H --> H1["dos2unix on source & config files"]
-    H1 --> H2["chmod 644 on sources / chmod 755 on binary"]
-    H2 --> H3{"Cross-Compilation Detected?"}
-    H3 -->|No| H4["Execute ./binary --version"]
-    H3 -->|Yes| H5["Skip Execution Validation"]
-
-    H4 --> I{"--publish Flag Present?"}
-    H5 --> I
+    CompilePhase --> PkgCheck{"Packaging Requested? (--archive, --rpm, --deb, --all)"}
     
-    subgraph PackagingGate ["Distribution & Cryptographic Hash Gate"]
-        I -->|Yes| J{"Platform OS"}
-        J -->|Windows| J1["Package zip (source + binary)"]
-        J -->|Linux| J2["Package tar.xz (source + binary)"]
-        J1 --> K["Compute SHA256 of Archives"]
-        J2 --> K
-        K --> L["Write hashes to DISTDIR/SHA256SUMS"]
+    subgraph PackagingPhase ["Distribution Packaging & Cryptographic Finalization"]
+        PkgCheck -->|--archive Linux| ArcLinux["Stage & Build .tar.xz (XZ_OPT=-T0)"]
+        PkgCheck -->|--archive Windows| ArcWin["Stage & Build .zip (zip -9rq)"]
+        PkgCheck -->|--deb Linux| PkgDeb["Stage DEBIAN/control, md5sums -> dpkg-deb"]
+        PkgCheck -->|--rpm Linux| PkgRpm["Stage SPECS, SOURCES -> rpmbuild"]
+        PkgCheck -->|--archive| SrcArc["Stage & Build Sanitized Source Archive (-src.tar.xz / -src.zip)"]
+        
+        ArcLinux --> Finalize["finalize_artifact: Compute .sha256 & SSH .sig"]
+        ArcWin --> Finalize
+        PkgDeb --> Finalize
+        PkgRpm --> Finalize
+        SrcArc --> Finalize
+        Finalize --> CleanIntermediates["Purge ../bin/<app> intermediate binaries"]
     end
-    
-    I -->|No| Complete["Build Complete"]
-    L --> Complete
+
+    PkgCheck -->|No| Complete["Build Complete (Binary left in ../bin)"]
+    CleanIntermediates --> Complete
 ```
 
 ### 2.2. Design Principles & Choices
-1. **Dynamic Toolchain Discovery & PATH Injection:** The `normalize_and_add_to_path` routine handles custom `CC` paths and `GIT_BASE` paths, falling back to standard Windows MinGW/Git locations (`d:/dev/mingw64/bin`, `d:/dev/git/bin`) while converting Windows drive notation (`C:\...`) to UNIX `/c/...` to avoid POSIX `PATH` colon splitting.
-2. **Metadata Auto-Discovery:**
-   - Detects `APP_NAME` from `$(basename "$(pwd)")`.
-   - Reads version numbers from `version.txt` (falling back to `dev`) and attaches the build timestamp: `${VERSION_VAL}-$(date +%Y%m%d)`.
-   - Inspects `main.txt` to dynamically route custom entrypoint packages, custom version variable targets (`VERSION_PKG`), and Git commit hash variable targets (`BUILD_PKG`).
-3. **Hardened Compiler Flags:**
-   - `-s -w`: Strips symbol tables and DWARF debug info to shrink binaries and deter reverse-engineering.
-   - `-trimpath`: Strips absolute file system paths from panic traces and binary metadata.
-   - `-buildmode=pie`: Generates Position Independent Executables, enabling full Address Space Layout Randomization (ASLR) protections by host OS kernels.
-4. **Declarative Module Lock:** Honors `donot-update-mod.token`. If present, module upgrades (`go get -u`) are bypassed during QA unless `--update-modules` is explicitly supplied.
-5. **DRY Packaging & Integrity Hashing:** Declares `SRC_ARC` and `BIN_ARC` variables per OS target and computes SHA256 checksums of archive basenames directly into `${DISTDIR}/SHA256SUMS`.
+1. **100% Static Binaries (`CGO_ENABLED=0`):** Linux binaries are built completely static with no libc/musl runtime links. This ensures maximum portability across CentOS, RHEL, Rocky Linux, Ubuntu, Debian, Alpine, and Amazon Linux.
+2. **Metadata Architecture (`build.json`):** Replaces legacy flat files (`version.txt`, `main.txt`) with structured, declarative JSON configuration. Supported fields include semantic versioning, application entrypoints, summary/description, maintainer, license, URL, and packaging classifications.
+3. **Multi-Engine Fallback JSON Parser:** [parse_json_field](build.inc#L469-L506) queries JSON fields using `jq`, falling back to `python3`, `python`, or a native `awk` stream scanner if dedicated tools are unavailable on minimal build nodes.
+4. **Per-Archive Checksum Generation:** Replaces monolithic `SHA256SUMS` files with individual `<archive>.sha256` files generated concurrently alongside each package in `../distrib/`. This eliminates race conditions during parallel module orchestration.
+5. **OpenSSH Cryptographic Signing:** Creates `<archive>.sig` signatures using native `ssh-keygen -Y sign -f <key> -n file <artifact>`, establishing cryptographic publisher identity verifiable without GPG/PGP dependencies.
+6. **Path Trimming & Symbol Stripping:** Uses `-trimpath` to eliminate host filesystem paths from stack traces and embeds `-ldflags="-s -w"` to strip debug symbols, reducing final binary footprint by 40–60%.
+7. **Intermediate Binary Cleanup:** When release packaging is requested, intermediate uncompressed binaries in `../bin/` are packed into release artifacts in `../distrib/` and then cleanly deleted, preventing stale build artifacts.
 
-### 2.3. Assumptions
-* Go 1.21+ compiler is installed and present in the host `PATH`.
-* The project root contains a valid Go project structure or `go.mod` (auto-initialized if absent).
-* Distribution output is anchored to `../bin` and `../distrib` relative to `build_go.sh`.
+---
 
-### 2.4. Edge Cases Handled
-* **Missing Tooling Fallbacks:** Optional analyzers (`golangci-lint`, `govulncheck`, `gosec`) emit descriptive warnings instead of failing the build if not installed.
-* **Cross-Compilation:** Detects when `GOOS` or `GOARCH` deviates from `$(go env GOOS)`/`$(go env GOARCH)` and gracefully bypasses binary execution validation (`--version`).
-* **Line Ending Normalization:** Uses `dos2unix` across code and config files (`.go`, `.mod`, `.sum`, `.txt`, `.md`, `LICENSE`) to prevent CRLF-related build artifacts or checksum discrepancies across operating systems.
+## 3. Metadata Specification (`build.json`)
 
-### 2.5. Metadata Configuration Specification (`version.txt` and `main.txt`)
+The build engine dynamically discovers project and compiler metadata from `build.json` located in the active module root:
 
-The build engine dynamically discovers project and compiler metadata from configuration files in the active module root:
+### JSON Schema & Field Reference
 
-#### `version.txt`
-Specifies the base semantic version string (e.g., `1.4.0`). The script sanitizes input by stripping non-numeric and non-dot characters (`tr -cd '0-9.'`), defaulting to `dev` if absent. The active build date (`YYYYMMDD`) is appended automatically to produce `${APP_VERSION}` (e.g., `1.4.0-20260909`).
-
-#### `main.txt` Format Specification
-`main.txt` is an optional line-delimited configuration file that configures the application entrypoint path and `-X` variable injection targets for the Go linker:
-
-```text
-<Line 1: Entrypoint Package Path>
-<Line 2: Version Symbol Target>
-<Line 3: Git Hash Symbol Target>
+```json
+{
+  "name": "checkcert",
+  "version": "1.0.5",
+  "release": "1",
+  "channel": "release",
+  "entrypoint": ".",
+  "version_pkg": "main.version",
+  "build_pkg": "main.build",
+  "summary": "SSL/TLS Certificate Expiration Checker",
+  "description": "High-performance utility for auditing and validating X.509 certificates and SSL endpoints.",
+  "maintainer": "Critical Systems <mis@criticalsys.net>",
+  "license": "MIT",
+  "url": "https://criticalsys.net",
+  "section": "utils",
+  "priority": "optional",
+  "install_path": "/usr/local/bin",
+  "cgo": false
+}
 ```
 
-| Line | Target Variable | Sanitization Filter | Default | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| **Line 1** | `MAIN_PATH` | `tr -cd 'a-zA-Z0-9./_-'` | `""` (root package) | Relative path to the Go main package / entrypoint (e.g., `./cmd/dirpoller`). Can be overridden on the command line via `--main-path=<path>`. |
-| **Line 2** | `VERSION_PKG` | `tr -cd 'a-zA-Z0-9./_-'` | `main.version` | Target Go variable symbol for version injection (`-X ${VERSION_PKG}=${APP_VERSION}`). |
-| **Line 3** | `BUILD_PKG` | `tr -cd 'a-zA-Z0-9./_-'` | `""` (disabled) | Target Go variable symbol for Git commit hash injection (`-X ${BUILD_PKG}=${GIT_HASH}`). When defined, the short commit hash (`git rev-parse --short HEAD`) is automatically queried and injected. |
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `name` | String | `$(basename $(pwd))` | Name of the compiled binary and base package name. |
+| `version` | String | `0.1.0` | Base semantic version string (e.g. `1.0.5`). |
+| `release` | String | `1` | Packaging release increment. Combined with OS ID and channel for RPM/DEB tags. |
+| `channel` | String | `xg` | Distribution channel (e.g. `xg`, `release`, `stable`, `beta`). |
+| `entrypoint` | String | `.` | Relative path to the Go main package (can be overridden via `--main-path=<path>`). |
+| `version_pkg` | String | `main.version` | Target Go variable symbol for version injection (`-X ${version_pkg}=${version}`). |
+| `build_pkg` | String | `""` (disabled) | Target Go variable symbol for Git commit hash injection (`-X ${build_pkg}=${git_hash}`). |
+| `summary` | String | `<name> binary` | Single-line summary used in RPM spec and Debian control headers. |
+| `description` | String | `<name> command-line application written in Go.` | Multi-line description sanitized for RFC 822 (Debian) and RPM spec macros. |
+| `maintainer` | String | `Mis Center <support@criticalsys.net>` | Package maintainer name and email address. |
+| `license` | String | `MIT` | Open source or proprietary software license identifier. |
+| `url` | String | `https://criticalsys.net` | Corporate or project homepage URL. |
+| `section` | String | `utils` | Debian package repository classification. |
+| `priority` | String | `optional` | Debian package priority level. |
+| `install_path` | String | `/usr/bin` | Destination directory where the binary is installed in DEB and RPM packages. |
+| `cgo` | Boolean | `false` | Specifies whether CGO dynamic linking is disabled (enforcing 100% static compilation). |
 
-##### Example `main.txt`
-```text
-./cmd/dirpoller
-main.version
-main.build
-```
+### Go Code Variable Injection Example
 
-##### Corresponding Go Code Example
 ```go
 package main
 
 import "fmt"
 
 var (
-    version = "dev"
-    build   = "unknown" // Populated at compile time via -X main.build
+    version = "dev"     // Populated at compile time via -X main.version=1.0.5
+    build   = "unknown" // Populated at compile time via -X main.build=a1b2c3d
 )
 
-func printVersion() {
-    fmt.Printf("Version: %s (commit: %s)\n", version, build)
+func main() {
+    fmt.Printf("checkcert v%s (commit: %s)\n", version, build)
 }
 ```
 
 ---
 
-## 3. Data Flow and Control Logic
+## 4. Quality Assurance, Test Strategy & Security Gates
 
-### 3.1. Operational Flow and Code Relations
+[build_go.sh](build_go.sh) incorporates a multi-tier defense-in-depth quality and security inspection pipeline before compilation:
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Dev as Developer / CI Pipeline
-    participant Script as build_go.sh
-    participant GoEnv as Go Toolchain
-    participant Linters as Linters & Scanners
-    participant FS as Local Filesystem & Distrib
+### 4.1. Automated Unit & Coverage Testing (`--testsuite`)
+* Executes `go test -v -cover ./...` across all internal packages.
+* Operates in isolation: upon completing tests, exits immediately with `EXIT_SUCCESS` (0) on passing tests or `EXIT_TEST` (6) on any failure.
+* Prevents flawed or unverified code from progressing to compilation or packaging.
 
-    Dev->>Script: ./build_go.sh --publish
-    Script->>Script: normalize_and_add_to_path()
-    Script->>FS: Read version.txt, main.txt, go.mod
-    
-    rect rgb(240, 245, 255)
-        Note over Script,Linters: Phase 1: Quality Assurance & Audit
-        Script->>GoEnv: go mod download & tidy
-        Script->>Linters: gofumpt, go vet
-        Script->>Linters: golangci-lint, govulncheck, gosec
-    end
+### 4.2. Static Code Analysis & Formatting
+* **`gofumpt`**: Enforces strict canonical Go formatting (if installed).
+* **`go vet`**: Detects structural defects, unkeyed composite literals, printf format mismatches, and unreachable code.
 
-    rect rgb(245, 255, 240)
-        Note over Script,GoEnv: Phase 2: Compilation & Optimization
-        Script->>GoEnv: go build -ldflags "-s -w -X ..." -trimpath -buildmode=pie
-        GoEnv->>FS: Emit stripped PIE binary to bin/
-    end
+### 4.3. Multi-Linter Suite
+* **`golangci-lint`**: Runs with `--no-config --timeout=5m` to provide an aggregated evaluation across cyclomatic complexity, dead code, error handling, and performance linters.
 
-    rect rgb(255, 250, 240)
-        Note over Script,FS: Phase 3: Sanitation & Validation
-        Script->>FS: dos2unix & chmod 644/755
-        Script->>FS: Run ./bin/app --version
-    end
+### 4.4. Vulnerability & Security Auditing
+* **`govulncheck`**: Queries the official Go Vulnerability Database to detect known CVEs in direct and transitive dependencies.
+* **`gosec`**: Runs AST security inspection (`gosec -quiet ./...`) to catch hardcoded secrets, weak cryptographic primitives, SQL injection patterns, or permissive file permissions.
 
-    rect rgb(255, 245, 255)
-        Note over Script,FS: Phase 4: Packaging & Checksumming
-        Script->>FS: zip / tar.xz (Source & Binary archives)
-        Script->>FS: sha256sum -> distrib/SHA256SUMS
-    end
-
-    Script-->>Dev: Build & Packaging Succeeded (Exit 0)
-```
-
-### 3.2. Data Sequences
-1. **Bootstrap & Path Ingress:** Normalizes paths and prepares `${BINDIR}` and `${DISTDIR}`.
-2. **Dependency Resolution:** Pulls modules via `$GOPROXY="https://proxy.golang.org,direct"`.
-3. **AST Audit & Vulnerability Check:** Scans Go Abstract Syntax Trees for lint defects and known CVEs.
-4. **Binary Emission:** Compiles binaries into `../bin/${APP_NAME}${BIN_EXT}`.
-5. **Distribution Egress:** Packages archives in `../distrib/` and commits checksum manifests to `SHA256SUMS`.
+### 4.5. Quality Gate Policy
+* Any error during vet, linters, or security scanning sets `LINT_ERR=1`.
+* In compilation mode, the build immediately halts with `EXIT_AUDIT` (5) unless explicitly overridden via `--ignore-audit` or bypassed via `--compile-only`.
 
 ---
 
-## 4. Performance and Scalability
+## 5. Multi-Format Distribution Packaging
 
-### 4.1. Concurrency Model
-* **Go Compiler Concurrency:** Automatically utilizes all available CPU cores (`GOMAXPROCS`) during compilation and test runs (`go test -v -cover ./...`).
-* **Multi-Threaded Linting:** `golangci-lint` executes analysis passes concurrently across packages.
-* **Batch Filesystem Operations:** Executes `find ... -exec dos2unix ... +` and `chmod ... +` using multi-file batch argument dispatching rather than per-file subshell invocations.
+When packaging flags are supplied, artifacts are staged in isolated temporary directories created via [make_temp_dir](build.inc#L282-L300) and emitted directly to `../distrib/`:
 
-### 4.2. Compression & Binary Footprint
-* Strips debugging symbols via `-ldflags="-s -w"`, reducing final binary size by up to 40-60%.
-* Uses maximum compression (`zip -9rq` on Windows, `tar Jcf` with XZ on Linux) to minimize distribution bandwidth and storage.
+### 1. Linux Tarball Release Archive (`.tar.xz`)
+* **Trigger:** `--linux --archive` (or `--all`)
+* **Structure:** Includes static binary and documentation files (`LICENSE`, `README.md`, `CHANGELOG.md` via `DEFAULT_DOC_FILES`) staged under `doc/`.
+* **Compression:** Multi-threaded XZ compression (`tar -C ${STAGE} -Jcf ${ARC_FILE} <app> doc`).
+
+### 2. Windows Zipball Release Archive (`.zip`)
+* **Trigger:** `--windows --archive` (or `--all` on Windows)
+* **Structure:** Includes Windows executable (`<app>.exe`) and documentation (`LICENSE`, `README.md`, `CHANGELOG.md`) converted to CRLF line endings via `unix2dos`.
+* **Compression:** Maximum zip compression (`zip -9rq ${WIN_ARC_FILE} <app>.exe doc`).
+
+### 3. Debian Package (`.deb`)
+* **Trigger:** `--linux --deb` (or `--all`)
+* **Structure:** 
+  - Binary installed to `${INSTALL_PATH}/${APP_NAME}` (`chmod 0755`)
+  - Documentation installed to `/usr/share/doc/${APP_NAME}/`
+  - Computed MD5 file hashes in `DEBIAN/md5sums`
+  - RFC 822-compliant control file in `DEBIAN/control`
+* **Builder:** `dpkg-deb --build --root-owner-group ${STAGE_DEB} ${DEB_FILE}`
+
+### 4. Red Hat Package (`.rpm`)
+* **Trigger:** `--linux --rpm` (or `--all`)
+* **Structure:**
+  - Generates standalone RPM spec file in `${RPM_TOPDIR}/SPECS/${APP_NAME}.spec`
+  - Sanitizes `%` macros in summary, description, URL, and license
+  - Sets `AutoReqProv: no` (100% static binary requires no dynamic glibc package dependencies)
+  - Sets `%define _build_id_links none` and `%define debug_package %{nil}`
+* **Builder:** `rpmbuild --define "_topdir ${RPM_TOPDIR}" -bb ${SPEC_FILE}`
+
+### 5. Sanitized Source Archive (`-src.tar.xz` / `-src.zip`)
+* **Trigger:** `--archive` (or `--all`)
+* **Security Filter:** Enforces `SOURCE_EXCLUDES` denylist from [build.inc](build.inc#L168-L200) to strip `.git`, `.env*`, `*.key`, `*.pem`, `*.token`, `id_*`, binaries, and temporary files.
 
 ---
 
-## 5. Dependencies
-
-### 5.1. Dependency Hierarchy
-
-```mermaid
-graph LR
-    subgraph CoreScript ["build_go.sh"]
-        Engine["build_go.sh Engine"]
-    end
-
-    subgraph MandatoryTools ["Mandatory Toolchain"]
-        Go["Go Compiler (1.21+)"]
-        Bash["Bash (4.0+)"]
-        Coreutils["find / chmod / sed / tr / date"]
-    end
-
-    subgraph StaticAnalyzers ["Audit & Quality Analyzers (Optional/Recommended)"]
-        Gofumpt["gofumpt"]
-        GoVet["go vet (Built-in)"]
-        GolangciLint["golangci-lint"]
-        Govulncheck["govulncheck"]
-        Gosec["gosec"]
-    end
-
-    subgraph ArchiveTools ["Packaging & Cryptography Utilities"]
-        Zip["zip (Windows)"]
-        Tar["tar / xz (Linux)"]
-        Sha256["sha256sum / shasum"]
-        Dos2Unix["dos2unix"]
-    end
-
-    Engine --> MandatoryTools
-    Engine --> StaticAnalyzers
-    Engine --> ArchiveTools
-```
+## 6. Dependencies and System Requirements
 
 | Dependency | Classification | Optional/Required | Purpose |
 | :--- | :--- | :--- | :--- |
-| **Go** | Compiler | **Required** | Go build toolchain (v1.21+ recommended). |
+| **Go** | Compiler | **Required** | Go build toolchain (v1.18+ recommended). |
 | **Bash** | Shell Runtime | **Required** | Execution environment (Linux, Cygwin, MSYS2). |
+| **[build.inc](build.inc)** | Shared Include | **Required** | Shared constants, exit codes, path normalization, JSON parser. |
 | **gofumpt** | Formatter | Recommended | Strict code formatting. |
 | **go vet** | Static Analyzer | **Required** | Standard Go correctness analysis (included with Go). |
-| **golangci-lint**| Linter Runner | Recommended | Aggregated linter framework. |
+| **golangci-lint** | Linter Runner | Recommended | Aggregated static analysis framework. |
 | **govulncheck** | Vulnerability Scanner | Recommended | Official Go vulnerability scanner against known Go CVEs. |
 | **gosec** | Security Scanner | Recommended | AST security scanner for risky coding patterns. |
-| **dos2unix** | Text Sanitizer | Recommended | Normalizes line endings across operating systems. |
-| **zip / tar / xz** | Archiver | **Required for --publish** | Compresses release artifacts. |
-| **sha256sum** | Cryptographic Hash | **Required for --publish** | Computes SHA256 digests into `SHA256SUMS`. |
+| **tar / xz** | Archiver | Required for `--archive` | Multi-threaded XZ compression for Linux archives. |
+| **zip** | Archiver | Required for `--archive` | Windows Zip archive packaging. |
+| **dpkg-deb** | Packager | Required for `--deb` | Debian package generator (Linux only). |
+| **rpmbuild** | Packager | Required for `--rpm` | Red Hat package generator (Linux only). |
+| **sha256sum / shasum** | Cryptographic Hash | Required for packaging | Computes per-archive SHA256 checksums. |
+| **ssh-keygen** | Code Signer | Required for `--sign` | OpenSSH digital signature generation. |
 
 ---
 
-## 6. Security Architecture
+## 7. Diagnostic Granular Exit Codes
 
-### 6.1. Multi-Layer Security Model
+[build_go.sh](build_go.sh) returns granular exit codes for automated CI/CD triage and telemetry:
 
-```mermaid
-graph TD
-    subgraph TransitSecurity ["Transit & Ingress Security"]
-        Proxy["Go Module Proxy (https://proxy.golang.org)"]
-        TLS["Enforced TLS Verification & Checksum Database (go.sum)"]
-    end
-
-    subgraph StaticSecurityGate ["Static Security & Vulnerability Analysis"]
-        Govuln["govulncheck (Go Vulnerability Database)"]
-        GosecAST["gosec (AST Security Analysis)"]
-    end
-
-    subgraph BinaryHardening ["Binary & Runtime Hardening"]
-        PIE["-buildmode=pie (ASLR Protection)"]
-        Trimpath["-trimpath (Information Disclosure Prevention)"]
-        Strip["-s -w (Symbol & DWARF Stripping)"]
-    end
-
-    subgraph IntegrityVerification ["Egress Integrity Verification"]
-        Hash["SHA256 Cryptographic Hash Calculation"]
-        SumsFile["distrib/SHA256SUMS Manifest"]
-    end
-
-    Proxy --> TLS
-    TLS --> Govuln
-    Govuln --> GosecAST
-    GosecAST --> PIE
-    PIE --> Trimpath
-    Trimpath --> Strip
-    Strip --> Hash
-    Hash --> SumsFile
-```
-
-### 6.2. Security Assessment
-
-| Assessment Domain | Status | Technical Implementation |
-| :--- | :--- | :--- |
-| **Encryption in Transit** | **Compliant** | All dependency retrieval is routed via authenticated HTTPS TLS proxy (`https://proxy.golang.org`) verified against cryptographic hashes in `go.sum`. |
-| **Secret Management** | **Compliant** | AST security scanning via `gosec` flags hardcoded API keys, passwords, and TLS misconfigurations. |
-| **Authentication Configuration** | **Compliant** | Uses standard environment variables (`GOPRIVATE`, `GONOPROXY`, Git SSH agent) for private module registries without persistent secrets. |
-| **RBAC & File Permissions** | **Compliant** | Enforces `chmod 644` across source and module assets, and sets `chmod 755` strictly on executable binary output. |
-| **Vulnerability Scanning** | **Compliant** | Integrates `govulncheck` to detect vulnerabilities in dependencies matching the Go Vulnerability Database. |
-| **Binary Hardening** | **Compliant** | Enables ASLR via `-buildmode=pie`, removes developer machine path leakage via `-trimpath`, and strips symbol tables with `-ldflags "-s -w"`. |
-| **Integrity Assurance** | **Compliant** | Computes SHA-256 digests on all produced source and binary archives and stores them in `SHA256SUMS`. |
-| **Unprivileged Context** | **Compliant** | Fully executable in standard user permissions; does not require administrative/root rights. |
-
----
-
-## 7. Code Quality Assessment and Best Practices
-
-* **Robust Parameter Handling:** Utilizes Bash regular expression matching (`[[ $* =~ ... ]]`) for flexible option parsing.
-* **Automated Line-Ending Sanitization:** Recursively ensures all source files maintain consistent UNIX line endings (`dos2unix`).
-* **Strict Compiler Invocations:** Aborts immediately if the compiler reports any compilation error.
-* **Clean Cleanups:** Removes temporary uncompressed binary artifacts from the staging directory after packaging.
+| Exit Code | Identifier | Description | Example Trigger |
+| :---: | :--- | :--- | :--- |
+| **0** | `EXIT_SUCCESS` | Success across all requested operations | Compilation, testing, or packaging passed |
+| **1** | `EXIT_GENERAL` | General / unclassified runtime error | Unexpected execution failure |
+| **2** | `EXIT_USAGE` | Invalid CLI arguments or syntax | Unknown or malformed flag passed |
+| **3** | `EXIT_CONFIG` | `build.json` missing or SSH signing key missing | `build.json` not found in current directory |
+| **4** | `EXIT_DEPENDENCY` | Missing prerequisite host tools | `go`, `tar`, `dpkg-deb`, or `rpmbuild` missing |
+| **5** | `EXIT_AUDIT` | Code quality, lint, or security vulnerability failure | `govulncheck`, `gosec`, or `go vet` failed |
+| **6** | `EXIT_TEST` | Automated test suite failed | `go test` unit test assertion failed |
+| **7** | `EXIT_COMPILE` | Go compiler failure | Syntax error in Go code during `go build` |
+| **8** | `EXIT_PACKAGE` | Packaging / archive creation failure | `tar`, `zip`, `dpkg-deb`, or `rpmbuild` failed |
 
 ---
 
 ## 8. Command Line Arguments
 
-| Flag | Argument | Type | Default | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `--publish` | *None* | Flag | `false` | Packages compiled binary and source into `.zip` (Windows) or `.tar.xz` (Linux) and computes `SHA256SUMS`. |
-| `--compile-only` | *None* | Flag | `false` | Bypasses test runs, module updates, formatting, and linting, immediately proceeding to compilation. |
-| `--lint-only` | *None* | Flag | `false` | Executes only formatting, linting, and vulnerability scanning, exiting with status code based on errors. |
-| `--testsuite` | *None* | Flag | `false` | Executes automated test coverage suite (`go test -v -cover ./...`) and exits with test exit status. |
-| `--update-modules` | *None* | Flag | `false` | Forces updates of all Go modules to latest releases (`go get -u -t ./...`). |
-| `--vendor` | *None* | Flag | `false` | Syncs dependency vendor directory (`go mod vendor`). |
-| `--main-path=<path>` | `<path>` | String | `""` (or from `main.txt`) | Overrides the target entrypoint package path for the Go compiler. |
+### Target Platform Options
+
+| Argument | Description | Type | Default |
+| :--- | :--- | :--- | :--- |
+| `--windows` | Target Windows binary (`../bin/<name>.exe`). Default on Windows hosts. | Flag | Host default |
+| `--linux` | Target static Linux binary (`../bin/<name>`). Default on Linux hosts. | Flag | Host default |
+
+### Packaging Actions
+
+| Argument | Description | Type | Default |
+| :--- | :--- | :--- | :--- |
+| `--archive` | Package release archive (`.zip` on Windows, `.tar.xz` on Linux) + source archive + dedicated `.sha256`. | Flag | `false` |
+| `--rpm` | Build RPM package in `../distrib/` via `rpmbuild` (Linux target only; ignored on Windows). | Flag | `false` |
+| `--deb` | Build DEB package in `../distrib/` via `dpkg-deb` (Linux target only; ignored on Windows). | Flag | `false` |
+| `--all` | Build all release artifacts (`--archive --rpm --deb` on Linux, `--archive` on Windows). | Flag | `false` |
+| `--sign` | Sign release archives (`<archive>.sig`) with default SSH key (`~/.ssh/signing/release_key`). | Flag | `false` |
+| `--sign=<path>` | Sign release archives (`<archive>.sig`) with specified SSH private key or directory. | String | *Disabled* |
+| `--generate-key` | Generate Ed25519 signing key pair at `~/.ssh/signing/release_key` and exit (requires `--identity=<id>`). | Flag | *None* |
+| `--generate-key=<path>` | Generate a new Ed25519 SSH signing key pair at `<path>` and exit (requires `--identity=<id>`). | String | *None* |
+| `--identity=<id>` | Signer identity email/name (mandatory with `--generate-key`, e.g. `mis@criticalsys.net`). | String | *None* |
+| `--comment=<text>` | Human-readable key comment embedded in `.pub` (optional, defaults to `Critical Systems Release Signing <<id>>`). | String | Formatted from `<id>` |
+
+### Operational Options
+
+| Argument | Description | Type | Default |
+| :--- | :--- | :--- | :--- |
+| `--clean` | Clean previously built artifacts for this module in `../bin/` and `../distrib/` (additive or standalone). | Flag | `false` |
+| `--compile-only` | Compile without running tests, formatting, or static analysis linters. | Flag | `false` |
+| `--lint-only` | Run linter and vulnerability analyzer processes, then exit with code status. | Flag | `false` |
+| `--ignore-audit` | Do not abort compilation if quality/vulnerability checks report warnings. | Flag | `false` |
+| `--testsuite` | Execute automated Go test suite with coverage (`go test -v -cover ./...`) and exit immediately. | Flag | `false` |
+| `--update-modules` | Force updating all dependencies to the latest release (`go get -u -t ./...`). | Flag | `false` |
+| `--vendor` | Synchronize module vendor directory (`go mod vendor`). | Flag | `false` |
+| `--main-path=<path>` | Override the source code entrypoint path defined in `build.json`. | String | From `build.json` |
+| `--log=<file>` | Append structured NDJSON execution logs to the specified file. | String | *Disabled* |
+| `--help` | Display command line usage manual and exit. | Flag | `false` |
 
 ---
 
-## 9. Usage Examples and Deployment Workflows
+## 9. Usage Examples and Operational Workflows
 
-### 9.1. Standard Compilation and Verification
-Build the current Go application with standard quality checks:
+> [!NOTE]
+> `build_go.sh` is invoked from within a specific Go sub-project directory (e.g. `cd private/<module_name> && ../../build_go.sh [options...]`). In the examples below, commands are shown assuming the active working directory is the target module root.
+
+### 9.1. Standard Compilation (Local Development)
+Build the binary into `../bin/` with full static analysis and quality checks:
 ```bash
-./build_go.sh
-```
-**Sample Output:**
-```
-Generate dependency list
-Linting Code
-Build Module criticalsys.net/dirpoller - Version: 1.4.0-20260827 [main.version] - Main Module: generic
-dirpoller version 1.4.0-20260827 (x86_64-pc-windows-msvc)
+# Navigate to the target module directory
+cd private/<module_name>
+
+# Compile static binary
+../../build_go.sh
 ```
 
----
-
-### 9.2. Build and Publish Distribution Archives with SHA256SUMS
-Compile the binary and produce release archives with cryptographic SHA256 checksums:
-```bash
-./build_go.sh --publish
-```
-**Sample Output:**
-```
-Generate dependency list
-Linting Code
-Build Module criticalsys.net/dirpoller - Version: 1.4.0-20260827 [main.version] - Main Module: generic
-dirpoller version 1.4.0-20260827 (x86_64-pc-windows-msvc)
-Generating distribution archive [D:/devel/distrib/dirpoller-1.4.0-20260827]
-Calculating SHA256 checksums
-```
-**Generated `SHA256SUMS` in `distrib/`:**
-```
-a3c4e61f9d54e5318cb9c02ff85e05a8d9b1a5e01c7694bf4f71a07df1319760  dirpoller-1.4.0-20260827-src.zip
-78f0d8a6b1297e203f191b94d1b8219484b39b56f8f7c9e0134bc3d67964402a  dirpoller-1.4.0-20260827-w64.zip
-```
-
----
-
-### 9.3. Fast Iteration: Compile-Only Mode
-Skip linters, tests, and formatting to quickly compile during rapid development:
+### 9.2. Fast Iteration: Compile-Only Mode
+Bypass linters, tests, and formatting to compile immediately during rapid iteration:
 ```bash
 ./build_go.sh --compile-only
 ```
-**Sample Output:**
-```
-Build Module criticalsys.net/dirpoller - Version: dev-20260827 [main.version] - Main Module: generic
-dirpoller version dev-20260827 (x86_64-pc-windows-msvc)
-```
 
----
-
-### 9.4. CI/CD Static Analysis & Security Gate
-Execute only quality checks and vulnerability scanners inside a CI pipeline runner:
+### 9.3. Clean Module Artifacts
+Wipe previously compiled binaries and distribution packages for this module:
 ```bash
-./build_go.sh --lint-only
-```
-**Sample Output:**
-```
-Generate dependency list
-Linting Code
-Running golangci-lint...
-Running govulncheck...
-No vulnerabilities found.
-Running gosec...
-[gosec] Results: 0 issues found.
+# Standalone clean
+./build_go.sh --clean
+
+# Pristine clean rebuild
+./build_go.sh --clean --linux --all
 ```
 
----
-
-### 9.5. Automated Test Suite Execution
-Run the full test suite with code coverage metrics:
+### 9.4. Automated Unit & Coverage Testing
+Execute the unit test suite and generate code coverage metrics:
 ```bash
 ./build_go.sh --testsuite
 ```
-**Sample Output:**
+
+### 9.5. Static Code Analysis & Security Audit Gate
+Execute formatting, static checks, and vulnerability scanning inside CI/CD:
+```bash
+./build_go.sh --lint-only
 ```
-=== RUN   TestPollerInitialization
---- PASS: TestPollerInitialization (0.02s)
-=== RUN   TestEventStreamDispatch
---- PASS: TestEventStreamDispatch (0.05s)
-PASS
-coverage: 87.4% of statements
-ok      criticalsys.net/dirpoller/pkg/poller    0.082s  coverage: 87.4% of statements
+
+### 9.6. Full Release Artifact Suite (Tarballs, DEBs, RPMs, Checksums)
+Compile static binary, build all Linux packages in `../distrib/`, generate per-archive `.sha256` files, and clean intermediate binaries:
+```bash
+./build_go.sh --linux --all
 ```
+Verify generated archive checksums:
+```bash
+cd ../distrib
+sha256sum -c <module_name>-1.0.5-linux_amd64.tar.xz.sha256
+```
+
+### 9.7. Cryptographic Release Signing with OpenSSH
+Compile, package, and sign all release archives with an isolated Ed25519 signing key:
+```bash
+# 1. Generate dedicated release signing key pair (run once)
+./build_go.sh --generate-key --identity=mis@criticalsys.net
+
+# 2. Build and sign release artifacts
+./build_go.sh --linux --all --sign
+```
+Verify artifact signature:
+```bash
+cd ../distrib
+
+# Add publisher key to allowed_signers:
+echo "mis@criticalsys.net namespaces=\"file\" $(cat ~/.ssh/signing/release_key.pub)" > allowed_signers
+
+# Verify SSH signature on the archive:
+ssh-keygen -Y verify -f allowed_signers -I mis@criticalsys.net -n file \
+  -s <module_name>-1.0.5-linux_amd64.tar.xz.sig \
+  < <module_name>-1.0.5-linux_amd64.tar.xz
+```
+*(For comprehensive security guidelines and CI/CD signing workflows, see [SIGNING.md](SIGNING.md).)*
+
+### 9.8. Dependency Updates (`--update-modules`)
+Force-update dependencies to their latest upstream releases while packaging or compiling:
+
+```bash
+# Update module dependencies and build full release packages (.tar.xz, .deb, .rpm)
+../../build_go.sh --linux --all --update-modules
+
+# Compile static binary only with updated dependencies
+../../build_go.sh --compile-only --update-modules
+```
+
+---
+
+## 10. References & Related Documentation
+
+* **[build.inc](build.inc)**: Shared library providing diagnostic exit codes, logging primitives, temporary directory tracking, OS detection, and cryptographic helpers.
+* **[build_orchestrate_README.md](build_orchestrate_README.md)**: Technical reference for the multi-module orchestrator, parallel workpool scheduler, and template governance engine.
+* **[SIGNING.md](SIGNING.md)**: Complete guide covering OpenSSH release artifact signing and verification workflows.
