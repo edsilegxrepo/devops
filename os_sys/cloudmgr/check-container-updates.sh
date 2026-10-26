@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Script: check-container-updates.sh
-# Purpose: Non-intrusively inspect container registries for newer images
-#          (dry-run) and notify sysadmins via email for controlled review.
-# Standard: DRY Architecture Framework (lib/common.sh)
+# Script:      /opt/scripts/check-container-updates.sh
+# Version:     1.4.0  2026/10/26
+# Standard:    DRY Architecture Framework (lib/common.sh)
+# Author:      DevOps Systems Administration <criticalsys.mis@gmail.com>
+# Compatibility: Enterprise Linux 8, 9, 10 (RHEL, AlmaLinux, Rocky Linux)
+# Description: Non-intrusively inspects container registries for updated images
+#              (via 'podman auto-update --dry-run'), generates rich HTML advisory
+#              reports, and optionally applies automated updates with rollback
+#              readiness according to sysadmin policy.
 # ==============================================================================
 set -euo pipefail
 umask 077
@@ -24,19 +29,11 @@ source "${LIB_COMMON}"
 TEMPLATES_DIR="${SCRIPT_DIR}/templates/container-update"
 TEMPLATE_SUMMARY_GRID="${TEMPLATES_DIR}/summary-grid.html"
 TEMPLATE_ROW="${TEMPLATES_DIR}/table-row.html"
-TEMPLATE_BADGE_PENDING="${TEMPLATES_DIR}/row-badge-pending.html"
-TEMPLATE_BADGE_UPTODATE="${TEMPLATES_DIR}/row-badge-uptodate.html"
-TEMPLATE_BADGE_UPDATED="${TEMPLATES_DIR}/row-badge-updated.html"
-TEMPLATE_BADGE_FAILED="${TEMPLATES_DIR}/row-badge-failed.html"
 TEMPLATE_CMD_ITEM="${TEMPLATES_DIR}/service-command-item.html"
 TEMPLATE_INSTR_PENDING="${TEMPLATES_DIR}/instructions-pending.html"
 TEMPLATE_INSTR_UPTODATE="${TEMPLATES_DIR}/instructions-uptodate.html"
 TEMPLATE_INSTR_AUTO_SUCCESS="${TEMPLATES_DIR}/instructions-autoupdate-success.html"
 TEMPLATE_INSTR_AUTO_FAILED="${TEMPLATES_DIR}/instructions-autoupdate-failed.html"
-TEMPLATE_SUMMARY_PENDING="${TEMPLATES_DIR}/summary-pending.html"
-TEMPLATE_SUMMARY_UPTODATE="${TEMPLATES_DIR}/summary-uptodate.html"
-TEMPLATE_SUMMARY_AUTO_SUCCESS="${TEMPLATES_DIR}/summary-autoupdate-success.html"
-TEMPLATE_SUMMARY_AUTO_FAILED="${TEMPLATES_DIR}/summary-autoupdate-failed.html"
 
 # Capture raw CLI arguments for execution logging
 CLI_ARGS="$*"
@@ -49,6 +46,15 @@ CLI_AUTO_UPDATE=""
 
 # ------------------------------------------------------------------------------
 # 2. Argument Parsing
+# ------------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
+# Function: show_help
+# Purpose:  Displays command syntax, options, and operational modes to stdout.
+# Arguments:
+#   None.
+# Returns:
+#   Outputs help documentation.
 # ------------------------------------------------------------------------------
 show_help() {
   cat << EOF
@@ -110,27 +116,20 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ------------------------------------------------------------------------------
-# 3. Privilege Guard & Dependencies
+# 3. Bootstrap, Guards & Configuration Locking
 # ------------------------------------------------------------------------------
-require_root
-
-verify_dependencies "podman" "jq" "sed" "find" "mktemp"
-
-# ------------------------------------------------------------------------------
-# 4. Configuration & Concurrency Locking
-# ------------------------------------------------------------------------------
-load_config "container-updates"
+bootstrap_job "container-updates" \
+  --require-root \
+  --deps "podman jq sed find mktemp" \
+  --log-dir "${LOG_BASE_DIR:-/var/log/jobs}" \
+  --retention "${LOG_RETENTION_DAYS:-14}"
 
 # CLI flag overrides configuration file settings
 [[ -n "${CLI_AUTO_UPDATE}" ]] && AUTO_UPDATE="${CLI_AUTO_UPDATE}"
 [[ -n "${CLI_NOTIFY_NEW_ONLY}" ]] && NOTIFY_NEW_ONLY="${CLI_NOTIFY_NEW_ONLY}"
 
-acquire_lock "check-container-updates"
-
-init_job_log "container-updates" "${LOG_BASE_DIR:-/var/log/jobs}" "${LOG_RETENTION_DAYS:-14}"
-
 # ------------------------------------------------------------------------------
-# 5. Registry Inspection Execution
+# 4. Registry Inspection Execution
 # ------------------------------------------------------------------------------
 log_msg "[*] Starting Podman container update inspection on ${SYS_HOSTNAME}..."
 [[ -n "${CLI_ARGS}" ]] && log_msg "[*] Invocation options: ${CLI_ARGS}"
@@ -148,26 +147,21 @@ if ! RAW_SCAN_OUTPUT=$(timeout "${SCAN_TIMEOUT:-900}" "${CONTAINER_ENGINE:-podma
   fi
 
   if [[ "${CHECK_ONLY}" -eq 0 ]]; then
-    STATUS_BADGE="$(get_status_badge "failed" "✕" "SCAN FAILED")"
-    SUBJECT="[ALERT] Container Update Scan Failed - ${SYS_HOSTNAME}"
-    ERR_CONTENT="$(escape_html "$(< "${RAW_SCAN_ERR_TMP}")")"
-    TERMINAL_BLOCK="$(render_template "${SHARED_TEMPLATES_DIR}/terminal-card.html" \
+    err_content="$(escape_html "$(< "${RAW_SCAN_ERR_TMP}")")"
+    terminal_block="$(render_template "${SHARED_TEMPLATES_DIR}/terminal-card.html" \
       "TERMINAL_TITLE" "Scan Diagnostic Stderr" \
       "TERMINAL_SUBTITLE" "" \
-      "TERMINAL_CONTENT" "${ERR_CONTENT}")"
-    EMAIL_BODY="$(render_template "${SHARED_TEMPLATES_DIR}/base-layout.html" \
-      "SUBJECT" "${SUBJECT}" \
-      "SERVICE_CATEGORY" "Container Lifecycle Monitor" \
-      "JOB_TITLE" "Container Image Update Advisor" \
-      "STATUS_BADGE" "${STATUS_BADGE}" \
-      "CONTENT_BODY" "<p style=\"color: #991b1b; font-weight: 600;\">Container registry update check failed during inspection execution.</p>" \
-      "ACTION_BLOCK" "" \
-      "TERMINAL_BLOCK" "${TERMINAL_BLOCK}" \
-      "HOST_NAME" "${SYS_HOSTNAME}" \
-      "EXECUTION_TIME" "${JOB_CHECK_TIME}" \
-      "LOG_FILE_PATH" "${JOB_LOG_FILE}")"
+      "TERMINAL_CONTENT" "${err_content}")"
 
-    send_html_email "${MAIL_TO}" "${MAIL_FROM}" "${SUBJECT}" "${EMAIL_BODY}"
+    dispatch_job_notification \
+      --title "Container Image Update Advisor" \
+      --category "Container Lifecycle Monitor" \
+      --status "failed" \
+      --badge-icon "✕" \
+      --badge-label "SCAN FAILED" \
+      --subject "[ALERT] Container Update Scan Failed - ${SYS_HOSTNAME}" \
+      --content "<p style=\"color: #991b1b; font-weight: 600;\">Container registry update check failed during inspection execution.</p>${terminal_block}" \
+      --log-lines 0
   fi
   exit 1
 fi
@@ -187,7 +181,7 @@ UPTODATE_COUNT=$(echo "${RAW_SCAN_OUTPUT}" | jq '[.[] | select(.Updated == "fals
 log_msg "[*] Scan complete: ${TOTAL_COUNT} services scanned | ${PENDING_COUNT} updates pending | ${UPTODATE_COUNT} up to date | ${FAILED_COUNT} failed"
 
 # ------------------------------------------------------------------------------
-# 6. Optional Auto-Update Execution
+# 5. Optional Auto-Update Execution
 # ------------------------------------------------------------------------------
 AUTO_UPDATE_EXECUTED=0
 AUTO_UPDATE_SUCCESS=0
@@ -213,7 +207,7 @@ if [[ "${AUTO_UPDATE}" == "true" && "${CHECK_ONLY}" -eq 0 && "${PENDING_COUNT}" 
 fi
 
 # ------------------------------------------------------------------------------
-# 7. Check-Only Output Handler
+# 6. Check-Only Output Handler
 # ------------------------------------------------------------------------------
 if [[ "${CHECK_ONLY}" -eq 1 ]]; then
   echo "================================================================================"
@@ -240,7 +234,7 @@ if [[ "${CHECK_ONLY}" -eq 1 ]]; then
 fi
 
 # ------------------------------------------------------------------------------
-# 8. Notification Evaluation & Assembly
+# 7. Notification Evaluation & Assembly
 # ------------------------------------------------------------------------------
 if [[ "${FORCE_NOTIFY}" -eq 0 && "${NOTIFY_NEW_ONLY}" == "true" && "${PENDING_COUNT}" -eq 0 && "${FAILED_COUNT}" -eq 0 && "${AUTO_UPDATE_EXECUTED}" -eq 0 ]]; then
   suppress_reason="NOTIFY_NEW_ONLY configured"
@@ -252,41 +246,48 @@ fi
 log_msg "[*] Generating HTML email report..."
 
 # Determine Status Badge & Subject
+status_type="success"
+badge_icon="✓"
+badge_label="UP TO DATE"
 if [[ "${AUTO_UPDATE_EXECUTED}" -eq 1 ]]; then
   if [[ "${AUTO_UPDATE_SUCCESS}" -eq 1 ]]; then
-    STATUS_BADGE="$(get_status_badge "success" "✓" "UPDATED")"
+    status_type="success"
+    badge_icon="✓"
+    badge_label="UPDATED"
     SUBJECT="[INFO] Container Auto-Update Succeeded - ${SYS_HOSTNAME}"
-    PENDING_SUMMARY="$(cat "${TEMPLATE_SUMMARY_AUTO_SUCCESS}" 2> /dev/null || echo "${PENDING_COUNT} updated")"
+    PENDING_SUMMARY="<span style=\"color: #059669; font-weight: 700;\">${PENDING_COUNT} container(s) updated successfully</span>"
     POLICY_MODE="Automatic Update & Restart &bull; <strong>Auto-Maintenance</strong>"
   else
-    STATUS_BADGE="$(get_status_badge "failed" "✕" "UPDATE FAILED")"
+    status_type="failed"
+    badge_icon="✕"
+    badge_label="UPDATE FAILED"
     SUBJECT="[ALERT] Container Auto-Update Failed - ${SYS_HOSTNAME}"
-    PENDING_SUMMARY="$(cat "${TEMPLATE_SUMMARY_AUTO_FAILED}" 2> /dev/null || echo "Update failed")"
+    PENDING_SUMMARY="<span style=\"color: #dc2626; font-weight: 700;\">Automatic update transaction failed</span>"
     POLICY_MODE="Automatic Update Attempt &bull; <strong>Intervention Required</strong>"
   fi
 elif [[ "${FAILED_COUNT}" -gt 0 ]]; then
-  STATUS_BADGE="$(get_status_badge "failed" "✕" "SCAN ISSUES")"
+  status_type="failed"
+  badge_icon="✕"
+  badge_label="SCAN ISSUES"
   SUBJECT="[ALERT] Container Scan Issues Detected - ${SYS_HOSTNAME}"
-  PENDING_SUMMARY="${FAILED_COUNT} registry query error(s)"
+  PENDING_SUMMARY="<span style=\"color: #dc2626; font-weight: 700;\">${FAILED_COUNT} registry query error(s)</span>"
   POLICY_MODE="Dry-Run Registry Scan &bull; <strong>Query Warnings</strong>"
 elif [[ "${PENDING_COUNT}" -gt 0 ]]; then
-  STATUS_BADGE="$(get_status_badge "warning" "⚡" "UPDATES PENDING")"
+  status_type="warning"
+  badge_icon="⚡"
+  badge_label="UPDATES PENDING"
   SUBJECT="[REVIEW] Container Image Updates Available - ${SYS_HOSTNAME} (${PENDING_COUNT} pending)"
-  PENDING_SUMMARY="$(cat "${TEMPLATE_SUMMARY_PENDING}" 2> /dev/null || echo "${PENDING_COUNT} update(s) available")"
-  PENDING_SUMMARY="${PENDING_SUMMARY//\{\{PENDING_COUNT\}\}/${PENDING_COUNT}}"
+  PENDING_SUMMARY="<span style=\"color: #b45309; font-weight: 700;\">${PENDING_COUNT} image update(s) pending review</span>"
   POLICY_MODE="Dry-Run Registry Scan &bull; <strong>Controlled Production</strong>"
 else
-  STATUS_BADGE="$(get_status_badge "success" "✓" "UP TO DATE")"
+  status_type="success"
+  badge_icon="✓"
+  badge_label="UP TO DATE"
   SUBJECT="[INFO] Container Images Up to Date - ${SYS_HOSTNAME}"
-  PENDING_SUMMARY="$(cat "${TEMPLATE_SUMMARY_UPTODATE}" 2> /dev/null || echo "All images up to date")"
+  PENDING_SUMMARY="<span style=\"color: #059669; font-weight: 700;\">0 (All containers running latest images)</span>"
   POLICY_MODE="Dry-Run Registry Scan &bull; <strong>Controlled Production</strong>"
 fi
 
-# Load row template badges
-BADGE_PENDING_HTML="$(cat "${TEMPLATE_BADGE_PENDING}" 2> /dev/null || echo "[Pending]")"
-BADGE_UPTODATE_HTML="$(cat "${TEMPLATE_BADGE_UPTODATE}" 2> /dev/null || echo "[Up to Date]")"
-BADGE_UPDATED_HTML="$(cat "${TEMPLATE_BADGE_UPDATED}" 2> /dev/null || echo "[Updated]")"
-BADGE_FAILED_HTML="$(cat "${TEMPLATE_BADGE_FAILED}" 2> /dev/null || echo "[Failed]")"
 ROW_TEMPLATE="$(cat "${TEMPLATE_ROW}" 2> /dev/null || true)"
 CMD_ITEM_TEMPLATE="$(cat "${TEMPLATE_CMD_ITEM}" 2> /dev/null || true)"
 
@@ -294,31 +295,26 @@ TABLE_ROWS=""
 SPECIFIC_COMMANDS=""
 
 while IFS=$'\t' read -r unit container_name image updated; do
-  row_badge="${BADGE_UPTODATE_HTML}"
+  row_badge="$(get_status_badge "success" "" "UP TO DATE" "table")"
   if [[ "${AUTO_UPDATE_EXECUTED}" -eq 1 ]]; then
     if [[ "${updated}" == "pending" ]]; then
-      [[ "${AUTO_UPDATE_SUCCESS}" -eq 1 ]] && row_badge="${BADGE_UPDATED_HTML}" || row_badge="${BADGE_FAILED_HTML}"
+      if [[ "${AUTO_UPDATE_SUCCESS}" -eq 1 ]]; then
+        row_badge="$(get_status_badge "success" "" "UPDATED" "table")"
+      else
+        row_badge="$(get_status_badge "failed" "" "UPDATE FAILED" "table")"
+      fi
     fi
   elif [[ "${updated}" == "pending" ]]; then
-    row_badge="${BADGE_PENDING_HTML}"
+    row_badge="$(get_status_badge "warning" "" "UPDATE PENDING" "table")"
     if [[ -n "${CMD_ITEM_TEMPLATE}" ]]; then
-      cmd_item="${CMD_ITEM_TEMPLATE}"
-      cmd_item="${cmd_item//\{\{UNIT\}\}/${unit}}"
-      cmd_item="${cmd_item//\{\{CONTAINER_NAME\}\}/${container_name}}"
-      cmd_item="${cmd_item//\{\{IMAGE\}\}/${image}}"
-      SPECIFIC_COMMANDS+="${cmd_item}"
+      SPECIFIC_COMMANDS+="$(render_snippet "${CMD_ITEM_TEMPLATE}" "UNIT" "${unit}" "CONTAINER_NAME" "${container_name}" "IMAGE" "${image}")"
     fi
   elif [[ "${updated}" == "failed" ]]; then
-    row_badge="${BADGE_FAILED_HTML}"
+    row_badge="$(get_status_badge "failed" "" "SCAN FAILED" "table")"
   fi
 
   if [[ -n "${ROW_TEMPLATE}" ]]; then
-    row="${ROW_TEMPLATE}"
-    row="${row//\{\{UNIT\}\}/${unit}}"
-    row="${row//\{\{CONTAINER_NAME\}\}/${container_name}}"
-    row="${row//\{\{IMAGE\}\}/${image}}"
-    row="${row//\{\{ROW_STATUS_BADGE\}\}/${row_badge}}"
-    TABLE_ROWS+="${row}"
+    TABLE_ROWS+="$(render_snippet "${ROW_TEMPLATE}" "UNIT" "${unit}" "CONTAINER_NAME" "${container_name}" "IMAGE" "${image}" "ROW_STATUS_BADGE" "${row_badge}")"
   else
     TABLE_ROWS+="<tr><td>${unit}</td><td>${container_name}</td><td>${image}</td><td>${row_badge}</td></tr>"
   fi
@@ -363,31 +359,24 @@ CONTENT_BODY="$(render_template "${TEMPLATE_SUMMARY_GRID}" \
   "POLICY_MODE" "${POLICY_MODE}" \
   "CONTAINER_TABLE_ROWS" "${TABLE_ROWS}")"
 
-ACTION_BLOCK="<tr><td style=\"padding: 12px 28px 16px 28px;\">${UPDATE_INSTRUCTIONS_BLOCK}</td></tr>"
-
 ESCAPED_RAW_OUTPUT="$(escape_html "${RAW_SCAN_OUTPUT}")"
 TERMINAL_BLOCK="$(render_template "${SHARED_TEMPLATES_DIR}/terminal-card.html" \
   "TERMINAL_TITLE" "Registry Scan Raw Output" \
   "TERMINAL_SUBTITLE" "" \
   "TERMINAL_CONTENT" "${ESCAPED_RAW_OUTPUT}")"
 
-EMAIL_BODY="$(render_template "${SHARED_TEMPLATES_DIR}/base-layout.html" \
-  "SUBJECT" "${SUBJECT}" \
-  "SERVICE_CATEGORY" "Container Lifecycle Monitor" \
-  "JOB_TITLE" "Container Image Update Advisor" \
-  "STATUS_BADGE" "${STATUS_BADGE}" \
-  "CONTENT_BODY" "${CONTENT_BODY}" \
-  "ACTION_BLOCK" "${ACTION_BLOCK}" \
-  "TERMINAL_BLOCK" "${TERMINAL_BLOCK}" \
-  "HOST_NAME" "${SYS_HOSTNAME}" \
-  "EXECUTION_TIME" "${JOB_CHECK_TIME}" \
-  "LOG_FILE_PATH" "${JOB_LOG_FILE}")"
-
-# ------------------------------------------------------------------------------
-# 9. Send Notification Email
-# ------------------------------------------------------------------------------
 log_msg "[*] Dispatching notification email to ${MAIL_TO}..."
-send_html_email "${MAIL_TO}" "${MAIL_FROM}" "${SUBJECT}" "${EMAIL_BODY}"
+dispatch_job_notification \
+  --title "Container Image Update Advisor" \
+  --category "Container Lifecycle Monitor" \
+  --status "${status_type}" \
+  --badge-icon "${badge_icon}" \
+  --badge-label "${badge_label}" \
+  --subject "${SUBJECT}" \
+  --content "${CONTENT_BODY}${TERMINAL_BLOCK}" \
+  --action "${UPDATE_INSTRUCTIONS_BLOCK}" \
+  --log-lines 0
+
 log_msg "[✓] Email notification successfully dispatched."
 
 exit 0

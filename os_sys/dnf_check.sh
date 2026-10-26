@@ -13,27 +13,20 @@ set -euo pipefail
 # 1. Environment & Library Initialization
 # ------------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_COMMON="${SCRIPT_DIR}/lib/common.sh"
-if [[ -f "${LIB_COMMON}" ]]; then
+LIB_SYSTEM="${SCRIPT_DIR}/lib/system.sh"
+if [[ -f "${LIB_SYSTEM}" ]]; then
   # shellcheck source=/dev/null
-  source "${LIB_COMMON}"
+  source "${LIB_SYSTEM}"
 fi
 
 # Ensure standard system umask for package manager execution
 umask 022
 
-# Fallback definition if common.sh is missing or does not define require_root
-if ! declare -f require_root > /dev/null 2>&1; then
-  require_root() {
-    if [[ "${EUID}" -ne 0 ]]; then
-      echo "[-] Error: Root privileges are required to run dnf." >&2
-      exit 1
-    fi
-  }
-fi
-
-# Determine primary package manager binary (dnf on EL8/9/10, fallback to yum)
-PKG_MGR="$(command -v dnf 2> /dev/null || command -v yum 2> /dev/null || echo "dnf")"
+# Privilege & package manager discovery (inherits from system.sh or defines standalone fallbacks)
+declare -f require_root > /dev/null 2>&1 || require_root() {
+  [[ "${EUID}" -eq 0 ]] || { echo "[-] Error: Root privileges are required to run dnf." >&2; exit 1; }
+}
+PKG_MGR="${PKG_MGR:-$(command -v dnf 2> /dev/null || command -v yum 2> /dev/null || echo "dnf")}"
 
 # Common paths and relaxed dependency options
 DNF_RELAX_OPTS=(--skip-broken --nobest)
@@ -42,6 +35,15 @@ DNF_CACHE="/var/cache/dnf"
 
 # ------------------------------------------------------------------------------
 # 2. CLI Usage & Help
+# ------------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
+# Function: show_usage
+# Purpose:  Displays command syntax, options, and operational behavior to stdout.
+# Arguments:
+#   None.
+# Returns:
+#   Outputs usage documentation.
 # ------------------------------------------------------------------------------
 show_usage() {
   cat << EOF
@@ -80,6 +82,16 @@ require_root
 # ------------------------------------------------------------------------------
 # 3. Core Functions
 # ------------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
+# Function: sqliteWalCheck
+# Purpose:  Verifies SQLite database integrity across DNF history and metadata
+#           databases, reporting WAL journal presence or corruption.
+# Arguments:
+#   None.
+# Returns:
+#   0 if all databases are intact; 1 if any database fails integrity check or sqlite3 is missing.
+# ------------------------------------------------------------------------------
 sqliteWalCheck() {
   if ! command -v sqlite3 > /dev/null 2>&1; then
     echo "[-] Error: 'sqlite3' CLI utility is not installed." >&2
@@ -94,26 +106,32 @@ sqliteWalCheck() {
   local errors=0
   echo "[*] Checking integrity of DNF SQLite databases..."
   for db in "${databases[@]}"; do
-    if [[ ! -f "${db}" ]]; then
-      echo "[-] Notice: Database [${db}] does not exist, skipping."
-      continue
-    fi
-
-    echo -n "    Checking integrity of [${db}]... "
-    local result
-    result="$(sqlite3 "${db}" 'PRAGMA integrity_check;' 2>&1 || true)"
-    if [[ "${result}" == "ok" ]]; then
-      echo "OK"
+    if declare -f sqlite_integrity_check > /dev/null 2>&1; then
+      sqlite_integrity_check "${db}" || errors=$((errors + 1))
     else
-      echo "FAILED (${result})"
-      errors=$((errors + 1))
-    fi
+      if ! command -v sqlite3 > /dev/null 2>&1; then
+        echo "[-] Error: 'sqlite3' CLI utility is not installed." >&2
+        return 1
+      fi
+      if [[ ! -f "${db}" ]]; then
+        echo "[-] Notice: Database [${db}] does not exist, skipping."
+        continue
+      fi
 
-    # Check for presence of active WAL journal
-    if [[ -f "${db}-wal" ]]; then
-      local wal_size
-      wal_size="$(stat -c %s "${db}-wal" 2> /dev/null || stat -f %z "${db}-wal" 2> /dev/null || echo "unknown")"
-      echo "    [i] Active WAL journal detected: [${db}-wal] (${wal_size} bytes)"
+      echo -n "    Checking integrity of [${db}]... "
+      local result
+      result="$(sqlite3 "${db}" 'PRAGMA integrity_check;' 2>&1 || true)"
+      if [[ "${result}" == "ok" ]]; then
+        echo "OK"
+        if [[ -f "${db}-wal" ]]; then
+          local wal_size
+          wal_size="$(stat -c %s "${db}-wal" 2> /dev/null || stat -f %z "${db}-wal" 2> /dev/null || echo "unknown")"
+          echo "    [i] Active WAL journal detected: [${db}-wal] (${wal_size} bytes)"
+        fi
+      else
+        echo "FAILED (${result})"
+        errors=$((errors + 1))
+      fi
     fi
   done
 

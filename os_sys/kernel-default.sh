@@ -12,47 +12,40 @@ set -euo pipefail
 # 1. Environment & Library Initialization
 # ------------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_COMMON="${SCRIPT_DIR}/lib/common.sh"
-if [[ -f "${LIB_COMMON}" ]]; then
+LIB_SYSTEM="${SCRIPT_DIR}/lib/system.sh"
+if [[ -f "${LIB_SYSTEM}" ]]; then
   # shellcheck source=/dev/null
-  source "${LIB_COMMON}"
+  source "${LIB_SYSTEM}"
 fi
 
 # Ensure standard system umask for bootloader operations
 umask 022
 
-# Fallback definition if common.sh is missing or does not define require_root
-if ! declare -f require_root > /dev/null 2>&1; then
-  require_root() {
-    if [[ "${EUID}" -ne 0 ]]; then
-      echo "[-] Error: This script must be executed as root (or via sudo)." >&2
-      exit 1
-    fi
-  }
-fi
-
-# Fallback definition if common.sh is missing or does not define verify_dependencies
-if ! declare -f verify_dependencies > /dev/null 2>&1; then
-  verify_dependencies() {
-    local missing=()
-    for bin in "$@"; do
-      if ! command -v "${bin}" > /dev/null 2>&1; then
-        missing+=("${bin}")
-      fi
-    done
-    if [[ ${#missing[@]} -gt 0 ]]; then
-      echo "[-] Error: Missing required CLI dependencies: ${missing[*]}" >&2
-      return 1
-    fi
-    return 0
-  }
-fi
-
-# Determine primary package manager binary (dnf on EL8/9/10, fallback to yum)
-PKG_MGR="$(command -v dnf 2> /dev/null || command -v yum 2> /dev/null || echo "dnf")"
+# Privilege, dependencies & package manager discovery (inherits from system.sh or defines standalone fallbacks)
+declare -f require_root > /dev/null 2>&1 || require_root() {
+  [[ "${EUID}" -eq 0 ]] || { echo "[-] Error: This script must be executed as root (or via sudo)." >&2; exit 1; }
+}
+declare -f verify_dependencies > /dev/null 2>&1 || verify_dependencies() {
+  local missing=()
+  for bin in "$@"; do
+    command -v "${bin}" > /dev/null 2>&1 || missing+=("${bin}")
+  done
+  [[ ${#missing[@]} -eq 0 ]] || { echo "[-] Error: Missing required CLI dependencies: ${missing[*]}" >&2; return 1; }
+  return 0
+}
+PKG_MGR="${PKG_MGR:-$(command -v dnf 2> /dev/null || command -v yum 2> /dev/null || echo "dnf")}"
 
 # ------------------------------------------------------------------------------
 # 2. CLI Usage & Help
+# ------------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
+# Function: show_usage
+# Purpose:  Displays command syntax, options, and GRUB index selection rules.
+# Arguments:
+#   None.
+# Returns:
+#   Outputs usage documentation.
 # ------------------------------------------------------------------------------
 show_usage() {
   cat << EOF
@@ -97,13 +90,24 @@ verify_dependencies "grubby" "${PKG_MGR}" "grep" "uname"
 # ------------------------------------------------------------------------------
 # 4. Core Functions & Audit Logging
 # ------------------------------------------------------------------------------
-log_audit() {
+# Audit logger wrapper (inherits from system.sh or defines standalone fallback)
+declare -f log_audit > /dev/null 2>&1 || log_audit() {
   local msg="$1"
+  local tag="${2:-kernel-default}"
   if command -v logger > /dev/null 2>&1; then
-    logger -t "kernel-default" "${msg}" 2> /dev/null || true
+    logger -t "${tag}" "${msg}" 2> /dev/null || true
   fi
 }
 
+# ------------------------------------------------------------------------------
+# Function: report_boot_kernel
+# Purpose:  Queries and prints the currently active default GRUB boot kernel title,
+#           vmlinuz path, and entry index using grubby.
+# Arguments:
+#   None.
+# Returns:
+#   0.
+# ------------------------------------------------------------------------------
 report_boot_kernel() {
   echo "Current Default Boot Kernel:"
   local title kernel index
@@ -116,11 +120,29 @@ report_boot_kernel() {
   [[ -n "${index}" ]] && echo "  Index : ${index}"
 }
 
+# ------------------------------------------------------------------------------
+# Function: report_all_kernel_entries
+# Purpose:  Enumerates all registered GRUB boot entries showing their indexes,
+#           kernel binary paths, and descriptive titles.
+# Arguments:
+#   None.
+# Returns:
+#   0.
+# ------------------------------------------------------------------------------
 report_all_kernel_entries() {
   echo "Available GRUB Kernel Entries:"
   grubby --info=ALL 2> /dev/null | grep -E "^(index|kernel|title)=" || true
 }
 
+# ------------------------------------------------------------------------------
+# Function: remove_old_kernels
+# Purpose:  Safely identifies and purges retired installonly kernel packages via
+#           the native package manager while strictly preserving the running kernel.
+# Arguments:
+#   None.
+# Returns:
+#   0 on success.
+# ------------------------------------------------------------------------------
 remove_old_kernels() {
   local current_kernel
   current_kernel="$(uname -r)"

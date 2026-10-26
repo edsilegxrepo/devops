@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Script:      templates/job-skeleton.sh
-# Description: Production starter template for new DevOps automated jobs.
-# Author:      DevOps Team <criticalsys.mis@gmail.com>
-# Standard:    DRY Automation Architecture (lib/common.sh)
+# Script:      /opt/scripts/templates/job-skeleton.sh
+# Version:     1.4.0  2026/10/26
+# Standard:    DRY Architecture Framework (lib/common.sh)
+# Author:      DevOps Systems Administration <criticalsys.mis@gmail.com>
+# Compatibility: Enterprise Linux 8, 9, 10 (RHEL, AlmaLinux, Rocky Linux)
+# Description: Production starter template and architectural scaffold for creating
+#              new scheduled or on-demand DevOps automation jobs with integrated
+#              configuration discovery, concurrency locking, LIFO cleanup traps,
+#              execution logging, and rich HTML email alerts.
 # ==============================================================================
 set -euo pipefail
 umask 077
@@ -20,6 +25,14 @@ DRY_RUN=0
 VERBOSE=0
 SEND_MAIL=1
 
+# ------------------------------------------------------------------------------
+# Function: show_help
+# Purpose:  Displays command syntax, options, and operational summary to stdout.
+# Arguments:
+#   None.
+# Returns:
+#   Outputs help documentation.
+# ------------------------------------------------------------------------------
 show_help() {
     cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
@@ -79,22 +92,13 @@ fi
 source "${LIB_COMMON}"
 
 # ------------------------------------------------------------------------------
-# 3. Guards, Configuration & Concurrency Lock
+# 3. Bootstrap, Guards & Configuration Locking
 # ------------------------------------------------------------------------------
-# Enforce root privileges if this job modifies system state
-require_root
-
-# Verify required CLI dependencies before acquiring locks or allocating resources
-verify_dependencies "awk" "sed" "date" "find"
-
-# Load external configuration hierarchy (system-wide and local property files)
-load_config "${JOB_NAME}"
-
-# Concurrency lock (prevents overlapping scheduled executions)
-acquire_lock "${JOB_NAME}"
-
-# Initialize structured execution log (/var/log/jobs/${JOB_NAME}-YYYYMMDD_HHMMSS.log)
-init_job_log "${JOB_NAME}" "${LOG_BASE_DIR:-/var/log/jobs}" "${LOG_RETENTION_DAYS:-14}"
+bootstrap_job "${JOB_NAME}" \
+    --require-root \
+    --deps "awk sed date find" \
+    --log-dir "${LOG_BASE_DIR:-/var/log/jobs}" \
+    --retention "${LOG_RETENTION_DAYS:-14}"
 
 # ------------------------------------------------------------------------------
 # 4. Workspace & Cleanup Hooks Registration
@@ -107,7 +111,10 @@ register_cleanup "rm -rf '${WORK_DIR}'"
 # 5. Core Job Execution
 # ------------------------------------------------------------------------------
 log_msg "[*] Starting ${JOB_TITLE} on ${SYS_HOSTNAME}..."
-log_msg "[*] Dry-run: $(( DRY_RUN == 1 ? 'YES' : 'NO' )), Work directory: ${WORK_DIR}"
+local_dry="NO"
+[[ ${DRY_RUN} -eq 1 ]] && local_dry="YES"
+log_msg "[*] Dry-run: ${local_dry}, Work directory: ${WORK_DIR}"
+[[ ${VERBOSE} -eq 1 ]] && log_msg "[*] Verbose logging enabled."
 
 JOB_STATUS="SUCCESS"
 EXIT_CODE=0
@@ -128,34 +135,25 @@ log_msg "[✓] Task completed successfully."
 if [[ "${SEND_MAIL}" -eq 1 ]]; then
     log_msg "[*] Preparing email notification..."
 
-    # Determine status pill badge
-    if [[ "${JOB_STATUS}" == "SUCCESS" ]]; then
-        STATUS_BADGE="$(get_status_badge "success" "✓" "COMPLETED")"
-        EMAIL_SUBJECT="[SUCCESS] ${JOB_TITLE} - ${SYS_HOSTNAME}"
-    else
-        STATUS_BADGE="$(get_status_badge "failed" "✕" "FAILED")"
-        EMAIL_SUBJECT="[ALERT] ${JOB_TITLE} Failure - ${SYS_HOSTNAME}"
+    status="success"
+    badge_icon="✓"
+    badge_label="COMPLETED"
+    if [[ "${JOB_STATUS}" != "SUCCESS" ]]; then
+        status="failed"
+        badge_icon="✕"
+        badge_label="FAILED"
     fi
 
-    # Format log content for terminal card
-    EMAIL_LOG="$(prepare_email_log "${JOB_LOG_FILE}" 300)"
-    TERMINAL_HTML="$(render_template "${SHARED_TEMPLATES_DIR}/terminal-card.html" \
-        "LOG_TITLE" "Execution Log" \
-        "LOG_OUTPUT" "${EMAIL_LOG}")"
+    dispatch_job_notification \
+        --title "${JOB_TITLE}" \
+        --category "${SERVICE_CATEGORY}" \
+        --status "${status}" \
+        --badge-icon "${badge_icon}" \
+        --badge-label "${badge_label}" \
+        --content "<p style=\"font-size: 14px; color: #334155; margin: 0 0 16px 0;\">${JOB_TITLE} executed successfully on <strong>${SYS_HOSTNAME}</strong>.</p>" \
+        --log-file "${JOB_LOG_FILE}" \
+        --log-lines 300
 
-    # Assemble master layout
-    EMAIL_BODY="$(render_template "${SHARED_TEMPLATES_DIR}/base-layout.html" \
-        "SUBJECT" "${EMAIL_SUBJECT}" \
-        "SERVICE_CATEGORY" "${SERVICE_CATEGORY}" \
-        "JOB_TITLE" "${JOB_TITLE}" \
-        "STATUS_BADGE" "${STATUS_BADGE}" \
-        "CONTENT_BODY" "<p style=\"font-size: 14px; color: #334155; margin: 0 0 16px 0;\">${JOB_TITLE} executed successfully on <strong>${SYS_HOSTNAME}</strong>.</p>${TERMINAL_HTML}" \
-        "HOST_NAME" "${SYS_HOSTNAME}" \
-        "CHECK_TIME" "${JOB_CHECK_TIME}" \
-        "LOG_FILE_PATH" "${JOB_LOG_FILE}" \
-        "POSTFIX_HOSTNAME" "${SYS_HOSTNAME}")"
-
-    send_html_email "${MAIL_TO}" "${MAIL_FROM}" "${EMAIL_SUBJECT}" "${EMAIL_BODY}"
     log_msg "[✓] Email notification dispatched to ${MAIL_TO}."
 fi
 

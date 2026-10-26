@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Script: vm-backup-gdrive.sh
-# Purpose: Comprehensive VM Snapshot & Google Drive Backup tool
-# Standard: DRY Architecture Framework (lib/common.sh)
+# Script:      /opt/scripts/vm-backup-gdrive.sh
+# Version:     1.4.0  2026/10/26
+# Standard:    DRY Architecture Framework (lib/common.sh)
+# Author:      DevOps Systems Administration <criticalsys.mis@gmail.com>
+# Compatibility: Enterprise Linux 8, 9, 10 (RHEL, AlmaLinux, Rocky Linux)
+# Description: Comprehensive VM Snapshot & Google Drive Backup tool. Creates hot
+#              SQLite backups, captures bare-metal DR manifests, compresses and
+#              encrypts with AES-256 GPG, synchronizes to cloud storage via Rclone,
+#              enforces retention policies, and dispatches HTML email reports.
 # ==============================================================================
 set -euo pipefail
 umask 077
@@ -30,6 +36,15 @@ NOTIFY_ONLY_FAILURES=0
 
 # ------------------------------------------------------------------------------
 # 2. Argument Parsing
+# ------------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
+# Function: show_help
+# Purpose:  Displays command syntax, options, and operational summary to stdout.
+# Arguments:
+#   None.
+# Returns:
+#   Outputs help documentation.
 # ------------------------------------------------------------------------------
 show_help() {
   cat << EOF
@@ -64,23 +79,18 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ------------------------------------------------------------------------------
-# 3. Privilege Guard & Dependencies
+# 3. Bootstrap, Guards & Configuration Locking
 # ------------------------------------------------------------------------------
-require_root
-
-verify_dependencies "tar" "zstd" "gpg" "rclone" "find" "awk" "sed" "stat" "date" "mktemp"
-
-# ------------------------------------------------------------------------------
-# 4. Configuration & Concurrency Locking
-# ------------------------------------------------------------------------------
-load_config "vm-backup"
-
-acquire_lock "vm-backup"
-
-init_job_log "vm-backup" "${LOG_BASE_DIR:-/var/log/backups}" "${LOG_RETENTION_DAYS:-14}"
+bootstrap_job "vm-backup" \
+  --require-root \
+  --deps "tar zstd gpg rclone find awk sed stat date mktemp" \
+  --log-dir "${LOG_BASE_DIR:-/var/log/backups}" \
+  --retention "${LOG_RETENTION_DAYS:-14}"
 
 # Execution state
 BACKUP_SUCCESSFUL=0
+# shellcheck disable=SC2034 # Evaluated dynamically in cleanup trap
+LOCAL_BACKUP_CREATED=0
 ARCHIVE_SIZE="Not created"
 START_TS="${JOB_START_TS:-$(date +%s)}"
 START_TIME_STR="${JOB_CHECK_TIME:-$(date -u '+%Y-%m-%d %H:%M:%S UTC')}"
@@ -91,10 +101,21 @@ ARCHIVE_PATH="${BACKUP_DIR}/${ARCHIVE_NAME}"
 # Temporary staging directory and cleanup hooks
 STAGING_DIR="$(mktemp -d /tmp/vm-backup-stage.XXXXXX)"
 register_cleanup "rm -rf '${STAGING_DIR}'"
-register_cleanup "[[ \${BACKUP_SUCCESSFUL:-0} -eq 0 ]] && rm -f '${ARCHIVE_PATH}' '${ARCHIVE_PATH}.sha256'"
+register_cleanup "[[ \${LOCAL_BACKUP_CREATED:-0} -eq 0 ]] && rm -f '${ARCHIVE_PATH}' '${ARCHIVE_PATH}.sha256'"
 
 # ------------------------------------------------------------------------------
-# 5. Backup Notification Dispatcher
+# 4. Backup Notification Dispatcher
+# ------------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
+# Function: send_backup_notification
+# Purpose:  Compiles backup summary grid (archive size, durations, retention),
+#           attaches truncated execution log, and dispatches HTML notification
+#           email unless suppressed by failure-only policy.
+# Arguments:
+#   $1 (Optional) - Backup exit code (0 for success, non-zero for failure; default: 1).
+# Returns:
+#   0.
 # ------------------------------------------------------------------------------
 send_backup_notification() {
   local exit_code="${1:-1}"
@@ -112,17 +133,17 @@ send_backup_notification() {
   local end_time_str
   end_time_str="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 
-  local status_badge
-  local subject
-  local status_label
-  if [[ "${exit_code}" -eq 0 ]]; then
-    status_badge="$(get_status_badge "success" "✓" "BACKUP SUCCESS")"
-    subject="[SUCCESS] VM Snapshot Backup - ${SYS_HOSTNAME}"
-    status_label="SUCCESS"
-  else
-    status_badge="$(get_status_badge "failed" "✕" "BACKUP FAILED")"
-    subject="[ALERT] VM Backup Failed - ${SYS_HOSTNAME}"
-    status_label="FAILED"
+  local status_type="success"
+  local badge_icon="✓"
+  local badge_label="BACKUP SUCCESS"
+  local status_header="SUCCESS"
+  local alert_banner=""
+  if [[ "${exit_code}" -ne 0 ]]; then
+    status_type="failed"
+    badge_icon="✕"
+    badge_label="BACKUP FAILED"
+    status_header="FAILED"
+    alert_banner="<div style=\"margin: 0 0 16px 0; padding: 12px 16px; background-color: #fef2f2; border: 1px solid #fecaca; border-radius: 6px;\"><strong style=\"color: #991b1b; font-size: 13px;\">Critical Backup Alert:</strong> <span style=\"color: #b91c1c; font-size: 13px;\">One or more pipeline stages failed. The exact root cause and diagnostic traces have been documented in the Execution Log below.</span></div>"
   fi
 
   local retention_days="Local: ${LOCAL_RETENTION_DAYS}d &bull; Remote: ${REMOTE_RETENTION_DAYS}d &bull; Logs: ${LOG_RETENTION_DAYS}d"
@@ -139,37 +160,37 @@ send_backup_notification() {
     "DURATION" "${duration_formatted} (${duration_sec}s)" \
     "RETENTION_DAYS" "${retention_days}")"
 
-  local content_body="<h2 style=\"font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; margin: 0 0 14px 0; font-weight: 700;\">Backup Summary</h2>${summary_grid}"
+  local content_body="${alert_banner}<h2 style=\"font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; margin: 0 0 14px 0; font-weight: 700;\">Backup Summary</h2>${summary_grid}"
 
-  # Prepare log output for email
-  local email_log
-  email_log="$(prepare_email_log "${JOB_LOG_FILE}" 350)"
+  dispatch_job_notification \
+    --title "VM Snapshot & Cloud Backup" \
+    --category "Disaster Recovery & Snapshots" \
+    --status "${status_type}" \
+    --badge-icon "${badge_icon}" \
+    --badge-label "${badge_label}" \
+    --content "${content_body}" \
+    --log-file "${JOB_LOG_FILE}" \
+    --log-lines 350 \
+    --terminal-title "Backup Execution Log" \
+    --extra-header "X-Backup-Status: ${status_header}"
 
-  local terminal_block
-  terminal_block="$(render_template "${SHARED_TEMPLATES_DIR}/terminal-card.html" \
-    "TERMINAL_TITLE" "Backup Execution Log" \
-    "TERMINAL_SUBTITLE" "" \
-    "TERMINAL_CONTENT" "${email_log}")"
-
-  local email_body
-  email_body="$(render_template "${SHARED_TEMPLATES_DIR}/base-layout.html" \
-    "SUBJECT" "${subject}" \
-    "SERVICE_CATEGORY" "Disaster Recovery & Snapshots" \
-    "JOB_TITLE" "VM Snapshot & Cloud Backup" \
-    "STATUS_BADGE" "${status_badge}" \
-    "CONTENT_BODY" "${content_body}" \
-    "ACTION_BLOCK" "" \
-    "TERMINAL_BLOCK" "${terminal_block}" \
-    "HOST_NAME" "${SYS_HOSTNAME}" \
-    "EXECUTION_TIME" "${end_time_str}" \
-    "LOG_FILE_PATH" "${JOB_LOG_FILE}")"
-
-  send_html_email "${MAIL_TO}" "${MAIL_FROM}" "${subject}" "${email_body}" "X-Backup-Status: ${status_label}"
   log_msg "[✓] Email notification dispatched to ${MAIL_TO}."
 }
 
 # ------------------------------------------------------------------------------
-# 6. Core Backup Execution Pipeline
+# 5. Core Backup Execution Pipeline
+# ------------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
+# Function: execute_backup_routine
+# Purpose:  Orchestrates full backup lifecycle: pre-backup hook execution, hot
+#           SQLite staging, disaster recovery manifest generation, encrypted
+#           archive creation, integrity checksumming, remote cloud synchronization,
+#           post-backup hooks, and dual retention pruning.
+# Arguments:
+#   None.
+# Returns:
+#   0 on full success; 1 if any critical pipeline stage fails.
 # ------------------------------------------------------------------------------
 execute_backup_routine() {
   log_msg "[*] Starting VM snapshot & cloud backup routine on ${SYS_HOSTNAME}..."
@@ -195,8 +216,6 @@ execute_backup_routine() {
       if [[ -f "${db_path}" ]]; then
         local db_rel="${db_path#/}"
         local stage_target="${STAGING_DIR}/${db_rel}"
-        local stage_target_dir
-        stage_target_dir="$(dirname "${stage_target}")"
 
         # Ensure parent container directory is staged if under /var/lib/
         if [[ "${db_path}" =~ ^/var/lib/([^/]+)/ ]]; then
@@ -208,16 +227,8 @@ execute_backup_routine() {
           fi
         fi
 
-        mkdir -p "${stage_target_dir}"
-        rm -f "${stage_target}"*
-
-        if command -v sqlite3 > /dev/null 2>&1; then
-          sqlite3 "${db_path}" ".backup '${stage_target}'"
-          log_msg "    [✓] Online hot-backup created: ${db_path}"
-        else
-          cp -a "${db_path}" "${stage_target}"
-          log_msg "    [✓] Database snapshot staged: ${db_path}"
-        fi
+        sqlite_hot_backup "${db_path}" "${stage_target}"
+        log_msg "    [✓] Database snapshot staged: ${db_path}"
       else
         log_msg "    [-] Notice: Configured SQLite DB not found: ${db_path}"
       fi
@@ -270,6 +281,7 @@ execute_backup_routine() {
 
   local file_list_tmp="${STAGING_DIR}/backed-up-files.txt"
   local tar_err_tmp="${STAGING_DIR}/tar-stderr.log"
+  local gpg_err_tmp="${STAGING_DIR}/gpg-stderr.log"
 
   tar --warning=no-file-changed --ignore-failed-read --totals \
     -v --index-file="${file_list_tmp}" \
@@ -281,11 +293,29 @@ execute_backup_routine() {
     gpg --batch --yes --symmetric \
       --cipher-algo AES256 \
       --passphrase-file "${PASSPHRASE_FILE}" \
-      --output "${ARCHIVE_PATH}"
+      --output "${ARCHIVE_PATH}" \
+      2> "${gpg_err_tmp}"
+
+  local pipe_statuses=("${PIPESTATUS[@]}")
+  local tar_rc="${pipe_statuses[0]:-0}"
+  local gpg_rc="${pipe_statuses[1]:-0}"
 
   # Forward genuine tar warnings or errors to log
   if [[ -f "${tar_err_tmp}" ]]; then
     grep -v '^Total bytes written:' "${tar_err_tmp}" >> "${JOB_LOG_FILE}" || true
+  fi
+
+  # Forward genuine gpg warnings or errors to log
+  if [[ -f "${gpg_err_tmp}" && -s "${gpg_err_tmp}" ]]; then
+    cat "${gpg_err_tmp}" >&2
+    if [[ -n "${JOB_LOG_FILE:-}" && -f "${JOB_LOG_FILE}" ]]; then
+      sed 's/^/    [gpg] /' "${gpg_err_tmp}" >> "${JOB_LOG_FILE}"
+    fi
+  fi
+
+  if [[ ${tar_rc} -ne 0 || ${gpg_rc} -ne 0 ]]; then
+    log_msg "[-] Error: Archive creation pipeline failed (tar exit: ${tar_rc}, gpg exit: ${gpg_rc})."
+    return 1
   fi
 
   local uncompressed_bytes
@@ -360,13 +390,21 @@ execute_backup_routine() {
   fi
 
   log_msg "[✓] Archive validated: ${ARCHIVE_SIZE}"
+  # shellcheck disable=SC2034 # Evaluated dynamically in cleanup trap
+  LOCAL_BACKUP_CREATED=1
 
   # 5. Remote Sync
-  sync_to_remote "${ARCHIVE_PATH}" "${TARGET_REMOTE}" "${TARGET_REMOTE_TYPE:-rclone}"
+  if ! sync_to_remote "${ARCHIVE_PATH}" "${TARGET_REMOTE}" "${TARGET_REMOTE_TYPE:-rclone}"; then
+    log_msg "[-] Error: Primary remote synchronization failed for ${TARGET_REMOTE}!"
+    return 1
+  fi
 
   # Optional Secondary Remote Sync (3-2-1 Backup Rule)
   if [[ -n "${TARGET_SECONDARY_REMOTE:-}" ]]; then
-    sync_to_remote "${ARCHIVE_PATH}" "${TARGET_SECONDARY_REMOTE}" "${TARGET_SECONDARY_TYPE:-rclone}"
+    if ! sync_to_remote "${ARCHIVE_PATH}" "${TARGET_SECONDARY_REMOTE}" "${TARGET_SECONDARY_TYPE:-rclone}"; then
+      log_msg "[-] Error: Secondary remote synchronization failed for ${TARGET_SECONDARY_REMOTE}!"
+      return 1
+    fi
   fi
 
   # 6. Post-Backup Hook
@@ -375,24 +413,12 @@ execute_backup_routine() {
     "${POST_BACKUP_HOOK}" "${ARCHIVE_PATH}" || true
   fi
 
-  # 7. Retention Enforcement
-  log_msg "[+] Pruning local backups older than ${LOCAL_RETENTION_DAYS} days..."
-  find "${BACKUP_DIR}" -type f \( -name "${ARCHIVE_PREFIX}-*.tar.*.gpg" -o -name "${ARCHIVE_PREFIX}-*.tar.*.gpg.sha256" \) -mmin "+$((LOCAL_RETENTION_DAYS * 1440))" -delete 2> /dev/null || true
+  # 7. Retention Enforcement (Age Threshold + Minimum Backup Count Floor)
+  prune_local_storage "${BACKUP_DIR}" "${LOCAL_RETENTION_DAYS}" "${ARCHIVE_PREFIX}-*.tar.*.gpg" "${LOCAL_MIN_KEEP:-${LOCAL_RETENTION_DAYS}}"
+  prune_remote_storage "${TARGET_REMOTE}" "${TARGET_REMOTE_TYPE:-rclone}" "${REMOTE_RETENTION_DAYS}" "${ARCHIVE_PREFIX}-*.tar.*.gpg" "${REMOTE_MIN_KEEP:-${REMOTE_RETENTION_DAYS}}"
 
-  log_msg "[+] Pruning remote backups older than ${REMOTE_RETENTION_DAYS} days..."
-  if [[ "${TARGET_REMOTE_TYPE:-rclone}" == "rclone" ]]; then
-    rclone delete "${TARGET_REMOTE}" \
-      --include "${ARCHIVE_PREFIX}-*.tar.*.gpg" \
-      --include "${ARCHIVE_PREFIX}-*.tar.*.gpg.sha256" \
-      --min-age "${REMOTE_RETENTION_DAYS}d" 2> /dev/null || true
-  fi
-
-  if [[ -n "${TARGET_SECONDARY_REMOTE:-}" && "${TARGET_SECONDARY_TYPE:-rclone}" == "rclone" ]]; then
-    log_msg "[+] Pruning secondary remote backups older than ${REMOTE_RETENTION_DAYS} days..."
-    rclone delete "${TARGET_SECONDARY_REMOTE}" \
-      --include "${ARCHIVE_PREFIX}-*.tar.*.gpg" \
-      --include "${ARCHIVE_PREFIX}-*.tar.*.gpg.sha256" \
-      --min-age "${REMOTE_RETENTION_DAYS}d" 2> /dev/null || true
+  if [[ -n "${TARGET_SECONDARY_REMOTE:-}" ]]; then
+    prune_remote_storage "${TARGET_SECONDARY_REMOTE}" "${TARGET_SECONDARY_TYPE:-rclone}" "${REMOTE_RETENTION_DAYS}" "${ARCHIVE_PREFIX}-*.tar.*.gpg" "${REMOTE_MIN_KEEP:-${REMOTE_RETENTION_DAYS}}"
   fi
 
   # shellcheck disable=SC2034
@@ -402,7 +428,7 @@ execute_backup_routine() {
 }
 
 # ------------------------------------------------------------------------------
-# 7. Execution Pipeline & Notification Trigger
+# 6. Execution Pipeline & Notification Trigger
 # ------------------------------------------------------------------------------
 BACKUP_EXIT_CODE=0
 if ! execute_backup_routine; then

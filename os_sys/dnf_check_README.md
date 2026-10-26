@@ -184,7 +184,7 @@ graph TD
 | `--sqlite-check` | Flag | N/A | Validates the integrity of DNF's SQLite databases (`packages.db`, `history.sqlite`). |
 | `--sqlite-close` | Flag | N/A | Legacy compatibility alias for `--sqlite-check`. |
 | `--purge-cache` | Flag | N/A | Safely cleans all DNF metadata and package caches via native `dnf clean all`. |
-| `--relax` | Flag | N/A | Appends `--skip-broken --nobest` to DNF arguments to allow non-best candidate selection and skip broken dependencies. |
+| `--relax` | Flag | N/A | Permits non-best packages and skips broken dependencies (`--skip-broken --nobest`). |
 | `-h`, `--help` | Flag | N/A | Displays CLI usage documentation and exits `0`. |
 | `[DNF_COMMAND...]` | Pass-through | N/A | Standard DNF arguments (e.g. `update`, `install nginx`, `clean all`, `search`). |
 
@@ -253,11 +253,12 @@ kernel-core-0:6.12.0-211.56.1.el10_2.x86_64
 ```
 *(Notice that `kernel-default.sh` is not invoked.)*
 
-#### 5. Package Update with Relaxed Dependencies
+#### 5. Relaxed Dependency Update (`--relax`)
 ```bash
 sudo /opt/scripts/dnf_check.sh --relax update -y
 ```
-*(Appends `--skip-broken --nobest` to package manager parameters to allow non-best candidate selection and bypass broken packages.)*
+**Behavior:**
+Appends `--skip-broken --nobest` to DNF arguments, allowing transactions to proceed when upstream packages have non-critical dependency conflicts or non-best architecture candidates.
 
 ---
 

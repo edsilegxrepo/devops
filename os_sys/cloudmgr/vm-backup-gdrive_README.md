@@ -14,7 +14,7 @@ Comprehensive operational and architecture guide for [`/opt/scripts/vm-backup-gd
 * **Pipelined Encryption & Multi-Thread Compression:** Stream tarballs directly through multi-threaded `zstd -T0` compression into `gpg --symmetric --cipher-algo AES256` without storing unencrypted intermediate files on disk.
 * **Integrity Auditing & Threshold Sanity:** Generate SHA-256 checksums and enforce a minimum archive byte size threshold (`MIN_ARCHIVE_BYTES`) to prevent zero-byte or corrupt backups from propagating to cloud storage.
 * **Cloud Sync & 3-2-1 Storage Compliance:** Synchronize encrypted snapshots to primary remote storage (e.g. Google Drive via Rclone) and optional secondary remotes (AWS S3, SFTP, NFS).
-* **Automated Dual Retention:** Enforce distinct local (e.g. 2-day) and cloud (e.g. 14-day) retention pruning policies.
+* **Automated Dual Retention & Outage Floor Safeguard:** Enforce distinct local (e.g. 2-day) and cloud (e.g. 14-day) retention pruning policies, coupled with a minimum backup count floor (`LOCAL_MIN_KEEP`, `REMOTE_MIN_KEEP`) to prevent historical recovery wipeouts during/after extended outages.
 * **Executive HTML Reporting:** Generate branded HTML email reports detailing execution timings, compression statistics, uncompressed volumes, and diagnostic logs.
 
 ---
@@ -41,6 +41,7 @@ Comprehensive operational and architecture guide for [`/opt/scripts/vm-backup-gd
 * **Suspiciously Small Archives:** If an archive is smaller than `MIN_ARCHIVE_BYTES` (default 1 MB), the run fails immediately, preventing truncated archives from replacing valid backups.
 * **Failed Backup Rollback:** If the pipeline fails, signal traps purge partial `.tar.zst.gpg` and `.sha256` files from the filesystem.
 * **Changed Files During Tar:** Passes `--warning=no-file-changed` and `--ignore-failed-read` to prevent active log writes from causing tar to abort.
+* **Outage Backup Wipeout Protection:** If system or network outages exceed the retention window (e.g. >14 days), the pruning engine halts deletions if total backups $\le$ `MIN_KEEP`, and unconditionally shields the newest recovery points from age-based eviction.
 * **3-2-1 Redundancy:** Supports `TARGET_SECONDARY_REMOTE` for dual-cloud redundancy.
 
 ### Architecture Diagram
@@ -81,8 +82,8 @@ graph TD
     end
 
     subgraph "Retention & Notification"
-        PostHook --> LocalPrune["find -mmin +Days -delete"]
-        LocalPrune --> RemotePrune["rclone delete --min-age Days"]
+        PostHook --> LocalPrune["prune_local_storage<br/>(Age + Min Count Floor)"]
+        LocalPrune --> RemotePrune["prune_remote_storage<br/>(Age + Min Count Floor)"]
         RemotePrune --> DispatchEmail["send_html_email (Success / Failure)"]
     end
 ```
@@ -241,6 +242,8 @@ graph TD
 | `PASSPHRASE_FILE` | `/root/.secrets/backup-passphrase` | Absolute path to AES-256 symmetric key. |
 | `LOCAL_RETENTION_DAYS` | `2` | Number of days to retain local snapshot archives. |
 | `REMOTE_RETENTION_DAYS`| `14` | Number of days to retain offsite cloud archives. |
+| `LOCAL_MIN_KEEP`       | `2` | Minimum local backup count floor to preserve unconditionally. |
+| `REMOTE_MIN_KEEP`      | `14` | Minimum cloud backup count floor to preserve unconditionally. |
 | `MIN_ARCHIVE_BYTES` | `1048576` (1MB) | Minimum archive size required to declare success. |
 | `COMPRESSION_PROGRAM` | `zstd -T0 -3` | Multi-threaded compression command string. |
 
@@ -268,8 +271,8 @@ sudo /opt/scripts/vm-backup-gdrive.sh
 [+] SHA-256 checksum generated: 238db071e46f95e7dcd95e45157be25449822bc61c831b0bbcb41319e0945a74
 [✓] Archive validated: 4.4M (25.3M uncompressed, 1,661 files, 352 directories)
 [+] Syncing archive to remote via Rclone: gdrive:cs-us-pweb001...
-[+] Pruning local backups older than 2 days...
-[+] Pruning remote backups older than 14 days...
+[+] Pruning local files in /var/backups/vm-snapshots: count (2) <= retention floor (2). Preserving all existing recovery points.
+[+] Pruning remote backups in gdrive:cs-us-pweb001: count (14) <= retention floor (14). Preserving all existing recovery points.
 [✓] Encrypted backup completed successfully.
 [✓] Email notification dispatched to criticalsys.mis@gmail.com.
 ```

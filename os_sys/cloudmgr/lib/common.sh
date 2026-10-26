@@ -1,60 +1,58 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Library: /opt/scripts/lib/common.sh
-# Purpose: Core infrastructure functions for DevOps automation scripts
-# Host:    cs-us-pweb001.criticalsys.net (Universal RHEL & Debian Compatibility)
-# Standard: DRY Architecture Framework
+# Library:     /opt/scripts/lib/common.sh
+# Version:     1.4.0  2026/10/26
+# Standard:    DRY Architecture Framework (Job Automation & Reporting Layer)
+# Author:      DevOps Systems Administration <criticalsys.mis@gmail.com>
+# Compatibility: Enterprise Linux 8, 9, 10 (RHEL, AlmaLinux, Rocky, CentOS)
+#              Debian 12+ (Bookworm), Ubuntu 22.04+ (Jammy/Noble)
+# Description: Central DevOps automation library for scheduled batch jobs
+#              (vm-backup-gdrive.sh, check-container-updates.sh, job-skeleton.sh).
+#              Builds on lib/system.sh, supplying configuration resolution,
+#              concurrency locking, execution logging, LIFO cleanup traps,
+#              HTML templating, email dispatching, and offsite storage sync/pruning.
 # ==============================================================================
 set -euo pipefail
 umask 077
 shopt -u patsub_replacement 2>/dev/null || true
 
-# Standard Environment Variables
+# ------------------------------------------------------------------------------
+# 1. System Foundation & Environment Initialization
+# ------------------------------------------------------------------------------
 COMMON_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMMON_SCRIPTS_DIR="$(dirname "${COMMON_LIB_DIR}")"
 COMMON_CONFIG_DIR="${COMMON_SCRIPTS_DIR}/config"
 COMMON_TEMPLATES_DIR="${COMMON_SCRIPTS_DIR}/templates"
 SHARED_TEMPLATES_DIR="${COMMON_TEMPLATES_DIR}/shared"
 
+# Sourcing Decoupled System Foundation Library (provides require_root, PKG_MGR, etc.)
+LIB_SYSTEM="${COMMON_LIB_DIR}/system.sh"
+if [[ -f "${LIB_SYSTEM}" ]]; then
+    # shellcheck source=/dev/null
+    source "${LIB_SYSTEM}"
+fi
+
 DEFAULT_MAIL_TO="criticalsys.mis@gmail.com"
 DEFAULT_SENDMAIL="/usr/sbin/sendmail"
-SYS_HOSTNAME="$(hostname -f 2>/dev/null || hostname)"
-SHORT_HOSTNAME="${SYS_HOSTNAME%%.*}"
-
-# ------------------------------------------------------------------------------
-# 1. Configuration & Privilege Guards
-# ------------------------------------------------------------------------------
-require_root() {
-    if [[ "${EUID}" -ne 0 ]]; then
-        echo "[-] Error: This script must be executed as root (or via sudo)." >&2
-        exit 1
-    fi
-}
-
-# Usage: verify_dependencies "tar" "zstd" "gpg" "rclone" "find"
-verify_dependencies() {
-    local missing=()
-    for bin in "$@"; do
-        if ! command -v "${bin}" >/dev/null 2>&1; then
-            missing+=("${bin}")
-        fi
-    done
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        log_msg "[-] Error: Missing required CLI dependencies: ${missing[*]}" 1 >&2
-        return 1
-    fi
-    return 0
-}
 
 # ------------------------------------------------------------------------------
 # 2. Configuration Loading & Validation Engine
 # ------------------------------------------------------------------------------
-# Usage: load_config "job-name"
-# Resolves configuration in order:
-#   1. Global Common Configuration (/etc/devops/common.conf, config/common.env)
-#   2. Job-Specific Configuration  (/etc/devops/${job}.conf, config/${job}.env)
-#   3. OS-level overrides          (/etc/sysconfig/${job}, /etc/default/${job})
-#   4. Dynamic Auto-Discovery Fallbacks
+
+# ------------------------------------------------------------------------------
+# Function: load_config
+# Purpose:  Resolves and loads multi-tiered configuration hierarchy for a job.
+# Precedence Order:
+#   1. System-wide common configuration (/etc/devops/common.conf, config/common.env)
+#   2. Job-specific configuration (/etc/devops/${job}.conf, config/${job}.env)
+#   3. OS-level sysconfig overrides (/etc/sysconfig/${job}, /etc/default/${job})
+#   4. Dynamic auto-discovery defaults (hostname, mail sender, log dirs)
+#   5. Convention-based validator hook (validate_${job//-/_}_config)
+# Arguments:
+#   $1 - Job identifier name (e.g. "vm-backup", "container-updates").
+# Returns:
+#   0 on success; exits or logs error if mandatory configuration is invalid.
+# ------------------------------------------------------------------------------
 load_config() {
     local job_name="$1"
 
@@ -111,13 +109,24 @@ load_config() {
 
     # Step 5: Execute Sanity & Safety Validation
     validate_common_config
-    if [[ "${job_name}" == "vm-backup" ]]; then
+    local validator="validate_${job_name//-/_}_config"
+    if declare -f "${validator}" >/dev/null 2>&1; then
+        "${validator}"
+    elif [[ "${job_name}" == "vm-backup" ]] && declare -f validate_backup_config >/dev/null 2>&1; then
         validate_backup_config
-    elif [[ "${job_name}" == "container-updates" ]]; then
+    elif [[ "${job_name}" == "container-updates" ]] && declare -f validate_container_config >/dev/null 2>&1; then
         validate_container_config
     fi
 }
 
+# ------------------------------------------------------------------------------
+# Function: validate_common_config
+# Purpose:  Verifies global baseline parameters (sendmail binary, log writeability).
+# Arguments:
+#   None (operates on global configuration variables).
+# Returns:
+#   0 on success; emits warning to stderr or returns 1 on fatal error.
+# ------------------------------------------------------------------------------
 validate_common_config() {
     # Verify sendmail binary exists if MTA is required
     if [[ ! -x "${SENDMAIL_BIN}" ]]; then
@@ -137,6 +146,16 @@ validate_common_config() {
     fi
 }
 
+# ------------------------------------------------------------------------------
+# Function: validate_backup_config
+# Purpose:  Initializes default settings and asserts safety prerequisites for
+#           VM snapshot and cloud archive backup jobs (passphrase permissions,
+#           compression tools).
+# Arguments:
+#   None (operates on global configuration variables).
+# Returns:
+#   0 on success; 1 on missing passphrase or missing compression binary.
+# ------------------------------------------------------------------------------
 validate_backup_config() {
     BACKUP_DIR="${BACKUP_DIR:-/var/backups/vm-snapshots}"
     ARCHIVE_PREFIX="${ARCHIVE_PREFIX:-${SHORT_HOSTNAME}-backup}"
@@ -144,6 +163,8 @@ validate_backup_config() {
     PASSPHRASE_FILE="${PASSPHRASE_FILE:-/root/.secrets/backup-passphrase}"
     LOCAL_RETENTION_DAYS="${LOCAL_RETENTION_DAYS:-2}"
     REMOTE_RETENTION_DAYS="${REMOTE_RETENTION_DAYS:-14}"
+    LOCAL_MIN_KEEP="${LOCAL_MIN_KEEP:-${LOCAL_RETENTION_DAYS}}"
+    REMOTE_MIN_KEEP="${REMOTE_MIN_KEEP:-${REMOTE_RETENTION_DAYS}}"
     MIN_ARCHIVE_BYTES="${MIN_ARCHIVE_BYTES:-1048576}"
     COMPRESSION_PROGRAM="${COMPRESSION_PROGRAM:-zstd -T0 -3}"
     COMPRESSION_EXT="${COMPRESSION_EXT:-tar.zst.gpg}"
@@ -170,6 +191,15 @@ validate_backup_config() {
     fi
 }
 
+# ------------------------------------------------------------------------------
+# Function: validate_container_config
+# Purpose:  Initializes default settings and verifies container engine
+#           availability for container inspection and auto-update jobs.
+# Arguments:
+#   None (operates on global configuration variables).
+# Returns:
+#   0 on success; 1 if container engine binary is not found.
+# ------------------------------------------------------------------------------
 validate_container_config() {
     CONTAINER_ENGINE="${CONTAINER_ENGINE:-podman}"
     AUTO_UPDATE="${AUTO_UPDATE:-false}"
@@ -182,10 +212,63 @@ validate_container_config() {
     fi
 }
 
+# Backward-compatibility aliases
+validate_vm_backup_config() { validate_backup_config "$@"; }
+validate_container_updates_config() { validate_container_config "$@"; }
+
+# ------------------------------------------------------------------------------
+# Function: bootstrap_job
+# Purpose:  Orchestrates standard startup lifecycle for batch automation jobs:
+#           enforces root constraints, checks CLI dependencies, sources configuration,
+#           acquires singleton execution lock, and initializes structured log.
+# Arguments:
+#   $1      - Unique job identifier name (e.g. "vm-backup", "container-updates")
+#   Options:
+#     --require-root     Enforce UID 0 / root execution
+#     --deps "<list>"    Space-separated list of required CLI executables
+#     --log-dir "<dir>"  Base directory for job logs
+#     --retention <days> Retention period in days for execution logs
+# Returns:
+#   0 on successful bootstrap; exits on guard failure or concurrency conflict.
+# ------------------------------------------------------------------------------
+bootstrap_job() {
+    local job_name="$1"
+    shift
+    local req_root=0
+    local deps=()
+    local log_base=""
+    local retention=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --require-root) req_root=1; shift ;;
+            --deps) shift; read -ra deps <<< "$1"; shift ;;
+            --log-dir) shift; log_base="$1"; shift ;;
+            --retention) shift; retention="$1"; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    [[ ${req_root} -eq 1 ]] && require_root
+    [[ ${#deps[@]} -gt 0 ]] && verify_dependencies "${deps[@]}"
+    load_config "${job_name}"
+    acquire_lock "${job_name}"
+    init_job_log "${job_name}" "${log_base:-${LOG_BASE_DIR:-/var/log/jobs}}" "${retention:-${LOG_RETENTION_DAYS:-14}}"
+}
+
 # ------------------------------------------------------------------------------
 # 3. Concurrency Locking
 # ------------------------------------------------------------------------------
-# Usage: acquire_lock "job-name"
+
+# ------------------------------------------------------------------------------
+# Function: acquire_lock
+# Purpose:  Enforces non-blocking singleton process execution using kernel file
+#           locking (flock) on dynamic file descriptors (Bash 4.1+).
+# Arguments:
+#   $1 (Optional) - Job lock identifier name (default: "script").
+# Returns:
+#   0 if lock acquired; exits with code 0 if another instance is already running.
+# ------------------------------------------------------------------------------
 acquire_lock() {
     local lock_name="${1:-script}"
     local lock_dir="/run/lock"
@@ -205,12 +288,28 @@ acquire_lock() {
 # ------------------------------------------------------------------------------
 declare -a CLEANUP_HOOKS=()
 
-# Usage: register_cleanup "rm -rf '${STAGING_DIR}'"
-# Registers a cleanup command on the LIFO stack to execute upon script exit or signal.
+# ------------------------------------------------------------------------------
+# Function: register_cleanup
+# Purpose:  Registers an arbitrary shell command on the LIFO cleanup stack to
+#           be executed when the script exits or receives a termination signal.
+# Arguments:
+#   $* - Shell command string to execute during cleanup (e.g. "rm -rf '${DIR}'").
+# Returns:
+#   None.
+# ------------------------------------------------------------------------------
 register_cleanup() {
     CLEANUP_HOOKS+=("$*")
 }
 
+# ------------------------------------------------------------------------------
+# Function: dispatch_cleanup
+# Purpose:  Central trap handler executing registered cleanup commands in
+#           reverse order (LIFO) and finalizing job execution logs.
+# Arguments:
+#   Implicit: captures the active exit code ($?) at trap invocation.
+# Returns:
+#   Exits with the captured exit code.
+# ------------------------------------------------------------------------------
 dispatch_cleanup() {
     local exit_code=$?
     trap - EXIT INT TERM HUP
@@ -237,8 +336,19 @@ trap "exit 130" INT
 trap "exit 143" TERM
 trap "exit 129" HUP
 
-# Usage: init_job_log "job-name" "/var/log/jobs" 14
-# Exports: JOB_LOG_FILE, JOB_START_TS, JOB_CHECK_TIME
+# ------------------------------------------------------------------------------
+# Function: init_job_log
+# Purpose:  Initializes structured per-run execution log file with header metadata,
+#           secures filesystem permissions, and registers environment state.
+# Arguments:
+#   $1 - Job identifier name (e.g. "vm-backup").
+#   $2 (Optional) - Base log directory (default: "/var/log/jobs").
+#   $3 (Optional) - Log retention window in days (default: 14).
+# Exports:
+#   JOB_LOG_FILE, JOB_START_TS, JOB_CHECK_TIME, JOB_NAME, JOB_LOG_DIR
+# Returns:
+#   0 on successful initialization.
+# ------------------------------------------------------------------------------
 init_job_log() {
     local job_name="$1"
     local log_dir="${2:-/var/log/jobs}"
@@ -274,17 +384,42 @@ PID:        $$
 EOF
 }
 
+# ------------------------------------------------------------------------------
+# Function: log_msg
+# Purpose:  Emits timestamped operational messages to stdout, active job log file,
+#           and optionally syslog / journald.
+# Arguments:
+#   $1 - Message text to log.
+#   $2 (Optional) - Flag whether to print to stdout (1 = yes, 0 = silent; default: 1).
+#   $3 (Optional) - Syslog tag name (if set, routes message to logger).
+# Returns:
+#   0.
+# ------------------------------------------------------------------------------
 log_msg() {
     local msg="$1"
     local to_stdout="${2:-1}"
+    local syslog_tag="${3:-}"
     if [[ -n "${JOB_LOG_FILE:-}" && -f "${JOB_LOG_FILE}" ]]; then
         echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] ${msg}" >> "${JOB_LOG_FILE}"
+    fi
+    if [[ -n "${syslog_tag}" ]] && command -v logger >/dev/null 2>&1; then
+        logger -t "${syslog_tag}" "${msg}" 2>/dev/null || true
     fi
     if [[ "${to_stdout}" -eq 1 ]]; then
         echo "${msg}"
     fi
 }
 
+# ------------------------------------------------------------------------------
+# Function: finalize_job_log
+# Purpose:  Appends execution summary footer (status, duration, timestamps) to
+#           job log file and purges expired historical logs per retention policy.
+# Arguments:
+#   $1 (Optional) - Script exit code (default: 0).
+#   $2 (Optional) - Status message label (e.g. "COMPLETED", "FAILED"; default: "COMPLETED").
+# Returns:
+#   0.
+# ------------------------------------------------------------------------------
 finalize_job_log() {
     if [[ "${JOB_LOG_FINALIZED:-0}" -eq 1 ]]; then
         return 0
@@ -319,6 +454,16 @@ EOF
 # ------------------------------------------------------------------------------
 # 5. HTML Utilities & Template Engine
 # ------------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
+# Function: escape_html
+# Purpose:  Sanitizes input text for safe embedding within HTML email templates
+#           by escaping &, <, >, and ".
+# Arguments:
+#   $1 (Optional) - Input string. If omitted, reads raw content from stdin.
+# Returns:
+#   Outputs escaped HTML string to stdout.
+# ------------------------------------------------------------------------------
 escape_html() {
     local input
     if [[ $# -gt 0 ]]; then
@@ -329,6 +474,16 @@ escape_html() {
     sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' <<< "${input}"
 }
 
+# ------------------------------------------------------------------------------
+# Function: prepare_email_log
+# Purpose:  Filters verbose manifests from log files, truncates output to maximum
+#           allowed lines, and escapes content for HTML email display.
+# Arguments:
+#   $1 - Path to the source log file.
+#   $2 (Optional) - Maximum lines to display in email body (default: 400).
+# Returns:
+#   Outputs sanitized and truncated log text to stdout.
+# ------------------------------------------------------------------------------
 prepare_email_log() {
     local log_file="$1"
     local max_lines="${2:-400}"
@@ -354,15 +509,19 @@ prepare_email_log() {
     escape_html "${log_display}"
 }
 
-render_template() {
-    local tmpl_file="$1"
+# ------------------------------------------------------------------------------
+# Function: render_snippet
+# Purpose:  Performs token replacement on in-memory template strings replacing
+#           occurrences of {{KEY}} with corresponding values.
+# Arguments:
+#   $1    - Raw template string.
+#   $2,$3 - Key/value substitution pairs (e.g. "KEY1" "val1" "KEY2" "val2").
+# Returns:
+#   Outputs rendered template string to stdout.
+# ------------------------------------------------------------------------------
+render_snippet() {
+    local content="$1"
     shift
-    if [[ ! -f "${tmpl_file}" ]]; then
-        log_msg "[-] Error: Template file not found: ${tmpl_file}" 1 >&2
-        return 1
-    fi
-    local content
-    content="$(cat "${tmpl_file}")"
     while [[ $# -ge 2 ]]; do
         local key="$1"
         local val="$2"
@@ -372,10 +531,56 @@ render_template() {
     echo "${content}"
 }
 
+# ------------------------------------------------------------------------------
+# Function: render_template
+# Purpose:  Loads an HTML template file from disk and performs variable
+#           substitutions using render_snippet.
+# Arguments:
+#   $1    - Absolute filesystem path to template file.
+#   $2,$3 - Key/value substitution pairs.
+# Returns:
+#   Outputs rendered template content to stdout; returns 1 if file missing.
+# ------------------------------------------------------------------------------
+render_template() {
+    local tmpl_file="$1"
+    shift
+    if [[ ! -f "${tmpl_file}" ]]; then
+        log_msg "[-] Error: Template file not found: ${tmpl_file}" 1 >&2
+        return 1
+    fi
+    local content
+    content="$(cat "${tmpl_file}")"
+    render_snippet "${content}" "$@"
+}
+
+# ------------------------------------------------------------------------------
+# Function: get_status_badge
+# Purpose:  Generates an HTML status badge component with appropriate palette
+#           and iconography for header cards or summary tables.
+# Arguments:
+#   $1 - Status classification ("success" | "failed" | "warning" | "info").
+#   $2 - Status icon symbol (e.g. "✓", "✕", "⚡").
+#   $3 - Badge text label (e.g. "COMPLETED", "FAILED").
+#   $4 (Optional) - Rendering mode ("default" for header card, "table" for tabular badge).
+# Returns:
+#   Outputs HTML badge snippet to stdout.
+# ------------------------------------------------------------------------------
 get_status_badge() {
-    local status_type="$1" # success | failed | warning
+    local status_type="$1" # success | failed | warning | info
     local icon="$2"
     local label="$3"
+    local mode="${4:-default}" # default | table
+    if [[ "${mode}" == "table" ]]; then
+        local color="#16a34a" bg="#f0fdf4" border="#bbf7d0"
+        case "${status_type}" in
+            failed)  color="#dc2626"; bg="#fef2f2"; border="#fecaca" ;;
+            warning) color="#d97706"; bg="#fffbeb"; border="#fde68a" ;;
+            info)    color="#2563eb"; bg="#eff6ff"; border="#bfdbfe" ;;
+            success) color="#16a34a"; bg="#f0fdf4"; border="#bbf7d0" ;;
+        esac
+        echo "<span style=\"display: inline-block; padding: 2px 8px; font-size: 11px; font-weight: 700; color: ${color}; background-color: ${bg}; border: 1px solid ${border}; border-radius: 9999px;\">${label}</span>"
+        return 0
+    fi
     local tmpl="${SHARED_TEMPLATES_DIR}/badge-${status_type}.html"
     if [[ -f "${tmpl}" ]]; then
         local badge
@@ -388,6 +593,19 @@ get_status_badge() {
     fi
 }
 
+# ------------------------------------------------------------------------------
+# Function: send_html_email
+# Purpose:  Dispatches RFC-compliant MIME multipart/alternative or HTML emails
+#           directly via local sendmail / Postfix MTA.
+# Arguments:
+#   $1 (Optional) - Recipient email address (default: $DEFAULT_MAIL_TO).
+#   $2 (Optional) - Sender From header string (default: formatted $MAIL_FROM).
+#   $3            - Email Subject line.
+#   $4            - Complete HTML document body.
+#   $5 (Optional) - Custom SMTP tracking header (e.g. "X-DevOps-Job: ...").
+# Returns:
+#   0 on successful handoff to MTA; 1 on sendmail execution failure.
+# ------------------------------------------------------------------------------
 send_html_email() {
     local to="${1:-${DEFAULT_MAIL_TO}}"
     local from="${2:-${MAIL_FROM:-DevOps Automation <do-not-reply@${SYS_HOSTNAME}>}}"
@@ -415,13 +633,136 @@ EOF
 }
 
 # ------------------------------------------------------------------------------
+# Function: dispatch_job_notification
+# Purpose:  High-level notification assembler that compiles status badges,
+#           summary grids, optional action instructions, and execution logs into
+#           the standard enterprise HTML email layout and dispatches it.
+# Arguments (Named Options):
+#   --title <title>            Job Title (e.g. "VM Snapshot & Cloud Backup")
+#   --category <category>      Service Category (e.g. "Disaster Recovery & Snapshots")
+#   --status <status>          Status type: success | failed | warning | info
+#   --badge-icon <icon>        Status icon (e.g. "✓", "✕", "⚡")
+#   --badge-label <label>      Status badge text (e.g. "BACKUP SUCCESS", "FAILED")
+#   --subject <subject>        Email Subject (auto-generated if omitted)
+#   --content <html>           Main body HTML / summary grid
+#   --action <html>            Action block HTML (optional)
+#   --log-file <path>          Path to log file (default: $JOB_LOG_FILE)
+#   --log-lines <count>        Max log lines to include (default: 350, 0 to suppress)
+#   --terminal-title <title>   Title of log card (default: "Execution Log")
+#   --extra-header <header>    Custom SMTP header (e.g. "X-Backup-Status: SUCCESS")
+#   --to <email>               Recipient address (default: $MAIL_TO)
+#   --from <email>             Sender address (default: $MAIL_FROM)
+# Returns:
+#   0 on successful dispatch; 1 on sendmail failure.
+# ------------------------------------------------------------------------------
+dispatch_job_notification() {
+    local title="${JOB_NAME:-DevOps Automation}"
+    local category="SYSTEM AUTOMATION"
+    local status="success"
+    local badge_icon="✓"
+    local badge_label="COMPLETED"
+    local subject=""
+    local content=""
+    local action=""
+    local log_file="${JOB_LOG_FILE:-}"
+    local log_lines=350
+    local terminal_title="Execution Log"
+    local extra_header="X-DevOps-Job: ${JOB_NAME:-automation}"
+    local to="${MAIL_TO:-${DEFAULT_MAIL_TO}}"
+    local from="${MAIL_FROM:-${MAIL_FROM_NAME:-DevOps Automation} <automation@${SYS_HOSTNAME}>}"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --title) shift; title="$1"; shift ;;
+            --category) shift; category="$1"; shift ;;
+            --status) shift; status="$1"; shift ;;
+            --badge-icon) shift; badge_icon="$1"; shift ;;
+            --badge-label) shift; badge_label="$1"; shift ;;
+            --subject) shift; subject="$1"; shift ;;
+            --content) shift; content="$1"; shift ;;
+            --action) shift; action="$1"; shift ;;
+            --log-file) shift; log_file="$1"; shift ;;
+            --log-lines) shift; log_lines="$1"; shift ;;
+            --terminal-title) shift; terminal_title="$1"; shift ;;
+            --extra-header) shift; extra_header="$1"; shift ;;
+            --to) shift; to="$1"; shift ;;
+            --from) shift; from="$1"; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    # Generate default subject if not provided
+    if [[ -z "${subject}" ]]; then
+        local prefix="[INFO]"
+        [[ "${status}" == "success" ]] && prefix="[SUCCESS]"
+        [[ "${status}" == "failed" ]] && prefix="[ALERT]"
+        [[ "${status}" == "warning" ]] && prefix="[REVIEW]"
+        subject="${prefix} ${title} - ${SYS_HOSTNAME}"
+    fi
+
+    # Render status badge
+    local status_badge
+    status_badge="$(get_status_badge "${status}" "${badge_icon}" "${badge_label}")"
+
+    # Render terminal block if log lines > 0 and log file exists
+    local terminal_block=""
+    if (( log_lines > 0 )) && [[ -n "${log_file}" && -f "${log_file}" ]]; then
+        local formatted_log
+        formatted_log="$(prepare_email_log "${log_file}" "${log_lines}")"
+        terminal_block="$(render_template "${SHARED_TEMPLATES_DIR}/terminal-card.html" \
+            "TERMINAL_TITLE" "${terminal_title}" \
+            "TERMINAL_SUBTITLE" "" \
+            "TERMINAL_CONTENT" "${formatted_log}")"
+    fi
+
+    # Format action block if provided
+    local action_block=""
+    if [[ -n "${action}" ]]; then
+        action_block="<tr><td style=\"padding: 12px 28px 16px 28px;\">${action}</td></tr>"
+    fi
+
+    # Render final email layout
+    local email_body
+    email_body="$(render_template "${SHARED_TEMPLATES_DIR}/base-layout.html" \
+        "SUBJECT" "${subject}" \
+        "SERVICE_CATEGORY" "${category}" \
+        "JOB_TITLE" "${title}" \
+        "STATUS_BADGE" "${status_badge}" \
+        "CONTENT_BODY" "${content}" \
+        "ACTION_BLOCK" "${action_block}" \
+        "TERMINAL_BLOCK" "${terminal_block}" \
+        "HOST_NAME" "${SYS_HOSTNAME}" \
+        "EXECUTION_TIME" "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" \
+        "LOG_FILE_PATH" "${log_file}")"
+
+    send_html_email "${to}" "${from}" "${subject}" "${email_body}" "${extra_header}"
+}
+
+# ------------------------------------------------------------------------------
 # 6. Storage & DR Recovery Manifest Helpers
+# ------------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
+# Function: sync_to_remote
+# Purpose:  Synchronizes local backup archives and companion checksums to remote
+#           or secondary storage (Rclone, AWS S3, Local/NFS, or SFTP/Rsync) with
+#           strict exit code trapping.
+# Arguments:
+#   $1 - Absolute path to local source archive.
+#   $2 - Remote storage destination target (e.g. "gdrive:remote-path", "s3://...").
+#   $3 (Optional) - Remote backend type ("rclone", "s3", "local", "sftp"; default: "rclone").
+# Returns:
+#   0 on success; non-zero exit code if transfer or checksum copy fails.
 # ------------------------------------------------------------------------------
 sync_to_remote() {
     local source_archive="$1"
     local remote_target="$2"
     local remote_type="${3:-${TARGET_REMOTE_TYPE:-rclone}}"
     local checksum_file="${source_archive}.sha256"
+
+    local sync_err_tmp
+    sync_err_tmp="$(mktemp /tmp/sync-remote-err.XXXXXX)"
+    register_cleanup "rm -f '${sync_err_tmp}'"
 
     case "${remote_type}" in
         rclone)
@@ -430,37 +771,129 @@ sync_to_remote() {
                 --fast-list \
                 --drive-chunk-size 64M \
                 --timeout 10m \
-                --log-level NOTICE
+                --log-level NOTICE > "${sync_err_tmp}" 2>&1
+            local rc=$?
+            if [[ -s "${sync_err_tmp}" ]]; then
+                cat "${sync_err_tmp}" >&2
+                if [[ -n "${JOB_LOG_FILE:-}" && -f "${JOB_LOG_FILE}" ]]; then
+                    sed 's/^/    [rclone] /' "${sync_err_tmp}" >> "${JOB_LOG_FILE}"
+                fi
+            fi
+            if [[ ${rc} -ne 0 ]]; then
+                log_msg "[-] Error: Rclone failed to sync archive to ${remote_target} (Exit code: ${rc})."
+                return ${rc}
+            fi
             if [[ -f "${checksum_file}" ]]; then
                 rclone copy "${checksum_file}" "${remote_target}" \
                     --fast-list \
                     --timeout 2m \
-                    --log-level NOTICE
+                    --log-level NOTICE > "${sync_err_tmp}" 2>&1
+                local rc_chk=$?
+                if [[ -s "${sync_err_tmp}" ]]; then
+                    cat "${sync_err_tmp}" >&2
+                    if [[ -n "${JOB_LOG_FILE:-}" && -f "${JOB_LOG_FILE}" ]]; then
+                        sed 's/^/    [rclone] /' "${sync_err_tmp}" >> "${JOB_LOG_FILE}"
+                    fi
+                fi
+                if [[ ${rc_chk} -ne 0 ]]; then
+                    log_msg "[-] Error: Rclone failed to sync checksum file to ${remote_target} (Exit code: ${rc_chk})."
+                    return ${rc_chk}
+                fi
             fi
+            log_msg "[✓] Remote sync to ${remote_target} completed successfully."
             ;;
         s3)
             log_msg "[+] Uploading archive to AWS S3: ${remote_target}..."
-            aws s3 cp "${source_archive}" "${remote_target}/" --no-progress
-            if [[ -f "${checksum_file}" ]]; then
-                aws s3 cp "${checksum_file}" "${remote_target}/" --no-progress
+            aws s3 cp "${source_archive}" "${remote_target}/" --no-progress > "${sync_err_tmp}" 2>&1
+            local rc=$?
+            if [[ -s "${sync_err_tmp}" ]]; then
+                cat "${sync_err_tmp}" >&2
+                if [[ -n "${JOB_LOG_FILE:-}" && -f "${JOB_LOG_FILE}" ]]; then
+                    sed 's/^/    [aws] /' "${sync_err_tmp}" >> "${JOB_LOG_FILE}"
+                fi
             fi
+            if [[ ${rc} -ne 0 ]]; then
+                log_msg "[-] Error: AWS S3 upload failed for ${remote_target} (Exit code: ${rc})."
+                return ${rc}
+            fi
+            if [[ -f "${checksum_file}" ]]; then
+                aws s3 cp "${checksum_file}" "${remote_target}/" --no-progress > "${sync_err_tmp}" 2>&1
+                local rc_chk=$?
+                if [[ -s "${sync_err_tmp}" ]]; then
+                    cat "${sync_err_tmp}" >&2
+                    if [[ -n "${JOB_LOG_FILE:-}" && -f "${JOB_LOG_FILE}" ]]; then
+                        sed 's/^/    [aws] /' "${sync_err_tmp}" >> "${JOB_LOG_FILE}"
+                    fi
+                fi
+                if [[ ${rc_chk} -ne 0 ]]; then
+                    log_msg "[-] Error: AWS S3 checksum upload failed for ${remote_target} (Exit code: ${rc_chk})."
+                    return ${rc_chk}
+                fi
+            fi
+            log_msg "[✓] Remote upload to S3 completed successfully."
             ;;
         local)
             local dest_dir="${remote_target#local:}"
             log_msg "[+] Copying archive to local/NFS destination: ${dest_dir}..."
             mkdir -p "${dest_dir}"
-            cp -a "${source_archive}" "${dest_dir}/"
-            if [[ -f "${checksum_file}" ]]; then
-                cp -a "${checksum_file}" "${dest_dir}/"
+            cp -a "${source_archive}" "${dest_dir}/" > "${sync_err_tmp}" 2>&1
+            local rc=$?
+            if [[ -s "${sync_err_tmp}" ]]; then
+                cat "${sync_err_tmp}" >&2
+                if [[ -n "${JOB_LOG_FILE:-}" && -f "${JOB_LOG_FILE}" ]]; then
+                    sed 's/^/    [cp] /' "${sync_err_tmp}" >> "${JOB_LOG_FILE}"
+                fi
             fi
+            if [[ ${rc} -ne 0 ]]; then
+                log_msg "[-] Error: Failed copying archive to ${dest_dir} (Exit code: ${rc})."
+                return ${rc}
+            fi
+            if [[ -f "${checksum_file}" ]]; then
+                cp -a "${checksum_file}" "${dest_dir}/" > "${sync_err_tmp}" 2>&1
+                local rc_chk=$?
+                if [[ -s "${sync_err_tmp}" ]]; then
+                    cat "${sync_err_tmp}" >&2
+                    if [[ -n "${JOB_LOG_FILE:-}" && -f "${JOB_LOG_FILE}" ]]; then
+                        sed 's/^/    [cp] /' "${sync_err_tmp}" >> "${JOB_LOG_FILE}"
+                    fi
+                fi
+                if [[ ${rc_chk} -ne 0 ]]; then
+                    log_msg "[-] Error: Failed copying checksum file to ${dest_dir} (Exit code: ${rc_chk})."
+                    return ${rc_chk}
+                fi
+            fi
+            log_msg "[✓] Local sync to ${dest_dir} completed successfully."
             ;;
         sftp)
             local sftp_dest="${remote_target#sftp:}"
             log_msg "[+] Transferring archive via SFTP/Rsync: ${sftp_dest}..."
-            rsync -avz -e ssh "${source_archive}" "${sftp_dest}/"
-            if [[ -f "${checksum_file}" ]]; then
-                rsync -avz -e ssh "${checksum_file}" "${sftp_dest}/"
+            rsync -avz -e ssh "${source_archive}" "${sftp_dest}/" > "${sync_err_tmp}" 2>&1
+            local rc=$?
+            if [[ -s "${sync_err_tmp}" ]]; then
+                cat "${sync_err_tmp}" >&2
+                if [[ -n "${JOB_LOG_FILE:-}" && -f "${JOB_LOG_FILE}" ]]; then
+                    sed 's/^/    [rsync] /' "${sync_err_tmp}" >> "${JOB_LOG_FILE}"
+                fi
             fi
+            if [[ ${rc} -ne 0 ]]; then
+                log_msg "[-] Error: Rsync failed to transfer archive to ${sftp_dest} (Exit code: ${rc})."
+                return ${rc}
+            fi
+            if [[ -f "${checksum_file}" ]]; then
+                rsync -avz -e ssh "${checksum_file}" "${sftp_dest}/" > "${sync_err_tmp}" 2>&1
+                local rc_chk=$?
+                if [[ -s "${sync_err_tmp}" ]]; then
+                    cat "${sync_err_tmp}" >&2
+                    if [[ -n "${JOB_LOG_FILE:-}" && -f "${JOB_LOG_FILE}" ]]; then
+                        sed 's/^/    [rsync] /' "${sync_err_tmp}" >> "${JOB_LOG_FILE}"
+                    fi
+                fi
+                if [[ ${rc_chk} -ne 0 ]]; then
+                    log_msg "[-] Error: Rsync failed to transfer checksum file to ${sftp_dest} (Exit code: ${rc_chk})."
+                    return ${rc_chk}
+                fi
+            fi
+            log_msg "[✓] SFTP sync to ${sftp_dest} completed successfully."
             ;;
         *)
             log_msg "[-] Error: Unknown remote storage type: ${remote_type}"
@@ -469,6 +902,170 @@ sync_to_remote() {
     esac
 }
 
+# ------------------------------------------------------------------------------
+# Function: prune_local_storage
+# Purpose:  Purges local backup archives and companion checksums older than the
+#           specified retention threshold, while enforcing an absolute minimum
+#           backup count floor to prevent wiping historical recovery points
+#           during or after extended outages.
+# Arguments:
+#   $1 - Directory path containing local backups.
+#   $2 - Retention threshold in days.
+#   $3 (Optional) - Filename match pattern (default: "*").
+#   $4 (Optional) - Minimum backup count floor (default: $LOCAL_MIN_KEEP or $retention_days).
+# Returns:
+#   0.
+# ------------------------------------------------------------------------------
+prune_local_storage() {
+    local dir="$1"
+    local retention_days="$2"
+    local file_pattern="${3:-*}"
+    local min_keep="${4:-${LOCAL_MIN_KEEP:-${retention_days}}}"
+
+    if [[ ! -d "${dir}" ]]; then
+        return 0
+    fi
+
+    # Discover matching primary archives (excluding .sha256 companion files), sorted chronologically
+    local archives=()
+    mapfile -t archives < <(find "${dir}" -maxdepth 1 -type f -name "${file_pattern}" ! -name "*.sha256" 2>/dev/null | sort)
+    local total="${#archives[@]}"
+
+    if (( total <= min_keep )); then
+        log_msg "[+] Pruning local files in ${dir}: count (${total}) <= retention floor (${min_keep}). Preserving all existing recovery points."
+        return 0
+    fi
+
+    local excess=$(( total - min_keep ))
+    log_msg "[+] Pruning local files in ${dir}: ${total} archives found, retention floor is ${min_keep} (inspecting ${excess} older candidate(s) for age > ${retention_days} days)..."
+
+    local cutoff_sec=$(( $(date +%s) - (retention_days * 86400) ))
+    local pruned_count=0
+
+    # Only inspect the excess oldest archives; the newest $min_keep archives are strictly protected
+    for (( i=0; i<excess; i++ )); do
+        local candidate="${archives[i]}"
+        local cand_mtime
+        cand_mtime=$(stat -c %Y "${candidate}" 2>/dev/null || echo 0)
+        if (( cand_mtime < cutoff_sec )); then
+            rm -f "${candidate}" "${candidate}.sha256"
+            pruned_count=$(( pruned_count + 1 ))
+        fi
+    done
+
+    log_msg "[✓] Local pruning complete in ${dir}: ${pruned_count} expired archive(s) deleted; $(( total - pruned_count )) preserved."
+}
+
+# ------------------------------------------------------------------------------
+# Function: prune_remote_storage
+# Purpose:  Removes expired backup files from remote storage backends (Rclone,
+#           Local/NFS) based on retention age policies, while enforcing an
+#           absolute minimum backup count floor to prevent wiping historical
+#           recovery points during or after extended outages.
+# Arguments:
+#   $1 - Remote target identifier (e.g. "gdrive:hostname").
+#   $2 (Optional) - Remote backend type ("rclone", "local", "s3", "sftp"; default: "rclone").
+#   $3 - Retention threshold in days.
+#   $4 (Optional) - Filename match pattern (default: "*").
+#   $5 (Optional) - Minimum backup count floor (default: $REMOTE_MIN_KEEP or $retention_days).
+# Returns:
+#   0.
+# ------------------------------------------------------------------------------
+prune_remote_storage() {
+    local remote_target="$1"
+    local remote_type="${2:-${TARGET_REMOTE_TYPE:-rclone}}"
+    local retention_days="$3"
+    local file_pattern="${4:-*}"
+    local min_keep="${5:-${REMOTE_MIN_KEEP:-${retention_days}}}"
+
+    [[ -z "${remote_target}" ]] && return 0
+
+    case "${remote_type}" in
+        rclone)
+            # Query remote for existing primary archives matching pattern (excluding companion .sha256 files)
+            local remote_archives=()
+            mapfile -t remote_archives < <(rclone lsf "${remote_target}" --include "${file_pattern}" 2>/dev/null | grep -v '\.sha256$' | grep -v '^$' | sort)
+            local total="${#remote_archives[@]}"
+
+            if (( total <= min_keep )); then
+                log_msg "[+] Pruning remote backups in ${remote_target}: count (${total}) <= retention floor (${min_keep}). Preserving all existing recovery points."
+                return 0
+            fi
+
+            local excess=$(( total - min_keep ))
+            log_msg "[+] Pruning remote backups in ${remote_target}: ${total} archives found, retention floor is ${min_keep} (inspecting ${excess} older candidate(s) for age > ${retention_days} days)..."
+
+            # Construct targeted filter arguments strictly for the excess oldest candidates
+            local filter_args=()
+            for (( i=0; i<excess; i++ )); do
+                local candidate="${remote_archives[i]}"
+                filter_args+=(--include "${candidate}" --include "${candidate}.sha256")
+            done
+
+            if [[ ${#filter_args[@]} -gt 0 ]]; then
+                rclone delete "${remote_target}" \
+                    "${filter_args[@]}" \
+                    --min-age "${retention_days}d" 2>/dev/null || true
+            fi
+            log_msg "[✓] Remote pruning evaluated for ${remote_target}: enforced retention floor of at least ${min_keep} newest backups."
+            ;;
+        local)
+            local dest_dir="${remote_target#local:}"
+            prune_local_storage "${dest_dir}" "${retention_days}" "${file_pattern}" "${min_keep}"
+            ;;
+        s3|sftp)
+            log_msg "[*] Notice: Pruning for ${remote_type} relies on cloud lifecycle policies or external management."
+            ;;
+        *)
+            log_msg "[-] Warning: Unsupported remote type for pruning: ${remote_type}"
+            ;;
+    esac
+}
+
+# ------------------------------------------------------------------------------
+# Function: sqlite_hot_backup
+# Purpose:  Performs a non-blocking hot online backup of active SQLite databases
+#           using the sqlite3 .backup API (preventing WAL / lock concurrency issues)
+#           with automatic fallback to atomic copy, securing destination to 0600.
+# Arguments:
+#   $1 - Absolute filesystem path to the source SQLite database.
+#   $2 - Destination snapshot file path.
+# Returns:
+#   0 on success; 1 on error.
+# ------------------------------------------------------------------------------
+sqlite_hot_backup() {
+    local src_db="$1"
+    local dst_file="$2"
+    mkdir -p "$(dirname "${dst_file}")"
+    rm -f "${dst_file}"*
+    local err_msg
+    if command -v sqlite3 >/dev/null 2>&1; then
+        if ! err_msg="$(sqlite3 "${src_db}" ".backup '${dst_file}'" 2>&1)"; then
+            log_msg "[-] Error during sqlite hot backup of ${src_db}: ${err_msg}"
+            return 1
+        fi
+    else
+        if ! err_msg="$(cp -a "${src_db}" "${dst_file}" 2>&1)"; then
+            log_msg "[-] Error copying database ${src_db}: ${err_msg}"
+            return 1
+        fi
+    fi
+    chmod 600 "${dst_file}" 2>/dev/null || true
+}
+
+# ------------------------------------------------------------------------------
+# Function: generate_dr_manifest
+# Purpose:  Generates a cross-platform, bare-metal Disaster Recovery (DR) manifest
+#           documenting package inventory, kernel/OS summary, user accounts,
+#           partition tables (sfdisk), LVM metadata (vgcfgbackup), filesystem
+#           mounts, block UUIDs, network interfaces, firewall rules, and container
+#           workloads to enable full system reconstruction.
+# Arguments:
+#   $1 - Target directory where manifest files will be generated.
+#   $2 (Optional) - Human-readable display directory name for logging.
+# Returns:
+#   0 on completion.
+# ------------------------------------------------------------------------------
 generate_dr_manifest() {
     local manifest_dir="$1"
     local display_dir="${2:-}"
