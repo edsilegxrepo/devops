@@ -14,6 +14,7 @@ Comprehensive operational and architecture guide for [`/opt/scripts/dnf_check.sh
 * **Safe Cache Purging:** Execute clean, native cache invalidation via `dnf clean all` instead of risky direct filesystem deletions.
 * **Automated Bootloader Synchronization:** Detect mutating package transactions (`update`, `install`, `upgrade`, etc.) and automatically trigger [`kernel-default.sh`](file:///opt/scripts/kernel-default.sh) to ensure the bootloader default points to the newest valid kernel.
 * **Execution Safety:** Never modify the bootloader on read-only queries (e.g. `check-update`, `search`, `info`, `list`) or failed package operations.
+* **Kernel Upgrade Auditing & Auto-Reboot:** Compare the currently running kernel (`uname -r`) against the newly configured default boot kernel. On mismatch, emit an explicit reboot warning suggesting post-reboot cleanup (`sudo /opt/scripts/kernel-default.sh --cleanup`), or initiate an automated system reboot if `--auto-reboot` is passed.
 
 ---
 
@@ -63,7 +64,12 @@ graph TD
         CheckStatus -->|Yes| MutateScan{"Mutating Subcommand?"}
         MutateScan -->|No (search, list)| ExitSuccess["Exit 0"]
         MutateScan -->|Yes (update, install)| TriggerKernel["Invoke kernel-default.sh"]
-        TriggerKernel --> ExitSuccess
+        TriggerKernel --> KernelCheck{"Kernel Upgraded?<br/>(default != running)"}
+        KernelCheck -->|No| ExitSuccess
+        KernelCheck -->|Yes| WarnReboot["Display Reboot Warning & Cleanup Tip"]
+        WarnReboot --> AutoRebootCheck{"--auto-reboot set?"}
+        AutoRebootCheck -->|No| ExitSuccess
+        AutoRebootCheck -->|Yes| TriggerReboot["Initiate systemctl reboot"]
     end
 ```
 
@@ -97,6 +103,17 @@ sequenceDiagram
         Wrapper->>Kernel: Invoke /opt/scripts/kernel-default.sh
         Kernel->>Kernel: Set latest kernel to default index 0
         Kernel-->>Wrapper: Exit Code 0
+    end
+
+    rect rgb(255, 240, 245)
+        Note over Wrapper: Kernel Upgrade Verification
+        Wrapper->>Wrapper: Check default kernel != running kernel
+        opt Kernel Upgraded
+            Wrapper-->>Admin: Emit Reboot Warning & Cleanup Tip
+            opt --auto-reboot specified
+                Wrapper->>Wrapper: Trigger systemctl reboot
+            end
+        end
     end
 
     Wrapper-->>Admin: Exit Code 0
@@ -185,6 +202,7 @@ graph TD
 | `--sqlite-close` | Flag | N/A | Legacy compatibility alias for `--sqlite-check`. |
 | `--purge-cache` | Flag | N/A | Safely cleans all DNF metadata and package caches via native `dnf clean all`. |
 | `--relax` | Flag | N/A | Permits non-best packages and skips broken dependencies (`--skip-broken --nobest`). |
+| `--auto-reboot` | Flag | N/A | Automatically initiates a host reboot if a newer kernel was deployed during the transaction. |
 | `-h`, `--help` | Flag | N/A | Displays CLI usage documentation and exits `0`. |
 | `[DNF_COMMAND...]` | Pass-through | N/A | Standard DNF arguments (e.g. `update`, `install nginx`, `clean all`, `search`). |
 
@@ -259,6 +277,39 @@ sudo /opt/scripts/dnf_check.sh --relax update -y
 ```
 **Behavior:**
 Appends `--skip-broken --nobest` to DNF arguments, allowing transactions to proceed when upstream packages have non-critical dependency conflicts or non-best architecture candidates.
+
+#### 6. Kernel Upgrade Detection with Post-Reboot Cleanup Recommendation
+```bash
+sudo /opt/scripts/dnf_check.sh update -y
+```
+**Sample Output (when kernel was upgraded):**
+```text
+Upgraded:
+  kernel-core-6.12.0-211.56.1.el10_2.x86_64
+Complete!
+[*] Synchronizing default boot kernel post-transaction...
+Current Default Boot Kernel:
+  Kernel: /boot/vmlinuz-6.12.0-211.56.1.el10_2.x86_64
+  Index : 0
+
+==============================================================================
+[!] WARNING: System Kernel Upgrade Detected!
+------------------------------------------------------------------------------
+  Currently Running Kernel: 6.12.0-211.38.1.el10_2.x86_64
+  New Default Boot Kernel : 6.12.0-211.56.1.el10_2.x86_64
+
+  A system reboot is required to activate the newly deployed kernel.
+  After rebooting, you may safely purge obsolete kernel packages by running:
+    sudo /opt/scripts/kernel-default.sh --cleanup
+==============================================================================
+```
+
+#### 7. Automated Reboot Post-Kernel Upgrade (`--auto-reboot`)
+```bash
+sudo /opt/scripts/dnf_check.sh update -y --auto-reboot
+```
+**Behavior:**
+If a kernel package upgrade occurs during the transaction, the script displays the reboot warning, logs the event to the system audit facility, counts down 5 seconds, and triggers `systemctl reboot`. If no kernel was upgraded, the system does not reboot.
 
 ---
 

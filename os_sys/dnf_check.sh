@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Script: /opt/scripts/dnf_check.sh
-# Version: 1.3.1  2026/10/21
+# Version: 1.4.0  2026/10/26
 # Compatibility: Enterprise Linux 8, 9, 10 (RHEL, AlmaLinux, Rocky Linux, CentOS)
 # Standard: DRY Architecture Framework
 # Description: Production-hardened DNF wrapper with cross-version SQLite integrity
@@ -53,12 +53,14 @@ Options:
   --sqlite-check      Verify SQLite database integrity for DNF caches and history
   --purge-cache       Safely purge DNF package and metadata cache via native clean
   --relax             Permit non-best packages and skip broken dependencies (--skip-broken --nobest)
+  --auto-reboot       Automatically reboot the host if a new kernel is installed/upgraded
   -h, --help          Display this help message and exit
 
 DNF Pass-Through:
   Any other arguments are passed directly to '${PKG_MGR}' (e.g. update, install, search).
   On successful mutating transactions (update, install, etc.), the default boot
-  kernel is automatically synchronized via kernel-default.sh.
+  kernel is automatically synchronized via kernel-default.sh. If a kernel upgrade
+  is detected, a reboot notification is displayed (or auto-reboot is performed if requested).
 
 Compatibility:
   Enterprise Linux 8, 9, and 10 (UEFI and BIOS boot topologies).
@@ -151,6 +153,85 @@ sqlite_wal_check() { sqliteWalCheck "$@"; }
 sqliteWalClean() { sqliteWalCheck "$@"; }
 
 # ------------------------------------------------------------------------------
+# Function: is_wsl
+# Purpose:  Detects whether execution is occurring within Windows Subsystem for Linux.
+# Arguments:
+#   None.
+# Returns:
+#   0 if WSL; 1 otherwise.
+# ------------------------------------------------------------------------------
+is_wsl() {
+  [[ -n "${WSL_DISTRO_NAME:-}" ]] || \
+  [[ -n "${WSL_INTEROP:-}" ]] || \
+  [[ -e /proc/sys/fs/binfmt_misc/WSLInterop ]] || \
+  [[ -e /proc/sys/fs/binfmt_misc/WSLInterop-late ]] || \
+  grep -qi microsoft /proc/version 2>/dev/null
+}
+
+# ------------------------------------------------------------------------------
+# Function: verify_kernel_upgrade
+# Purpose:  Audits the installed default boot kernel against the currently active
+#           running kernel. Emits warning to reboot and run kernel-default.sh --cleanup,
+#           or triggers automated reboot if --auto-reboot was supplied.
+# Arguments:
+#   None.
+# Returns:
+#   0.
+# ------------------------------------------------------------------------------
+verify_kernel_upgrade() {
+  if is_wsl; then
+    echo "[i] WSL environment detected (kernel is managed by Windows host)."
+    return 0
+  fi
+
+  local running_kernel
+  running_kernel="$(uname -r)"
+
+  local default_kernel=""
+  local default_kernel_path=""
+
+  if command -v grubby > /dev/null 2>&1; then
+    default_kernel_path="$(grubby --default-kernel 2> /dev/null || true)"
+    default_kernel="${default_kernel_path#/boot/vmlinuz-}"
+  fi
+
+  if [[ -z "${default_kernel}" ]]; then
+    default_kernel="$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' kernel-core 2> /dev/null | sort -V | tail -n 1 || true)"
+    if [[ -z "${default_kernel}" ]]; then
+      default_kernel="$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' kernel 2> /dev/null | sort -V | tail -n 1 || true)"
+    fi
+  fi
+
+  if [[ -n "${default_kernel}" && "${default_kernel}" != "${running_kernel}" ]]; then
+    echo ""
+    echo "=============================================================================="
+    echo "[!] WARNING: System Kernel Upgrade Detected!"
+    echo "------------------------------------------------------------------------------"
+    echo "  Currently Running Kernel: ${running_kernel}"
+    echo "  New Default Boot Kernel : ${default_kernel}"
+    echo ""
+    echo "  A system reboot is required to activate the newly deployed kernel."
+    echo "  After rebooting, you may safely purge obsolete kernel packages by running:"
+    echo "    sudo /opt/scripts/kernel-default.sh --cleanup"
+    echo "=============================================================================="
+    echo ""
+
+    if declare -f log_audit > /dev/null 2>&1; then
+      log_audit "Kernel upgrade detected: running ${running_kernel}, default ${default_kernel}" "dnf_check"
+    fi
+
+    if [[ ${auto_reboot} -eq 1 ]]; then
+      echo "[*] Option --auto-reboot specified: Initiating automated system reboot in 5 seconds..."
+      if declare -f log_audit > /dev/null 2>&1; then
+        log_audit "Triggering automated reboot post-kernel upgrade via --auto-reboot" "dnf_check"
+      fi
+      sleep 5
+      systemctl reboot 2> /dev/null || shutdown -r now 2> /dev/null || reboot
+    fi
+  fi
+}
+
+# ------------------------------------------------------------------------------
 # 4. Command Dispatch
 # ------------------------------------------------------------------------------
 case "$1" in
@@ -171,12 +252,16 @@ esac
 # Parse arguments: extract wrapper-specific flags (--relax) and detect mutating commands
 is_mutating=0
 relax_deps=0
+auto_reboot=0
 dnf_args=()
 
 for arg in "$@"; do
   case "${arg}" in
     --relax)
       relax_deps=1
+      ;;
+    --auto-reboot)
+      auto_reboot=1
       ;;
     *)
       dnf_args+=("${arg}")
@@ -216,6 +301,9 @@ if [[ ${is_mutating} -eq 1 ]]; then
     echo "[*] Synchronizing default boot kernel post-transaction..."
     "${kernel_script}"
   fi
+
+  # Audit if installed kernel differs from running kernel
+  verify_kernel_upgrade
 fi
 
 exit ${DNF_STATUS}
