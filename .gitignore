@@ -26,6 +26,7 @@ Thumbs.db
 # Languages
 vendor/
 __pycache__/
+node_modules/
 
 # Secrets and environment
 .env
