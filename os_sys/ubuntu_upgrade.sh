@@ -1,7 +1,7 @@
 #!/bin/bash
 # ----------------------------------------
 # /opt/scripts/ubuntu_upgrade.sh
-# v1.0.8xg  2026/08/31  XDG / MIS Center
+# v1.0.9xg  2026/10/26  XDG / MIS Center
 # ----------------------------------------
 
 # ==============================================================================
@@ -88,6 +88,15 @@ log_info() {  echo -e "[+] $(date '+%Y-%m-%d %H:%M:%S') : $1" | tee -a "$LOG_FIL
 log_warn() {  echo -e "[!] $(date '+%Y-%m-%d %H:%M:%S') : $1" | tee -a "$LOG_FILE"; }
 log_error() { echo -e "[-] $(date '+%Y-%m-%d %H:%M:%S') : $1" >&2 | tee -a "$LOG_FILE"; }
 
+# Detect if executing within Windows Subsystem for Linux (WSL)
+is_wsl() {
+    [ -n "${WSL_DISTRO_NAME:-}" ] || \
+    [ -n "${WSL_INTEROP:-}" ] || \
+    [ -e /proc/sys/fs/binfmt_misc/WSLInterop ] || \
+    [ -e /proc/sys/fs/binfmt_misc/WSLInterop-late ] || \
+    grep -qi microsoft /proc/version 2>/dev/null
+}
+
 # Ensure running on a supported Ubuntu, Debian, or Linux Mint distribution
 if [ -f /etc/os-release ]; then
     # shellcheck disable=SC1091
@@ -97,8 +106,15 @@ if [ -f /etc/os-release ]; then
             # Supported OS
             ;;
         *)
-            log_error "Operating System Error: This utility is designed exclusively for Ubuntu, Debian, or Linux Mint."
-            exit 1
+            case "${ID_LIKE:-}" in
+                *ubuntu*|*debian*)
+                    # Supported derivative
+                    ;;
+                *)
+                    log_error "Operating System Error: Detected OS '${ID:-unknown}' (${PRETTY_NAME:-unknown}). This utility is designed exclusively for Ubuntu, Debian, or Linux Mint."
+                    exit 1
+                    ;;
+            esac
             ;;
     esac
 else
@@ -113,8 +129,25 @@ fi
 # Data Flow: Imports definitions from settings.sh and sysenv.sh (e.g. $SYS_SCRIPTS).
 # ------------------------------------------------------------------------------
 # Sourced settings provide base path, environment, and variables like $SYS_SCRIPTS
-# shellcheck disable=SC1091
-source /opt/scripts/settings.sh
+if [ -f /opt/scripts/settings.sh ]; then
+    # shellcheck disable=SC1091
+    source /opt/scripts/settings.sh
+elif [ -n "${SUDO_USER:-}" ] && [ -f "/home/${SUDO_USER}/scripts/settings.sh" ]; then
+    # shellcheck disable=SC1090,SC1091
+    source "/home/${SUDO_USER}/scripts/settings.sh"
+elif [ -n "${HOME:-}" ] && [ -f "${HOME}/scripts/settings.sh" ]; then
+    # shellcheck disable=SC1090,SC1091
+    source "${HOME}/scripts/settings.sh"
+fi
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
+if [ -z "${SYS_SCRIPTS:-}" ]; then
+    if [ -f "${SCRIPT_DIR}/ubuntu_kernel_updater.sh" ]; then
+        SYS_SCRIPTS="${SCRIPT_DIR}"
+    else
+        SYS_SCRIPTS="/opt/scripts"
+    fi
+fi
 
 # ------------------------------------------------------------------------------
 # 3. CONFIGURE NODE IDENTIFIERS & PARAMETER HARDENING
@@ -245,8 +278,17 @@ fi
 # ------------------------------------------------------------------------------
 # Objective: Chain-load the custom standalone mainline kernel updater utility.
 # ------------------------------------------------------------------------------
-# Execute the custom mainline deployment utility
-"${SYS_SCRIPTS}/ubuntu_kernel_updater.sh"
-
-echo -e "\nExecute after reboot to purge obsolete kernels:"
-echo "   [1] sudo ${SYS_SCRIPTS}/ubuntu_kernel_updater.sh --purge"
+# Execute the custom mainline deployment utility (skipped in WSL environments)
+if is_wsl; then
+    log_info "WSL environment detected (WSL kernel is managed by Windows host). Skipping mainline kernel updater."
+elif [ -f "${SYS_SCRIPTS}/ubuntu_kernel_updater.sh" ]; then
+    "${SYS_SCRIPTS}/ubuntu_kernel_updater.sh"
+    echo -e "\nExecute after reboot to purge obsolete kernels:"
+    echo "   [1] sudo ${SYS_SCRIPTS}/ubuntu_kernel_updater.sh --purge"
+elif [ -f "${SCRIPT_DIR}/ubuntu_kernel_updater.sh" ]; then
+    "${SCRIPT_DIR}/ubuntu_kernel_updater.sh"
+    echo -e "\nExecute after reboot to purge obsolete kernels:"
+    echo "   [1] sudo ${SCRIPT_DIR}/ubuntu_kernel_updater.sh --purge"
+else
+    log_warn "ubuntu_kernel_updater.sh not found at ${SYS_SCRIPTS}. Skipping mainline kernel update."
+fi

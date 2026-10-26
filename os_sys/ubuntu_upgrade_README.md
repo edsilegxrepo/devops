@@ -34,6 +34,11 @@ The objective of the upgrade suite is to automate system-level updates, strip tr
 * **Interrupted Packages:** Runs `dpkg --configure -a` before cleanups to configure any `unpacked` packages that failed in a previous run.
 * **Disk Exhaustion on /boot:** The kernel updater verifies that `/boot` has at least 150 MB free space (and the root filesystem has 2.5 GB free space) to avoid half-written kernel images or incomplete RAM disk generations.
 * **Unsafe Delete Guard:** When purging custom kernels, the script validates that the kernel version string contains more than 6 characters to prevent execution of destructive `rm -rf` operations on truncated directories.
+* **WSL Subsystem Adaptation:** Detects Windows Subsystem for Linux (WSL) environments and automatically bypasses the mainline kernel deployment stage, as WSL kernels are virtualized and maintained via the Windows host hypervisor.
+* **Resilient Environment Loading:** Sourcing of `settings.sh` searches `/opt/scripts/settings.sh` and user script directories before gracefully falling back to default script pointers, preventing execution failures on systems where `settings.sh` has not been placed.
+
+> [!NOTE]
+> When operating in Windows Subsystem for Linux (WSL), the session must be run with Bash in **login mode** (e.g., `bash -l` or `wsl.exe -d <distro>`) so that user and system profiles (`/etc/profile`, `~/.bash_profile`, `~/.profile`) are loaded, ensuring environment variables, user script paths, and Windows drive mounts (such as `/mnt/e`) are initialized.
 
 ---
 
@@ -71,14 +76,18 @@ sequenceDiagram
     deactivate Flatpak
     Upgrader->>Upgrader: Wait for FLATPAK_PID
 
-    Upgrader->>Kernel: Invoke mainline kernel deployment pipeline
-    activate Kernel
-    Kernel->>Kernel: Perform disk space audit on /boot and /
-    Kernel->>Kernel: Auto-detect latest stable kernel from mainline registry
-    Kernel->>Kernel: Download, extract and deploy vmlinuz, modules & headers
-    Kernel->>Kernel: Trigger update-initramfs & update-grub
-    Kernel-->>Upgrader: Return success
-    deactivate Kernel
+    alt Bare Metal / Native VM (Non-WSL)
+        Upgrader->>Kernel: Invoke mainline kernel deployment pipeline
+        activate Kernel
+        Kernel->>Kernel: Perform disk space audit on /boot and /
+        Kernel->>Kernel: Auto-detect latest stable kernel from mainline registry
+        Kernel->>Kernel: Download, extract and deploy vmlinuz, modules & headers
+        Kernel->>Kernel: Trigger update-initramfs & update-grub
+        Kernel-->>Upgrader: Return success
+        deactivate Kernel
+    else WSL Environment
+        Upgrader->>Upgrader: Skip kernel deployment (kernel managed by Windows host)
+    end
 
     Upgrader-->>Admin: Execution complete (logs to /var/log/ubuntu_upgrade.log)
     deactivate Upgrader
@@ -148,6 +157,9 @@ To execute the complete system upgrade process, run:
 ```bash
 sudo /opt/scripts/ubuntu_upgrade.sh
 ```
+
+> [!NOTE]
+> When running under Windows Subsystem for Linux (WSL), ensure the distribution session is opened with Bash in **login mode** (e.g., `wsl.exe -d Ubuntu-24` or `wsl.exe -d <distro> bash -l`) so that all profile scripts, environment variables, and filesystem mount configurations are fully loaded prior to execution.
 
 #### Expected Log Output `/var/log/ubuntu_upgrade.log`:
 ```
