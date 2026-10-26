@@ -263,17 +263,17 @@ try {
 
         # Emit structured compliance object for detection mode to pipeline
         [PSCustomObject]@{
-            ComputerName         = $env:COMPUTERNAME
-            PriorLmLevel         = $PriorLmStr
-            AppliedLmLevel       = "Skipped (-Detect)"
-            PriorAuditEvents     = $PriorAuditStr
-            AppliedAuditEvents   = "Skipped (-Detect)"
-            EventLogEnabled      = $EventLogEnabled
-            Status               = $DetectStatus
-            Timestamp            = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-            OutputDir            = $LogDir
-            LogPath              = $LogPath
-            BackupPath           = $BackupPath
+            ComputerName = $env:COMPUTERNAME
+            PriorLmLevel = $PriorLmStr
+            AppliedLmLevel = "Skipped (-Detect)"
+            PriorAuditEvents = $PriorAuditStr
+            AppliedAuditEvents = "Skipped (-Detect)"
+            EventLogEnabled = $EventLogEnabled
+            Status = $DetectStatus
+            Timestamp = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+            OutputDir = $LogDir
+            LogPath = $LogPath
+            BackupPath = $BackupPath
         }
         return
     }
@@ -341,17 +341,17 @@ try {
         Write-Log "RESTORED STATE -> LmCompatibilityLevel: $FinalLmStr | AuditReceiptEvents: $FinalAuditStr" "SUCCESS"
 
         [PSCustomObject]@{
-            ComputerName         = $env:COMPUTERNAME
-            PriorLmLevel         = $PriorLmStr
-            AppliedLmLevel       = $FinalLmStr
-            PriorAuditEvents     = $PriorAuditStr
-            AppliedAuditEvents   = $FinalAuditStr
-            EventLogEnabled      = "Restored"
-            Status               = "RESTORED"
-            Timestamp            = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-            OutputDir            = $LogDir
-            LogPath              = $LogPath
-            BackupPath           = $BackupPath
+            ComputerName = $env:COMPUTERNAME
+            PriorLmLevel = $PriorLmStr
+            AppliedLmLevel = $FinalLmStr
+            PriorAuditEvents = $PriorAuditStr
+            AppliedAuditEvents = $FinalAuditStr
+            EventLogEnabled = "Restored"
+            Status = "RESTORED"
+            Timestamp = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+            OutputDir = $LogDir
+            LogPath = $LogPath
+            BackupPath = $BackupPath
         }
         return
     }
@@ -472,16 +472,16 @@ try {
 
         # Emit structured compliance object to pipeline
         [PSCustomObject]@{
-            ComputerName       = $env:COMPUTERNAME
-            PriorLmLevel       = $PriorLmStr
-            AppliedLmLevel     = $AppliedLmStr
-            PriorAuditEvents   = $PriorAuditStr
+            ComputerName = $env:COMPUTERNAME
+            PriorLmLevel = $PriorLmStr
+            AppliedLmLevel = $AppliedLmStr
+            PriorAuditEvents = $PriorAuditStr
             AppliedAuditEvents = $AppliedAuditStr
-            Status             = $ExecutionStatus
-            Timestamp          = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-            OutputDir          = $LogDir
-            LogPath            = $LogPath
-            BackupPath         = $BackupPath
+            Status = $ExecutionStatus
+            Timestamp = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+            OutputDir = $LogDir
+            LogPath = $LogPath
+            BackupPath = $BackupPath
         }
     }
 

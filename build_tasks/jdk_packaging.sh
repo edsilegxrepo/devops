@@ -334,7 +334,7 @@ echo -e "\n=== Processing all packages dynamically in parallel ==="
 # Dynamically determine and numerically sort unique major JDK versions present in SOURCES
 # Example output list format: 8 11 17 21 25
 MAJOR_VERSIONS=$(find "${SOURCE_DIR}" -maxdepth 1 -name "zulu*" | grep -oP 'jdk\K[0-9]+' | sort -un)
-echo "Detected JDK Major Versions: $(echo ${MAJOR_VERSIONS} | tr '\n' ' ')"
+echo "Detected JDK Major Versions: $(echo "${MAJOR_VERSIONS}" | tr '\n' ' ')"
 
 MAX_JOBS=$(nproc)
 echo "Max concurrent processes: ${MAX_JOBS}"
@@ -346,7 +346,7 @@ jdk_names=()
 
 # Process all Linux JDKs dynamically (JDK 8 to 25, sorted numerically)
 for major in ${MAJOR_VERSIONS}; do
-  for f in "${SOURCE_DIR}"/zulu*-jdk${major}.*-linux_x64.tar.gz; do
+  for f in "${SOURCE_DIR}"/zulu*-jdk"${major}".*-linux_x64.tar.gz; do
     if [ -f "$f" ]; then
       echo "[START] Repackaging $(basename "$f") (linux)..."
       log_file="${LOGS_DIR}/$(basename "$f").log"
@@ -366,7 +366,7 @@ done
 
 # Process all Windows JDKs dynamically (JDK 8 to 25, sorted numerically)
 for major in ${MAJOR_VERSIONS}; do
-  for f in "${SOURCE_DIR}"/zulu*-jdk${major}.*-win_x64.zip; do
+  for f in "${SOURCE_DIR}"/zulu*-jdk"${major}".*-win_x64.zip; do
     if [ -f "$f" ]; then
       echo "[START] Repackaging $(basename "$f") (windows)..."
       log_file="${LOGS_DIR}/$(basename "$f").log"

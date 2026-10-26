@@ -311,7 +311,7 @@ verify_sudo_users() {
     for r in ${resolved}; do
        [[ -z "${r}" || "${r}" == "root" ]] && continue
        # Skip if already verified to prevent duplicate messages
-       [[ " ${sudo_users[*]:-} " =~ " ${r} " ]] && continue
+       [[ " ${sudo_users[*]:-} " == *" ${r} "* ]] && continue
        
        # 1. Primary Validation: Use sudo's internal engine.
        if sudo -l -U "${r}" 2>/dev/null | grep -qiE "\((ALL|root)[^)]*\).*ALL"; then
@@ -328,7 +328,7 @@ verify_sudo_users() {
   # 3. Dynamic Environment Check: If running via sudo, validate the caller.
   if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
     # Skip if already verified
-    if [[ ! " ${sudo_users[*]:-} " =~ " ${SUDO_USER} " ]]; then
+    if [[ " ${sudo_users[*]:-} " != *" ${SUDO_USER} "* ]]; then
        # Validate the SUDO_USER same as others for consistency
        if sudo -l -U "${SUDO_USER}" 2>/dev/null | grep -qiE "\((ALL|root)[^)]*\).*ALL"; then
           sudo_users+=("${SUDO_USER}")

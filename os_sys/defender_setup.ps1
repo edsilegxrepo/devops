@@ -77,7 +77,7 @@ if ($Diags) {
         try {
             $mpStatus = Get-MpComputerStatus -ErrorAction Stop
             $runningMode = $mpStatus.AMRunningMode
-            $rtpState    = $mpStatus.RealTimeProtectionEnabled
+            $rtpState = $mpStatus.RealTimeProtectionEnabled
 
             $modeColor = if ($runningMode -eq "Passive Mode" -or $runningMode -eq "EDR Block Mode") { "Green" } else { "Yellow" }
             Write-Host "  - AM Running Mode       : $runningMode" -ForegroundColor $modeColor
@@ -86,7 +86,7 @@ if ($Diags) {
             # Catching the "Invalid class" error indicating WMI provider has been removed
             # Safe checking to prevent NullReferenceException on InnerException
             $isInvalidClass = $_.Exception.Message -match "Invalid class" -or
-                              ($null -ne $_.Exception.InnerException -and $_.Exception.InnerException.Message -match "Invalid class")
+            ($null -ne $_.Exception.InnerException -and $_.Exception.InnerException.Message -match "Invalid class")
             if ($isInvalidClass) {
                 Write-Host "  [+] Defender WMI Namespace is gone. Engine is completely uninstalled." -ForegroundColor Green
                 $defenderUninstalled = $true

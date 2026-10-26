@@ -919,7 +919,7 @@ function Update-Cygwin {
         # BOOTSTRAPPER / SELF-UPDATE:
         # Ensures the setup utility is the latest version before proceeding.
         $setupFileName = "setup-x86_64.exe"
-        $setupDomain   = "cygwin.com"
+        $setupDomain = "cygwin.com"
         $effectiveBootstrap = if ($BootstrapUrl) { $BootstrapUrl } elseif ($env:BOOTSTRAP_URL) { $env:BOOTSTRAP_URL } else { "https://$setupDomain/$setupFileName" }
         $httpsSetupUrl = $effectiveBootstrap
 

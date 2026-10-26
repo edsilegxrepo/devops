@@ -268,9 +268,9 @@ if ($null -ne $Resolve -and $Resolve.Count -gt 0) {
 if ($Version) {
     $osInfo = Get-CimInstance Win32_OperatingSystem
     if ($Json) {
-        [PSCustomObject]@{ 
-            Version   = "1.0.0"
-            OS        = $osInfo.Caption
+        [PSCustomObject]@{
+            Version = "1.0.0"
+            OS = $osInfo.Caption
             OSVersion = $osInfo.Version
         } | ConvertTo-Json
     } else {

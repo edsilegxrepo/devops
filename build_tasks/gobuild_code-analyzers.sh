@@ -81,10 +81,12 @@ IS_CYGWIN=false
 IS_MSYS=false
 DRIVE_PREFIX=""
 
-if [[ "$(uname -s)" =~ "CYGWIN" ]]; then
+if [[ "$(uname -s)" == *"CYGWIN"* ]]; then
+  # shellcheck disable=SC2034 # Environment indicator
   IS_CYGWIN=true
   DRIVE_PREFIX="/cygdrive"
-elif [[ "$(uname -s)" =~ "MSYS" || "$(uname -s)" =~ "MINGW" || "$(uname -s)" =~ "MSYS" ]]; then
+elif [[ "$(uname -s)" == *"MSYS"* || "$(uname -s)" == *"MINGW"* ]]; then
+  # shellcheck disable=SC2034 # Environment indicator
   IS_MSYS=true
   DRIVE_PREFIX=""
 else
@@ -148,6 +150,7 @@ LOCK_FILE="${TMPDIR:-/tmp}/gobuild_code-analyzers.lock"
 declare -A pid_map=() # Global PID map for lifecycle tracking
 
 function cleanup() {
+  # shellcheck disable=SC2034 # Captured for exit context
   local exit_code=$?
   # 1. Terminate any orphaned background builds
   if [ "${#pid_map[@]}" -gt 0 ]; then
@@ -244,6 +247,7 @@ function purgeDistrib() {
       local matched=false
       for tool in "${MASTER_TOOLS[@]}"; do
         # Match using Bash pattern matching (supports wildcards like go*)
+        # shellcheck disable=SC2053 # Intentional glob pattern match
         if [[ "${tool}" == ${scope_item} ]]; then
           echo "Purging distribution directory for ${tool}..."
           if [[ -n "${tool}" && "${tool}" != "/" ]]; then
@@ -304,6 +308,7 @@ function reportDistrib() {
       local scope_items="${target_pn//,/ }"
       local matched=false
       for scope_item in ${scope_items}; do
+        # shellcheck disable=SC2053 # Intentional glob pattern match
         if [[ "${PN_LOCAL}" == ${scope_item} ]]; then
           matched=true
           break
@@ -316,7 +321,7 @@ function reportDistrib() {
     local fname="${f##*/}"
     
     # Extract version metadata: Strip tool name and trailing OS/arch suffix
-    local tmp="${fname#${PN_LOCAL}-}"
+    local tmp="${fname#"${PN_LOCAL}"-}"
     local version="${tmp%_*}"
 
     if [ -z "${pkg_archives[$PN_LOCAL]:-}" ]; then
@@ -591,7 +596,7 @@ function generateArchive() {
   fi
   
   # Resolve the list of binaries into an array for safe multi-file handling
-  local bin_array=(${PKG_BIN} ${EXTRA_BINS})
+  read -r -a bin_array <<< "${PKG_BIN} ${EXTRA_BINS}"
   local win_bin_array=()
   local b
   for b in "${bin_array[@]}"; do
