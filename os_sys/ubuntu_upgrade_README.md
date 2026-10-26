@@ -23,7 +23,10 @@ The objective of the upgrade suite is to automate system-level updates, strip tr
 * **Bypassing APT for Mainline Kernels:**Mainline kernels from upstream distributions are unpacked manually via `dpkg-deb -x` rather than installed via `dpkg -i`. This design choice protects the host APT database from dependency mismatches (e.g., when a new kernel requires a newer glibc than the host distribution provides). 
 * **Process Parallelism:** By spawning Flatpak updates in a background process, the native package manager (`apt-get`) can update concurrently. Since Flatpak uses sandboxed user/system space libraries, it does not lock `/var/lib/dpkg/lock-frontend`, preventing write conflicts.
 * **Environment Sourcing:** The application sources `sysenv.sh` to explicitly define and export `PATH` variable hierarchies, ensuring that execution path resolution remains identical whether run interactively, via crontab, or under systemd timers.
-* **Robust Status Parsing:** Package states are checked using `dpkg-query` formatting strings rather than scraping standard `dpkg -l`. This avoids shell scripts breaking when the terminal width (`COLUMNS`) is low or unconfigured, which causes truncation.
+* **Robust Status Parsing & Safe Purging:** Package states are checked using `dpkg-query` formatting strings rather than scraping standard `dpkg -l`, and package purges pipe into `xargs -r` to eliminate word-splitting bugs and command line length limits (`ARG_MAX`).
+* **Script-Wide Mutual Exclusion (Mutex):** Enforces exclusive single-instance execution via `flock` on file descriptor 8 (`/run/ubuntu_upgrade.lock`), preventing race conditions, dual Flatpak updates, or overlapping package operations if executed concurrently.
+* **Process Lifecycle Trapping:** Implements signal and exit traps (`EXIT`, `INT`, `TERM`) to cleanly terminate asynchronous Flatpak background tasks (`FLATPAK_PID`) if the main process is interrupted, preventing orphaned background updates.
+* **APT Lock Resilience & Self-Healing Contention Detection:** Applies `-o DPkg::Lock::Timeout=120` across all APT operations to prevent immediate failure upon lock conflicts. Before executing transactions, the script inspects `/var/lib/dpkg/lock-frontend` and `/var/lib/apt/lists/lock`. If a background automatic upgrade service (such as `unattended-upgrades`, `apt-daily.service`, or `packagekit`) is detected holding the lock, the script automatically activates `--disable-autoupgrades` to permanently mask background timers and configure periodic directives to `0`, self-healing the VM against future collisions while waiting for the active job to release.
 
 ### Key Assumptions
 * **Execution Context:** The calling user has root context (`EUID = 0`).
@@ -36,6 +39,7 @@ The objective of the upgrade suite is to automate system-level updates, strip tr
 * **Unsafe Delete Guard:** When purging custom kernels, the script validates that the kernel version string contains more than 6 characters to prevent execution of destructive `rm -rf` operations on truncated directories.
 * **WSL Subsystem Adaptation:** Detects Windows Subsystem for Linux (WSL) environments and automatically bypasses the mainline kernel deployment stage, as WSL kernels are virtualized and maintained via the Windows host hypervisor.
 * **Resilient Environment Loading:** Sourcing of `settings.sh` searches `/opt/scripts/settings.sh` and user script directories before gracefully falling back to default script pointers, preventing execution failures on systems where `settings.sh` has not been placed.
+* **Contention with Unattended Upgrades:** Automatically detects when background upgrade timers hold the APT frontend lock and remedies the collision by disabling/masking them. Also supports the `--disable-autoupgrades` CLI parameter to explicitly stop, disable, and mask systemd timers (`apt-daily.timer`, `apt-daily-upgrade.timer`) and set APT periodic configurations to `0`.
 
 > [!NOTE]
 > When operating in Windows Subsystem for Linux (WSL), the session must be run with Bash in **login mode** (e.g., `bash -l` or `wsl.exe -d <distro>`) so that user and system profiles (`/etc/profile`, `~/.bash_profile`, `~/.profile`) are loaded, ensuring environment variables, user script paths, and Windows drive mounts (such as `/mnt/e`) are initialized.
@@ -146,7 +150,9 @@ The upgrade suite was analyzed using **ShellCheck** to verify syntax compatibili
 ## 7. Command Line Arguments
 
 ### Orchestrator: `ubuntu_upgrade.sh`
-* **Arguments:** None. It runs the full system patching and hardening pipeline sequentially, including flatpak updates in the background, and mainline kernel deployment pipeline.
+* **`-h, --help`**: Display CLI usage matrix and exit.
+* **`--disable-autoupgrades`**: Permanently stop, disable, and mask automatic background APT timers/services (`apt-daily`, `apt-daily-upgrade`, `unattended-upgrades`) and set `/etc/apt/apt.conf.d/20auto-upgrades` directives to `0` prior to running system upgrades. (Note: this is also activated automatically if background lock contention is detected).
+* **`--disable-autoupgrades-only`**: Stop, disable, and mask background APT update services and timers, then exit immediately without executing system package upgrades.
 
 ---
 
@@ -212,4 +218,15 @@ done
 ==========================================================================
 [+] 2026-06-18 03:21:12 : Selected custom and packaged kernel configurations successfully purged!
 ==========================================================================
+```
+
+### Example 3: Disabling Background Automatic Upgrades on Dedicated Nodes
+To permanently stop and mask automatic background APT timers and services prior to executing system upgrades:
+```bash
+sudo /opt/scripts/ubuntu_upgrade.sh --disable-autoupgrades
+```
+
+Or to disable automatic background upgrades without performing a system package upgrade:
+```bash
+sudo /opt/scripts/ubuntu_upgrade.sh --disable-autoupgrades-only
 ```

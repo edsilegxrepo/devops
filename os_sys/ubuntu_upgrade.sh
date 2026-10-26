@@ -1,7 +1,7 @@
 #!/bin/bash
 # ----------------------------------------
 # /opt/scripts/ubuntu_upgrade.sh
-# v1.0.9xg  2026/10/26  XDG / MIS Center
+# v1.0.12xg 2026/10/26  XDG / MIS Center
 # ----------------------------------------
 
 # ==============================================================================
@@ -66,6 +66,52 @@
 # ==============================================================================
 set -euo pipefail
 
+# ==============================================================================
+# CLI PARAMETER PARSING & HELP DISPLAY
+# ==============================================================================
+show_help() {
+    cat << EOF
+Usage: sudo $(basename "$0") [OPTIONS]
+
+Automated System Upgrade & Hardening Utility (Debian/Ubuntu/Linux Mint)
+
+Options:
+  -h, --help                    Show this help documentation and exit.
+  --disable-autoupgrades        Permanently stop, disable, and mask automatic background
+                                APT upgrade services/timers (apt-daily, apt-daily-upgrade,
+                                unattended-upgrades) before executing system upgrades.
+  --disable-autoupgrades-only   Permanently disable and mask automatic background APT
+                                upgrade services/timers, then exit immediately without
+                                executing system upgrades.
+EOF
+}
+
+DISABLE_AUTOUPGRADES=false
+ONLY_DISABLE_AUTOUPGRADES=false
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        --disable-autoupgrades)
+            DISABLE_AUTOUPGRADES=true
+            shift
+            ;;
+        --disable-autoupgrades-only)
+            DISABLE_AUTOUPGRADES=true
+            ONLY_DISABLE_AUTOUPGRADES=true
+            shift
+            ;;
+        *)
+            echo "[-] Usage Error: Unknown argument '$1'" >&2
+            show_help >&2
+            exit 1
+            ;;
+    esac
+done
+
 # ------------------------------------------------------------------------------
 # 1. ENVIRONMENT & PRIVILEGE VERIFICATION
 # ------------------------------------------------------------------------------
@@ -87,6 +133,26 @@ touch "$LOG_FILE"
 log_info() {  echo -e "[+] $(date '+%Y-%m-%d %H:%M:%S') : $1" | tee -a "$LOG_FILE"; }
 log_warn() {  echo -e "[!] $(date '+%Y-%m-%d %H:%M:%S') : $1" | tee -a "$LOG_FILE"; }
 log_error() { echo -e "[-] $(date '+%Y-%m-%d %H:%M:%S') : $1" >&2 | tee -a "$LOG_FILE"; }
+
+# Enforce script-wide exclusive locking to prevent concurrent executions
+exec 8>/run/ubuntu_upgrade.lock
+if ! flock -n 8; then
+    log_error "Another instance of $(basename "$0") is currently running. Aborting."
+    exit 1
+fi
+
+# Setup process lifecycle trap to cleanly terminate background jobs upon interruption or exit
+cleanup_on_exit() {
+    local exit_code=$?
+    trap - EXIT INT TERM
+    if [ -n "${FLATPAK_PID:-}" ] && kill -0 "$FLATPAK_PID" 2>/dev/null; then
+        log_warn "Terminating background Flatpak update process (PID ${FLATPAK_PID})..."
+        kill -TERM "$FLATPAK_PID" 2>/dev/null || true
+        wait "$FLATPAK_PID" 2>/dev/null || true
+    fi
+    exit "$exit_code"
+}
+trap cleanup_on_exit EXIT INT TERM
 
 # Detect if executing within Windows Subsystem for Linux (WSL)
 is_wsl() {
@@ -158,7 +224,7 @@ fi
 # Sanitize hostname to prevent malicious word splitting or character injections
 SAFE_HOSTNAME=$( (hostname -s 2>/dev/null || uname -n || echo "localhost") | tr -dc 'a-zA-Z0-9_-')
 NODE_TAG="PRD|prd|wks|${SAFE_HOSTNAME}"
-APT_OPTS=(-qy -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold -o APT::Get::Always-Include-Phased-Updates=true -o Acquire::http::No-Cache=true -o Acquire::http::Max-Age=0)
+APT_OPTS=(-qy -o DPkg::Lock::Timeout=120 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold -o APT::Get::Always-Include-Phased-Updates=true -o Acquire::http::No-Cache=true -o Acquire::http::Max-Age=0)
 APT_REPO_BASE="/etc/apt"
 APT_AUTO_PROC="apt-news.service esm-cache.service motd-news.service motd-news.timer ubuntu-advantage.service"
 MOTD_UPDATE_BASE="/etc/update-motd.d"
@@ -193,6 +259,104 @@ if command -v flatpak >/dev/null 2>&1; then
     log_info "Starting background Flatpak updates (logging to ${log_file})..."
     flatpak upgrade -y >"${log_file}" 2>&1 &
     FLATPAK_PID=$!
+fi
+
+# ------------------------------------------------------------------------------
+# 4.5. LOCK CONTENTION INSPECTION & AUTOMATIC UPGRADE REMEDIATION
+# ------------------------------------------------------------------------------
+# Objective: Inspect active APT lock holders, automatically remedy background
+#            auto-upgrades upon collision, and execute explicit --disable-autoupgrades requests.
+# ------------------------------------------------------------------------------
+inspect_and_remedy_lock_contention() {
+    local lock_frontend="/var/lib/dpkg/lock-frontend"
+    local lock_lists="/var/lib/apt/lists/lock"
+    local contention=false
+    local reason=""
+    local pids_info=""
+
+    for lf in "$lock_frontend" "$lock_lists"; do
+        if [ -f "$lf" ]; then
+            local detected_pids=""
+            if command -v fuser >/dev/null 2>&1; then
+                detected_pids=$(fuser "$lf" 2>/dev/null || true)
+            elif command -v lsof >/dev/null 2>&1; then
+                detected_pids=$(lsof -t "$lf" 2>/dev/null || true)
+            fi
+            if [ -n "$detected_pids" ]; then
+                for pid in $detected_pids; do
+                    if [ -d "/proc/$pid" ]; then
+                        local cmd
+                        cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || ps -p "$pid" -o comm= 2>/dev/null || true)
+                        pids_info="${pids_info} [PID ${pid}: ${cmd}]"
+                        if echo "$cmd" | grep -qiE "unattended-upgr|apt\.systemd\.daily|packagekit|apt-daily"; then
+                            contention=true
+                            reason="background auto-updater (${cmd})"
+                        fi
+                    fi
+                done
+            fi
+        fi
+    done
+
+    # Fallback check via process table if lock tools did not catch PIDs but an updater is running
+    if [ "$contention" = false ] && command -v pgrep >/dev/null 2>&1; then
+        local bg_pids
+        bg_pids=$(pgrep -f "unattended-upgr|apt\.systemd\.daily|packagekitd" 2>/dev/null || true)
+        if [ -n "$bg_pids" ]; then
+            contention=true
+            reason="active background auto-update service (PIDs: ${bg_pids})"
+        fi
+    fi
+
+    if [ "$contention" = true ]; then
+        log_warn "APT lock contention detected: Held by ${reason}."
+        log_warn "Automatically activating --disable-autoupgrades to prevent future lock collisions on this system."
+        DISABLE_AUTOUPGRADES=true
+    elif [ -n "$pids_info" ]; then
+        log_info "APT lock is currently held by non-autoupgrade process:${pids_info}. Waiting up to 120s for release..."
+    fi
+}
+
+disable_autoupgrades() {
+    print_header "DISABLE-AUTOUPGRADES"
+    log_info "Permanently disabling automatic background APT timers and services..."
+    if command -v systemctl >/dev/null 2>&1; then
+        local auto_services="apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service unattended-upgrades.service"
+        for s in ${auto_services}; do
+            systemctl stop "$s" >/dev/null 2>&1 || true
+            systemctl disable "$s" >/dev/null 2>&1 || true
+            systemctl mask "$s" >/dev/null 2>&1 || true
+        done
+    fi
+    if [ -d /etc/apt/apt.conf.d ]; then
+        log_info "Configuring /etc/apt/apt.conf.d to disable periodic APT actions..."
+        cat << 'EOF' > /etc/apt/apt.conf.d/20auto-upgrades
+APT::Periodic::Update-Package-Lists "0";
+APT::Periodic::Download-Upgradeable-Packages "0";
+APT::Periodic::AutocleanInterval "0";
+APT::Periodic::Unattended-Upgrade "0";
+EOF
+        if [ -f /etc/apt/apt.conf.d/10periodic ]; then
+            cat << 'EOF' > /etc/apt/apt.conf.d/10periodic
+APT::Periodic::Update-Package-Lists "0";
+APT::Periodic::Download-Upgradeable-Packages "0";
+APT::Periodic::AutocleanInterval "0";
+APT::Periodic::Unattended-Upgrade "0";
+EOF
+        fi
+    fi
+    log_info "Automatic background upgrades have been permanently disabled and masked."
+    if [ "$ONLY_DISABLE_AUTOUPGRADES" = true ]; then
+        log_info "Completed --disable-autoupgrades-only request. Exiting."
+        exit 0
+    fi
+}
+
+# Run lock inspection (auto-activates DISABLE_AUTOUPGRADES if held by background updater)
+inspect_and_remedy_lock_contention
+
+if [ "$DISABLE_AUTOUPGRADES" = true ]; then
+    disable_autoupgrades
 fi
 
 # ------------------------------------------------------------------------------
@@ -247,14 +411,12 @@ done
 # Using dpkg-query instead of dpkg -l to prevent terminal width truncation issues
 iu_pkgs=$(dpkg-query -f '${db:Status-Status} ${Package}\n' -W 2>/dev/null | awk '/^unpacked/ {print $2}')
 if [ -n "$iu_pkgs" ]; then
-    # shellcheck disable=SC2086
-    apt-get "${APT_OPTS[@]}" remove --purge $iu_pkgs
+    echo "$iu_pkgs" | xargs -r apt-get "${APT_OPTS[@]}" remove --purge
 fi
 
 rc_pkgs=$(dpkg-query -f '${db:Status-Status} ${Package}\n' -W 2>/dev/null | awk '/^config-files/ {print $2}')
 if [ -n "$rc_pkgs" ]; then
-    # shellcheck disable=SC2086
-    apt-get "${APT_OPTS[@]}" remove --purge $rc_pkgs
+    echo "$rc_pkgs" | xargs -r apt-get "${APT_OPTS[@]}" remove --purge
 fi
 
 # Remove unwanted package (crashes xorg if 3d acceleration is not available)
