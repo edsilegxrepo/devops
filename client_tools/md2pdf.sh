@@ -285,20 +285,22 @@ run_detect() {
       browser_exe=$(node -e "try { console.log(JSON.parse(require('fs').readFileSync('$config_file', 'utf8')).launch_options.executablePath || ''); } catch(e) {}")
     fi
 
-    # Check if a browser path was successfully retrieved.
+    # Check if a browser path was successfully retrieved from config or environment
+    local normalized_exe=""
     if [[ -n "$browser_exe" ]]; then
-      local normalized_exe
-      # Normalize the browser path to mixed-Windows layout.
       normalized_exe=$(format_path "$browser_exe")
-      # Assert the browser executable file exists on disk.
-      if [[ -f "$normalized_exe" ]]; then
-        log_success "  - Configured browser path: Found ($browser_exe)"
-      else
-        log_error "  - Configured browser path: NOT FOUND at '$browser_exe'"
-        detected=false
-      fi
+    fi
+
+    if [[ -n "$normalized_exe" && -f "$normalized_exe" ]]; then
+      log_success "  - Configured browser path: Found ($browser_exe)"
+    elif [[ -n "${CHROME_BIN:-}" && -f "$(format_path "$CHROME_BIN")" ]]; then
+      log_success "  - Browser path: Found via CHROME_BIN (${CHROME_BIN})"
     else
-      log_error "  - Configured browser path: Path not specified in config JSON"
+      if [[ -n "$browser_exe" ]]; then
+        log_error "  - Configured browser path: NOT FOUND at '$browser_exe' (and CHROME_BIN is unset or invalid)"
+      else
+        log_error "  - Configured browser path: Path not specified in config JSON (and CHROME_BIN is unset)"
+      fi
       detected=false
     fi
   else

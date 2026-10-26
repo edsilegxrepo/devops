@@ -14,7 +14,7 @@
     "footerTemplatePath": "md2pdf_compiler/html/footer.html"
   },
   "launch_options": {
-    "executablePath": "D:\\inet\\www\\chromium\\bin\\chrome.exe",
+    "executablePath": "D:\\inet\\www\\chromium\\chrome.exe",
     "args": ["--no-sandbox", "--disable-setuid-sandbox"]
   },
   "markdown_options": {

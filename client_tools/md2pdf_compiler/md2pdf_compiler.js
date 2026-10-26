@@ -157,19 +157,35 @@ if (configContent.startsWith("\uFEFF")) {
 // Parse the configuration string into a JSON object.
 const config = JSON.parse(configContent);
 
-// Validate that the launch options config specifies a browser executable path.
-if (!config.launch_options?.executablePath) {
-	console.error(
-		"[ERROR] Config validation failed: 'launch_options.executablePath' is not defined.",
-	);
-	process.exit(1);
-}
-// Assert that the specified browser executable exists on disk.
-if (!fs.existsSync(config.launch_options.executablePath)) {
-	console.error(
-		`[ERROR] Configured browser executable not found at: ${config.launch_options.executablePath}`,
-	);
-	process.exit(1);
+// Resolve browser executable path:
+// Priority 1: Config file (config.launch_options.executablePath)
+// Priority 2: Environment variable (process.env.CHROME_BIN)
+let browserExe = config.launch_options?.executablePath || "";
+
+if (!browserExe || !fs.existsSync(browserExe)) {
+	const envChromeBin = process.env.CHROME_BIN;
+	if (envChromeBin && fs.existsSync(envChromeBin)) {
+		if (format !== "json") {
+			console.log(
+				`[INFO] Configured browser path '${browserExe}' not found; falling back to CHROME_BIN: ${envChromeBin}`,
+			);
+		}
+		browserExe = envChromeBin;
+		if (!config.launch_options) {
+			config.launch_options = {};
+		}
+		config.launch_options.executablePath = browserExe;
+	} else {
+		const errMsg = browserExe
+			? `[ERROR] Configured browser executable not found at '${browserExe}' and CHROME_BIN is unset or invalid.`
+			: "[ERROR] Config validation failed: 'launch_options.executablePath' is not defined and CHROME_BIN is unset.";
+		if (format === "json") {
+			console.error(JSON.stringify({ level: "error", msg: errMsg }));
+		} else {
+			console.error(errMsg);
+		}
+		process.exit(1);
+	}
 }
 
 // 4. Initialize markdown-it with the same options and plugins as VSCode
