@@ -1,0 +1,126 @@
+{
+  "_comment_header": "==============================================================================",
+  "_comment_title":  " Go Module Build & Packaging Specification Template (build.json.template)",
+  "_comment_purpose": "Sourced by build_go.sh and build_orchestrate.sh for compilation and packaging.",
+  "_comment_usage":   "Copy this file to 'build.json' in your module root and customize fields.",
+  "_comment_rules":   "Standard JSON format. Remove '_comment_*' fields if strict JSON is enforced.",
+  "_comment_sep1":    "==============================================================================",
+
+  "name": "example-service",
+  "_name_doc": "Compiled binary name and base package name. Default: folder name.",
+
+  "version": "1.0.0",
+  "_version_doc": "Semantic version string (SemVer: MAJOR.MINOR.PATCH). Default: 0.1.0.",
+
+  "release": "1",
+  "_release_doc": "Packaging release iteration increment. Default: 1.",
+
+  "channel": "xg",
+  "_channel_doc": "Release channel tag ('xg', 'release', 'stable', 'beta'). Default: xg.",
+
+  "entrypoint": ".",
+  "_entrypoint_doc": "Relative path to directory containing Go 'package main'. Default: .",
+
+  "version_pkg": "main.version",
+  "_version_pkg_doc": "Go variable symbol injected via ldflags -X for version. Default: main.version.",
+
+  "build_pkg": "main.build",
+  "_build_pkg_doc": "Go variable symbol injected via ldflags -X for Git commit hash. Default: '' (disabled).",
+
+  "summary": "Example Enterprise Go Microservice",
+  "_summary_doc": "Single-line synopsis for RPM spec Summary and Debian control Description. Default: <name> binary.",
+
+  "description": "High-performance enterprise utility designed for telemetry aggregation and health diagnostics across distributed environments.",
+  "_description_doc": "Multi-line extended description. Automatically formatted for Debian RFC 822 and RPM %description.",
+
+  "maintainer": "Mis Center <support@criticalsys.net>",
+  "_maintainer_doc": "Maintainer name and contact email in standard RFC 822 format.",
+
+  "license": "MIT",
+  "_license_doc": "SPDX license identifier (e.g. MIT, Apache-2.0, BSD-3-Clause, Proprietary). Default: MIT.",
+
+  "url": "https://criticalsys.net",
+  "_url_doc": "Corporate or project homepage URL.",
+
+  "group": "Applications/System",
+  "_group_doc": "RPM package group classification (hierarchical). Sourced for RPM spec 'Group:' tag. Default: Applications/System.",
+
+  "section": "utils",
+  "_section_doc": "Debian package repository classification. Sourced for Debian control 'Section:' header. Default: utils.",
+
+  "priority": "optional",
+  "_priority_doc": "Debian package priority level ('optional', 'standard', 'important', 'required'). Default: optional.",
+
+  "install_path": "/usr/bin",
+  "_install_path_doc": "Target filesystem installation directory for the compiled binary in DEB/RPM. Default: /usr/bin.",
+
+  "cgo": false,
+  "_cgo_doc": "Specifies whether CGO is disabled (false = 100% static compilation CGO_ENABLED=0). Default: false.",
+
+  "history": [
+    "* Wed Oct 28 2026 Mis Center <support@criticalsys.net> - <version>-<release>",
+    "- Packaged to new code release"
+  ],
+  "_history_doc": "Packaging changelog records used dynamically for RPM (%changelog) and Debian (/usr/share/doc/<app>/changelog.Debian.gz). Tokens <version> and <release> are automatically substituted with module version and numeric release (e.g. 0.2.1-1).",
+
+  "_classification_reference": {
+    "_rpm_groups_best_practices": [
+      "Applications/Archiving    - Archival, compression, and backup utilities",
+      "Applications/Databases    - Database servers, management CLIs, and query tools (e.g. sqly, trdsql)",
+      "Applications/Editors      - Text and code editors",
+      "Applications/Engineering  - CAD, mathematics, and engineering tools",
+      "Applications/File         - File management, transfer, and hashing tools (e.g. hashcalcmt, gorsync)",
+      "Applications/Internet     - Network diagnostics, HTTP clients, and monitoring (e.g. netping, statping-ng, tlstester)",
+      "Applications/Mail         - Email delivery, parsing, and mailbox utilities (e.g. mailxgo, o365mbx)",
+      "Applications/Publishing   - Document generation, typesetting, and PDF tools (e.g. pdf-extractor)",
+      "Applications/Security     - Security audit, password, and credential tools (e.g. secretprotector, checkcert)",
+      "Applications/System       - General system administration, daemons, and metrics (e.g. ctop, dirpoller, azentramgr)",
+      "Applications/Text         - Text filters, format converters, and data munging (e.g. qq)",
+      "Development/Debuggers     - Debugging and profiling utilities",
+      "Development/Languages     - Compilers, interpreters, and runtime tools",
+      "Development/Libraries     - Static or dynamic programming libraries",
+      "Development/Tools         - Developer tooling, linters, code generators, repo tools (e.g. repoview)",
+      "System Environment/Base   - Core OS components, filesystems, and drivers (e.g. gobindfs)",
+      "System Environment/Daemons- Background service daemons and cluster agents"
+    ],
+    "_deb_sections_best_practices": [
+      "admin       - System administration tools, monitoring, process control (e.g. ctop, dirpoller)",
+      "database    - Database clients, query CLIs, drivers, and tools (e.g. sqly, trdsql, dbminer)",
+      "devel       - Development utilities, compilers, linters, repo managers (e.g. repoview)",
+      "doc         - Standalone technical documentation",
+      "editors     - Text and source editors",
+      "mail        - Email user agents, filtering, mailbox manipulation (e.g. mailxgo, o365mbx)",
+      "net         - Network utilities, probing, routing, status pages (e.g. netping, statping-ng, tlstester)",
+      "security    - Security scanners, secret protection, crypt tools (e.g. secretprotector, checkcert)",
+      "text        - Text processing tools, PDF utilities, format transcoders (e.g. pdf-extractor, qq)",
+      "utils       - General purpose utilities, command-line helpers (Debian default: utils)",
+      "vcs         - Version control systems and Git automation tools",
+      "web         - Web servers, proxies, HTTP clients, and browser tools"
+    ],
+    "_common_cross_platform_pairings": [
+      { "rpm_group": "Applications/System",    "deb_section": "admin",    "use_case": "System monitoring, process management, directory polling" },
+      { "rpm_group": "Applications/System",    "deb_section": "utils",    "use_case": "General CLI tools, helper utilities, single-purpose commands" },
+      { "rpm_group": "Applications/Databases", "deb_section": "database", "use_case": "SQL probers, schema extractors, database dumpers" },
+      { "rpm_group": "Applications/Internet",  "deb_section": "net",      "use_case": "Ping tools, TLS diagnostics, network health probers" },
+      { "rpm_group": "Applications/Mail",      "deb_section": "mail",     "use_case": "Mail transport, Office 365 mailbox tools" },
+      { "rpm_group": "Applications/Publishing","deb_section": "text",     "use_case": "PDF text extraction, document generators" },
+      { "rpm_group": "Applications/File",      "deb_section": "utils",    "use_case": "Hash calculators, rsync implementations" },
+      { "rpm_group": "Development/Tools",      "deb_section": "devel",    "use_case": "Repository visualizers, code generators, analyzers" },
+      { "rpm_group": "System Environment/Base","deb_section": "admin",    "use_case": "FUSE filesystems, low-level system mounts" }
+    ],
+    "_history_format_guidelines": {
+      "syntax": "* <Day> <Mon> <DD> <YYYY> <Maintainer Name> <<email>> - <version>-<release>",
+      "example_entry": [
+        "* Wed Oct 28 2026 Mis Center <support@criticalsys.net> - <version>-<release>",
+        "- Packaged to new code release"
+      ],
+      "rules": [
+        "Header lines start with '* ' followed by 'Day Mon DD YYYY', maintainer, ' - ', and '<version>-<release>'.",
+        "Bullet items start with '- ' or '* ' detailing changes.",
+        "Tokens <version> and <release> are automatically substituted with module version and numeric release iteration (e.g. 0.2.1-1).",
+        "Used dynamically across RPM spec (%changelog) and Debian (/usr/share/doc/<app>/changelog.Debian.gz)."
+      ]
+    }
+  }
+}
+

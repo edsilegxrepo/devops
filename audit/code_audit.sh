@@ -199,7 +199,7 @@ setup_environment() {
 
   # 3. Parallel Execution: Status tracking directory for background processes.
   # Logic: We use files to track failures across subshells since variables are not shared.
-  AUDIT_STATUS_DIR=$(mktemp -d 2> /dev/null || (mkdir -p "${TMPDIR:-/tmp}/audit_status_$$" && echo "${TMPDIR:-/tmp}/audit_status_$$"))
+  AUDIT_STATUS_DIR=$(mktemp -d 2> /dev/null || (mkdir -p "${TMPDIR:-/tmp}/audit_status_$$" && echo "${TMPDIR:-/tmp}/audit_status_$$") )
   export AUDIT_STATUS_DIR
 
   # 4. Environment Hardening:
@@ -338,10 +338,13 @@ check_asset() {
   local ver="            "
 
   if [ -f "$file" ]; then
-    # Logic: If it's the pslint.ps1 orchestrator, extract its internal version.
+    # Logic: Extract internal versions for helper orchestrators (pslint.ps1, shlint.sh).
     if [[ "$base" == "pslint.ps1" ]]; then
       # We explicitly strip \r to prevent terminal cursor-reset issues on Windows.
       ver=$(pwsh -ExecutionPolicy Bypass -File "$file" -Version 2> /dev/null | head -n 1 | tr -d '\r' || echo "")
+      [ -n "$ver" ] && ver="v$ver"
+    elif [[ "$base" == "shlint.sh" ]]; then
+      ver=$(grep -E '^# v[0-9]' "$file" 2> /dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?([a-z0-9.]+)?' | head -n 1 | tr -d '\r' || echo "")
       [ -n "$ver" ] && ver="v$ver"
     fi
     local display_file
@@ -559,7 +562,7 @@ run_diagnosis() {
   echo "---------------------------------------------------------"
 
   # Establish a shared temporary buffer for all parallel tasks.
-  DIAG_TMP_DIR=$(mktemp -d 2> /dev/null || (mkdir -p "${TMPDIR:-/tmp}/audit_diag_$$" && echo "${TMPDIR:-/tmp}/audit_diag_$$"))
+  DIAG_TMP_DIR=$(mktemp -d 2> /dev/null || (mkdir -p "${TMPDIR:-/tmp}/audit_diag_$$" && echo "${TMPDIR:-/tmp}/audit_diag_$$") )
 
   # Launch checks across categories based on isolation flags or global mode.
   if [ "$HAS_ISOLATION" = false ] || [ "$PROCESS_PYTHON" = true ] || [ "$SPEC_PYTHON" = true ]; then
@@ -576,6 +579,8 @@ run_diagnosis() {
 
   if [ "$HAS_ISOLATION" = false ] || [ "$PROCESS_BASH" = true ] || [ "$SPEC_BASH" = true ]; then
     queue_checks 4 "${AUDIT_BASH_TOOLS[@]}"
+    local pad_cat="04"
+    check_asset "$CONF_SCRIPT_ROOT/shlint.sh" > "$DIAG_TMP_DIR/${pad_cat}_003_shlint" &
   fi
 
   # Special Category: PowerShell (Includes high-latency script version check)
@@ -637,6 +642,12 @@ run_diagnosis() {
           while [ ! -s "$f" ]; do sleep 0.1; done
           cat "$f"
         done
+
+        if [ "$cat_num" -eq 4 ]; then
+          local shl_file="$DIAG_TMP_DIR/${pad_cat}_003_shlint"
+          while [ ! -s "$shl_file" ]; do sleep 0.1; done
+          cat "$shl_file"
+        fi
       fi
       echo ""
     fi
@@ -874,18 +885,24 @@ run_phase_1_quality() {
 
   if [ "$PROCESS_BASH" = true ]; then
     echo "[Bash]"
-    # ShellCheck: Industry-standard linter for catching common shell bugs and anti-patterns.
-    # We use find to ensure recursive discovery within the configured depth.
-    # shellcheck disable=SC2086
-    run_audit_tool "ShellCheck (Lint)" find "$CONF_BASH_TARGET" -maxdepth "$CONF_SEARCH_DEPTH" -name "*.sh" -exec shellcheck $CONF_SHELLCHECK_FLAGS {} +
-
-    # shfmt: Enforces a consistent coding style across Bash scripts (check-only default).
-    if [ "$PROCESS_FIX" = true ]; then
-      # shellcheck disable=SC2086
-      run_audit_tool "shfmt (Fix Mode)" find "$CONF_BASH_TARGET" -maxdepth "$CONF_SEARCH_DEPTH" -name "*.sh" -exec shfmt $CONF_SHFMT_FLAGS -w {} +
+    local SHLINT_SCRIPT="$CONF_SCRIPT_ROOT/shlint.sh"
+    if [ -f "$SHLINT_SCRIPT" ]; then
+      local SHLINT_MODE_FLAG="--check"
+      [ "$PROCESS_FIX" = true ] && SHLINT_MODE_FLAG="--write"
+      # Delegate to custom shlint.sh wrapper for deep multi-format linting (.sh, .bash, .inc) and formatting
+      run_audit_tool "Bash Linter & Formatter (shlint)" bash "$SHLINT_SCRIPT" "$SHLINT_MODE_FLAG" "$CONF_BASH_TARGET"
     else
+      # Fallback: Direct ShellCheck and shfmt discovery if shlint.sh wrapper is absent
       # shellcheck disable=SC2086
-      run_audit_tool "shfmt (Check Only)" find "$CONF_BASH_TARGET" -maxdepth "$CONF_SEARCH_DEPTH" -name "*.sh" -exec shfmt $CONF_SHFMT_FLAGS -d {} +
+      run_audit_tool "ShellCheck (Lint)" find "$CONF_BASH_TARGET" -maxdepth "$CONF_SEARCH_DEPTH" -name "*.sh" -exec shellcheck $CONF_SHELLCHECK_FLAGS {} +
+
+      if [ "$PROCESS_FIX" = true ]; then
+        # shellcheck disable=SC2086
+        run_audit_tool "shfmt (Fix Mode)" find "$CONF_BASH_TARGET" -maxdepth "$CONF_SEARCH_DEPTH" -name "*.sh" -exec shfmt $CONF_SHFMT_FLAGS -w {} +
+      else
+        # shellcheck disable=SC2086
+        run_audit_tool "shfmt (Check Only)" find "$CONF_BASH_TARGET" -maxdepth "$CONF_SEARCH_DEPTH" -name "*.sh" -exec shfmt $CONF_SHFMT_FLAGS -d {} +
+      fi
     fi
   fi
 

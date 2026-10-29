@@ -2,82 +2,90 @@
 
 ## Application Overview and Objectives
 
-`shlint.sh` is a utility designed to enforce coding standards and maintain structural integrity across shell-based automation ecosystems.
+`shlint.sh` is a utility designed to enforce coding standards, format consistency, and structural integrity across shell-based automation ecosystems.
 
 ### Core Objectives:
 *   **Structural Standardization:** Enforce a uniform indentation and formatting style using `shfmt`, ensuring codebase consistency.
-*   **Defensive Programming:** Utilize `shellcheck` to identify semantic errors, logical bugs, and POSIX/Bash-specific antipatterns.
-*   **Workflow Integration:** Provide a simple entry point to validate script health before deployment.
-*   **Transparency:** Abstract the complexity of underlying tool configurations into a simple, predictable interface.
+*   **Defensive Static Analysis:** Utilize `shellcheck` to identify semantic errors, logical bugs, and POSIX/Bash-specific antipatterns.
+*   **Workflow & CI/CD Integration:** Provide explicit, non-destructive check modes (`--check`) for continuous integration pipelines and automated in-place formatting (`--write`) for local development.
+*   **Strict Long-Flag Hygiene:** Disables ambiguous single-character short flags across CLI controls to prevent syntax errors and ensure transparent scripting.
+*   **Broad Shell Scoping:** Inspects `.sh`, `.bash`, and `.inc` libraries, as well as extensionless scripts with shell shebangs.
 
 ---
 
 ## Architecture and Design Choices
 
-The utility follows a **Fail-Fast Wrapper Architecture**, prioritizing validation before execution to prevent unnecessary processing or destructive formatting on non-target files.
+The utility follows a **Fail-Fast Wrapper Architecture**, prioritizing prerequisite validation and directory pruning before performing formatting or static analysis.
 
 ### Design Principles:
-1.  **Idempotency:** The script can be run multiple times on the same target without unintended side effects (outside of the initial formatting correction).
-2.  **Modular Dependency Integration:** Instead of re-implementing formatting or linting logic, `shlint.sh` leverages industry-standard binaries (`shfmt` and `shellcheck`), focusing on the *orchestration* and *configuration* of these tools.
-3.  **Strict File Scoping:** To prevent accidental corruption of configuration files or binaries, the script enforces a `.sh` extension requirement, ensuring it only operates on intended shell scripts.
-4.  **Operational Simplicity:** Minimalist CLI design ensures zero learning curve for systems engineers while providing maximum utility.
-5.  **Multi-Target and Directory Support:** Dynamically handles single files, spaced lists of files, and recursive directory scanning out-of-the-box.
-6.  **Interpreter Safety:** Implements self-awareness (`shlint.sh` skips itself) to prevent runtime byte-offset crashes caused by in-place formatting during execution.
+1.  **Idempotency:** The script can be run repeatedly on the same target without unintended side effects.
+2.  **Modular Dependency Integration:** Leverages industry-standard binaries (`shfmt` and `shellcheck`), focusing on orchestration, safe discovery, and telemetry aggregation.
+3.  **Strict Long-Form CLI Controls:** Rejects short options (e.g. `-c`, `-w`, `-h`) with a usage diagnostic to prevent syntax ambiguity in automated pipelines.
+4.  **Flexible Shell Scoping:** Validates scripts ending in `.sh`, `.bash`, and `.inc`, and falls back to inspecting shebang headers (`#!/bin/bash` or `#!/bin/sh`) for extensionless executables.
+5.  **VCS & Dependency Pruning:** Automatically excludes `.git`, `vendor`, `node_modules`, and `.cache` directories during recursive directory scans.
+6.  **Interpreter Safety:** Resolves physical canonical paths (`readlink -f` / `realpath`) to ensure `shlint.sh` safely skips itself and avoids interpreter byte-offset mutation errors.
+7.  **Fail-Fast Toolchain Checks:** Audits the availability of both `shfmt` and `shellcheck` in `$PATH` upfront before processing files.
 
 ---
 
 ## Data Flow and Control Logic
 
-The operational flow uses a robust target loop that resolves arguments into actionable files, performs the formatting/linting operations, and aggregates failures into a global exit status.
-
-### Mermaid Flow Diagram
-
 ```mermaid
 graph TD
-    A([Start]) --> B{Input targets provided?}
-    B -- No --> C[[Display Usage & Exit 1]]
-    B -- Yes --> D[Initialize GLOBAL_EXIT=0]
+    A([Start]) --> B[Check Dependencies: shfmt & shellcheck]
+    B -- Missing --> C[[Log Error & Exit 4]]
+    B -- Present --> D{Parse CLI Flags}
     
-    D --> E[Iterate Targets]
-    E --> F{Is Target a Directory?}
+    D -- Short Flag Used --> E[[Log Error & Exit 1]]
+    D -- --help --> F[[Display Usage & Exit 0]]
+    D -- No Targets --> G[[Display Usage & Exit 1]]
+    D -- Valid Options & Targets --> H[Resolve Real SCRIPT_REAL]
     
-    F -- Yes --> G[Find *.sh files recursively]
-    G --> H[Process each file]
+    H --> I[Iterate Targets]
+    I --> J{Is Target a Directory?}
     
-    F -- No --> I{Is Target a File?}
-    I -- Yes --> H
-    I -- No --> J[Log Warning & Skip]
+    J -- Yes --> K[Find .sh, .bash, .inc - Prune .git, vendor, node_modules]
+    K --> L[Process each file]
     
-    H --> K{Extension == .sh?}
-    K -- No --> L[Log Warning & Skip]
-    K -- Yes --> M{Is file shlint.sh?}
+    J -- No --> M{Is Target a File?}
+    M -- Yes --> L
+    M -- No --> N[Log Warning & Skip]
     
-    M -- Yes --> N[Log Warning & Skip]
-    M -- No --> O[Execute shfmt]
+    L --> O{Is Shell Script? .sh, .bash, .inc, or shebang}
+    O -- No --> N
+    O -- Yes --> P{Is File Self shlint.sh?}
     
-    O -- Fail --> P[Set GLOBAL_EXIT=2]
-    O -- Success --> Q[Execute shellcheck -x]
+    P -- Yes --> Q[Log Warning & Skip]
+    P -- No --> R{Mode == --check?}
     
-    Q -- Fail --> P
-    Q -- Success --> R{More targets/files?}
+    R -- Yes --> S[Execute shfmt --diff]
+    R -- No --> T[Execute shfmt --write]
     
-    J --> R
-    L --> R
-    N --> R
-    P --> R
+    S -- Drift Detected --> U[Set GLOBAL_EXIT=2]
+    T -- Format Error --> U
+    S -- Clean --> V[Execute shellcheck --external-sources]
+    T -- Formatted --> V
     
-    R -- Yes --> E
-    R -- No --> S([Exit GLOBAL_EXIT])
+    V -- Lint Errors --> U
+    V -- Compliant --> W[Log OK Progress]
+    
+    U --> X{More targets/files?}
+    W --> X
+    N --> X
+    Q --> X
+    
+    X -- Yes --> I
+    X -- No --> Y([Exit GLOBAL_EXIT: 0 or 2])
 ```
 
 ### Control Logic Details:
-*   **Discovery Phase:** The script uses `find` to recursively locate `*.sh` scripts when a directory is passed, handling spaces safely via `print0`.
-*   **Validation Phase:** The script verifies existence and content via `[[ -s "$file" ]]`, confirms the extension, and explicitly prevents recursive self-formatting.
-*   **Mutation Phase:** `shfmt` is invoked with `-w` (write), applying specific organizational tokens:
-    *   `-i 2`: 2-space indentation (Industry standard for readability).
-    *   `-ci`: Indented case patterns for logical separation in switch blocks.
-    *   `-sr`: Space after redirects for visual clarity in I/O operations.
-*   **Analysis Phase:** `shellcheck` is run with the `-x` flag, allowing the analyzer to follow `source` and `.` commands to validate the full dependency tree of the script.
+*   **Dependency Audit:** Verifies `shfmt` and `shellcheck` presence in `$PATH` before filesystem discovery.
+*   **Discovery Phase:** The script uses `find` to locate `*.sh`, `*.bash`, and `*.inc` files, pruning `.git/`, `vendor/`, `node_modules/`, and `.cache/`.
+*   **Validation Phase:** The script validates file readability, content size (`[[ -s "$file" ]]`), shell script type, and canonical identity against `${BASH_SOURCE[0]}`.
+*   **Formatting Phase:**
+    *   **In-Place Mode (`--write`):** Executes `shfmt --indent 2 --case-indent --space-redirects --write "$file"`.
+    *   **Check Mode (`--check`):** Executes `shfmt --indent 2 --case-indent --space-redirects --diff "$file"`, returning an error without modifying files.
+*   **Analysis Phase:** Invokes `shellcheck --external-sources "$file"` to follow sourced dependencies and include files.
 
 ---
 
@@ -88,64 +96,65 @@ To maintain its operational capabilities, `shlint.sh` requires the following mod
 | Dependency | Purpose | Source/Provider |
 | :--- | :--- | :--- |
 | **Bash** (4.0+) | Execution environment for the orchestrator. | GNU Project |
-| **shfmt** | Lexical analysis and source code formatting. | [mvdan/sh](https://github.com/mvdan/sh) |
-| **shellcheck** | Static analysis and bug detection. | [koalaman/shellcheck](https://github.com/koalaman/shellcheck) |
+| **shfmt** | Lexical analysis, syntax formatting, and diff generation. | [mvdan/sh](https://github.com/mvdan/sh) |
+| **shellcheck** | Deep static analysis, AST bug detection, and dependency inspection. | [koalaman/shellcheck](https://github.com/koalaman/shellcheck) |
 
 ---
 
 ## Command Line Arguments
 
-The script adheres to a standard UNIX-style multi-argument interface.
+The script enforces an explicit long-flag interface. Short options are prohibited.
 
 | Argument | Type | Description | Default | Mandatory |
 | :--- | :--- | :--- | :--- | :--- |
-| `$@` | `String (Paths)` | Space-separated list of files or directories to process. | N/A | **Yes** |
+| `--write` | Flag | Format files in-place and run static analysis. | **Yes** (default) | No |
+| `--check` | Flag | Read-only verification mode (prints format diffs, exits non-zero on drift). | No | No |
+| `--help` | Flag | Displays syntax, options, and operational manual. | No | No |
+| `<target...>` | `Paths` | Space-separated list of files or directories to process. | N/A | **Yes** |
 
 ### Exit Codes:
-*   **0**: Success. All targeted scripts are formatted and pass linting.
-*   **1**: Usage Error (No targets provided).
-*   **2**: Validation Failure (Format/Lint error on one or more files).
+*   **0**: Success. All targeted scripts are formatted and compliant.
+*   **1**: Usage Error (No targets provided, unknown options, or short flags used).
+*   **2**: Validation Failure (Formatting drift or shellcheck linting failure).
+*   **4**: Missing Dependency (`shfmt` or `shellcheck` not found in `PATH`).
 
 ---
 
 ## Detailed Examples
 
-### 1. Standard Execution (Single File)
+### 1. Standard In-Place Formatting & Linting (Local Development)
 Automating the hygiene of a local script:
 ```bash
 ./shlint.sh my_database_backup.sh
 ```
-*Effect: `my_database_backup.sh` is reformatted to 2-space indentation and any logic errors are printed to stdout.*
+*Effect: Formats `my_database_backup.sh` to 2-space indentation with case-block and redirect spacing, then runs shellcheck.*
 
-### 2. Multi-File Execution
-Passing multiple explicit files at once:
+### 2. CI/CD Pipeline Verification (Read-Only Check Mode)
+Enforcing formatting and linting in continuous integration without dirtying git working trees:
 ```bash
-./shlint.sh deploy.sh build.sh test.sh
-```
-
-### 3. Directory Scanning
-Recursively formatting and linting an entire directory:
-```bash
-./shlint.sh ./src/scripts/
-```
-*Effect: Automatically locates and processes every `.sh` file within the directory structure.*
-
-### 4. CI/CD Integration (Pipeline)
-Incorporating into a build pipeline to block commits with poor hygiene:
-```bash
-# In a shell executor block
-./shlint.sh .
+./shlint.sh --check .
 if [ $? -ne 0 ]; then
-    echo "Hygiene check failed. Please fix script errors."
+    echo "Hygiene check failed. Please format scripts using './shlint.sh --write <path>'."
     exit 1
 fi
 ```
+*Effect: Recursively checks all shell scripts in `.`. If formatting differences or shellcheck warnings exist, reports diffs and exits with code 2.*
 
-### 4. Handling Sourced Dependencies
-Because `shlint.sh` uses `shellcheck -x`, it will validate external includes:
+### 3. Multi-File and Include File Execution
+Inspecting multiple files including shared `.inc` libraries:
 ```bash
-# content of main.sh
-source ./lib/utils.sh
-check_disk_usage
+./shlint.sh build_go.sh build.inc deploy.sh
 ```
-Running `./shlint.sh main.sh` will also verify that `utils.sh` exists and contains valid code.
+
+### 4. Recursive Directory Scanning with VCS Pruning
+Scanning an entire project tree while automatically ignoring `.git/` and `vendor/`:
+```bash
+./shlint.sh --write ./scripts/
+```
+
+### 5. Short Flag Rejection
+Attempting to use short flags triggers a clear diagnostic:
+```bash
+./shlint.sh -c build.sh
+# ERROR: Short flag '-c' is not permitted. Short flags are disabled to prevent errors. Use long options: --check, --write, --help.
+```

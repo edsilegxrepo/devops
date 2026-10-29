@@ -55,7 +55,7 @@
 #
 #  Syntax:
 #    ./build_orchestrate.sh [--exec] [--clean] [--parallel] [--jobs=N] [--fail-fast]
-#                   [--windows] [--linux] [--all-platform] [--archive] [--rpm] [--deb] [--all-pkg]
+#                   [--windows] [--linux] [--all-platform] [--archive] [--rpm] [--deb] [--all-pkg] [--verify-pkg]
 #                   [--compile-only] [--lint-only] [--ignore-audit] [--testsuite]
 #                   [--sync-templates] [--git-sync]
 # ==============================================================================
@@ -86,9 +86,9 @@ export DIST_DIR
 #            after distribution packaging completes.
 cleanup_bin_dir() {
   if [ -d "${BIN_DIR}" ]; then
-    rm -rf "${BIN_DIR:?}"/* 2>/dev/null || true
+    rm -rf "${BIN_DIR:?}"/* 2> /dev/null || true
   fi
-  mkdir -p "${BIN_DIR}" 2>/dev/null || true
+  mkdir -p "${BIN_DIR}" 2> /dev/null || true
 }
 
 # ------------------------------------------------------------------------------
@@ -105,7 +105,7 @@ cleanup_orchestrator() {
   # Terminate any remaining background child processes
   if [ ${#CHILD_PIDS[@]} -gt 0 ]; then
     for pid in "${CHILD_PIDS[@]}"; do
-      kill "${pid}" 2>/dev/null || true
+      kill "${pid}" 2> /dev/null || true
     done
   fi
   # Clean up tracked temp directories
@@ -254,7 +254,7 @@ run_builds() {
   local has_packaging=false
   for flag in "${target_flags[@]}"; do
     case "${flag}" in
-      --archive|--rpm|--deb|--all-pkg|--all)
+      --archive | --rpm | --deb | --all-pkg | --all)
         has_packaging=true
         ;;
     esac
@@ -340,15 +340,15 @@ run_builds() {
       local finished_pid=""
       local job_exit=0
 
-      if wait -n -p finished_pid 2>/dev/null; then
+      if wait -n -p finished_pid 2> /dev/null; then
         job_exit=$?
       else
         job_exit=$?
         if [ -z "${finished_pid}" ]; then
           for pid in "${!job_pids[@]}"; do
-            if ! kill -0 "${pid}" 2>/dev/null; then
+            if ! kill -0 "${pid}" 2> /dev/null; then
               finished_pid="${pid}"
-              wait "${pid}" 2>/dev/null || true
+              wait "${pid}" 2> /dev/null || true
               break
             fi
           done
@@ -365,7 +365,7 @@ run_builds() {
         else
           echo "  [ERROR] Build failed for ${mod_name} (Exit code: ${job_exit}):" >&2
           echo "-------------------- Last 25 log lines (${mod_name}) --------------------" >&2
-          tail -n 25 "${mod_log}" 2>/dev/null || true >&2
+          tail -n 25 "${mod_log}" 2> /dev/null || true >&2
           echo "------------------------------------------------------------------------" >&2
           failed_repos+=("${mod_name}")
           [ ${first_error_code} -eq 0 ] && first_error_code=${job_exit}
@@ -389,7 +389,7 @@ run_builds() {
         if [ "${fail_fast}" = true ] && [ ${#failed_repos[@]} -gt 0 ]; then
           echo "ERROR: Fail-fast triggered. Halting further dispatches and terminating active jobs." >&2
           for pid in "${!job_pids[@]}"; do
-            kill "${pid}" 2>/dev/null || true
+            kill "${pid}" 2> /dev/null || true
           done
           break 2
         fi
@@ -414,7 +414,7 @@ run_builds() {
       reap_job
       if [ "${fail_fast}" = true ] && [ ${#failed_repos[@]} -gt 0 ]; then
         for pid in "${!job_pids[@]}"; do
-          kill "${pid}" 2>/dev/null || true
+          kill "${pid}" 2> /dev/null || true
         done
       fi
     done
@@ -466,7 +466,7 @@ Codebase Options:
   --code-base=<path> Set codebase directory containing sub-projects (default: ${DEFAULT_CODE_BASE})
 
 Parallel Execution Options:
-  --parallel         Execute module builds in parallel (default jobs: $(nproc 2>/dev/null || echo 4))
+  --parallel         Execute module builds in parallel (default jobs: $(nproc 2> /dev/null || echo 4))
   --jobs=N           Set maximum parallel jobs (e.g. --jobs=4)
   --fail-fast        Stop processing remaining builds on the first error
 
@@ -478,9 +478,10 @@ Platform Flags (forwarded to build_go.sh):
 Packaging Flags (forwarded to build_go.sh):
   --archive          Build release archive (.zip for Windows, .tar.xz for Linux)
                      and dedicated .sha256 hash files (default packaging action)
-  --rpm              Build RPM package in ../distrib/ (Linux target only)
-  --deb              Build DEB package in ../distrib/ (Linux target only)
-  --all-pkg          Build all release artifacts (--archive --rpm --deb on Linux)
+  --rpm              Build RPM package in ../distrib/ (Linux target; builds via WSL on Windows)
+  --deb              Build DEB package in ../distrib/ (Linux target; builds via WSL on Windows)
+  --all-pkg          Build all release artifacts (--archive --rpm --deb; builds via WSL on Windows)
+  --verify-pkg       Verify checksums, RPM/DEB metadata, and archive integrity in ../distrib/
   --sign             Sign release archives with default SSH key (~/.ssh/signing/release_key)
   --sign=<path>      Sign release archives with specified SSH private key
   --genkey           Generate Ed25519 signing key pair at ~/.ssh/signing/release_key and exit (requires --identity=<id>)
@@ -575,7 +576,7 @@ main() {
       --log=*)
         local user_log="${1#*=}"
         local log_dir abs_log
-        log_dir="$(mkdir -p "$(dirname "${user_log}")" 2>/dev/null && cd "$(dirname "${user_log}")" &>/dev/null && pwd)"
+        log_dir="$(mkdir -p "$(dirname "${user_log}")" 2> /dev/null && cd "$(dirname "${user_log}")" &> /dev/null && pwd)"
         abs_log="${log_dir}/$(basename "${user_log}")"
         build_flags+=("--log=${abs_log}")
         shift
@@ -610,11 +611,11 @@ main() {
         log_error "--comment requires a value. Format: --comment=<text>"
         exit "${EXIT_USAGE}"
         ;;
-      --genkey|--generate-key)
+      --genkey | --generate-key)
         generate_key_cmd="--genkey"
         shift
         ;;
-      --genkey=*|--generate-key=*)
+      --genkey=* | --generate-key=*)
         generate_key_cmd="$1"
         shift
         ;;
@@ -664,7 +665,7 @@ main() {
     git-sync)
       git_sync
       ;;
-    exec|"")
+    exec | "")
       run_builds "${is_parallel}" "${max_jobs}" "${fail_fast}" "${build_flags[@]}"
       ;;
   esac

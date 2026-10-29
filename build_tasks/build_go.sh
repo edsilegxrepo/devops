@@ -64,12 +64,11 @@
 #
 #  Syntax:
 #    ./build_go.sh [--windows] [--linux] [--all-platform]
-#                  [--archive] [--rpm] [--deb] [--all-pkg]
+#                  [--archive] [--rpm] [--deb] [--all-pkg] [--verify-pkg]
 #                  [--clean] [--compile-only] [--lint-only] [--ignore-audit] [--testsuite]
 #                  [--sign[=<key>]] [--genkey[=<path>]] [--identity=<id>]
 #                  [--update-modules] [--vendor] [--main-path=<path>] [--log=<file>]
 # ==============================================================================
-
 
 set -euo pipefail
 
@@ -138,7 +137,7 @@ finalize_artifact() {
       (
         cd "${dir_name}"
         rm -f "${base_name}.sig"
-        if ssh-keygen -Y sign -f "${SIGN_KEY}" -n file "${base_name}" >/dev/null 2>&1; then
+        if ssh-keygen -Y sign -f "${SIGN_KEY}" -n file "${base_name}" > /dev/null 2>&1; then
           log_success "Signature created: ${artifact_path}.sig"
         else
           log_error "Failed to create SSH signature for ${artifact_path}"
@@ -177,7 +176,7 @@ check_dependencies() {
 
   # Release archives
   if [ "${DO_ARCHIVE}" = true ]; then
-    if [ "${TARGET_LINUX}" = true ]; then
+    if [ "${TARGET_LINUX}" = true ] && [ "${DELEGATE_LINUX_TO_WSL:-false}" = false ]; then
       for tool in tar xz; do
         if ! command -v "${tool}" &> /dev/null; then
           missing+=("${tool}")
@@ -192,7 +191,7 @@ check_dependencies() {
   fi
 
   # Native Linux package managers
-  if [ "${TARGET_LINUX}" = true ]; then
+  if [ "${TARGET_LINUX}" = true ] && [ "${DELEGATE_LINUX_TO_WSL:-false}" = false ]; then
     if [ "${DO_DEB}" = true ] && ! command -v dpkg-deb &> /dev/null; then
       missing+=("dpkg-deb")
     fi
@@ -207,8 +206,19 @@ check_dependencies() {
       missing+=("ssh-keygen (OpenSSH)")
     fi
     if [ ! -f "${SIGN_KEY}" ]; then
-      log_error "SSH signing key not found at '${SIGN_KEY}'. Run '--genkey' to create one."
+      log_error "SSH signing private key not found at '${SIGN_KEY}'. Run '--genkey' to create one."
       exit "${EXIT_CONFIG}"
+    fi
+    if [ ! -f "${SIGN_KEY}.pub" ]; then
+      log_error "SSH signing public key not found at '${SIGN_KEY}.pub'. Run '--genkey' to create one."
+      exit "${EXIT_CONFIG}"
+    fi
+  fi
+
+  # C compiler dependency when CGO is enabled on Windows host
+  if [ "${USE_CGO:-false}" = true ] && [ "${TARGET_WIN}" = true ] && [ "${HOST_OS}" == "WIN" ]; then
+    if ! command -v gcc &> /dev/null; then
+      missing+=("gcc (MinGW-w64 required for Windows CGO compilation)")
     fi
   fi
 
@@ -237,9 +247,9 @@ Target Platforms:
 Packaging Actions:
   --archive           Build release archive (.zip for Windows, .tar.xz for Linux)
                       plus source archive and dedicated .sha256 hash files
-  --rpm               Build RPM package in ../distrib/ (Linux target only)
-  --deb               Build DEB package in ../distrib/ (Linux target only)
-  --all-pkg           Build all release artifacts (--archive --rpm --deb on Linux)
+  --rpm               Build RPM package in ../distrib/ (Linux target; builds via WSL on Windows)
+  --deb               Build DEB package in ../distrib/ (Linux target; builds via WSL on Windows)
+  --all-pkg           Build all release artifacts (--archive --rpm --deb on Linux; builds via WSL on Windows)
   --sign              Sign release archives with default SSH key (~/.ssh/signing/release_key)
   --sign=<path>       Sign release archives with specified SSH private key
   --genkey            Generate Ed25519 signing key pair at ~/.ssh/signing/release_key and exit (requires --identity=<id>)
@@ -256,11 +266,13 @@ Operational Options:
   --update-modules    Force update of Go modules (go get -u -t ./...)
   --vendor            Synchronize vendor directory (go mod vendor)
   --main-path=<path>  Override entrypoint path defined in build.json
+  --verify-pkg        Verify package metadata, checksums, and integrity (additive or standalone)
   --log=<file>        Append all operations to an NDJSON audit log file
   --help              Show this help message
 
 Behavior:
-  - If neither --windows nor --linux is passed, defaults to the current host OS.
+  - If neither --windows nor --linux is passed, defaults to the current host OS (or Linux if --rpm/--deb passed).
+  - On Windows hosts, Linux packaging actions (--rpm, --deb, --archive) are executed transparently via WSL.
   - If no packaging flag (--archive, --rpm, --deb) is passed, only builds binary in ../bin.
   - Generates parallel-safe per-archive checksums (<archive>.sha256).
 
@@ -308,9 +320,9 @@ fi
 BINDIR="${BIN_DIR:-${DEFAULT_BIN_DIR}}"
 DISTDIR="${DIST_DIR:-${DEFAULT_DIST_DIR}}"
 
-if [ "${HOST_OS}" == "WIN" ] && command -v cygpath &> /dev/null; then
-  BINDIR="$(cygpath -m "${BINDIR}")"
-  DISTDIR="$(cygpath -m "${DISTDIR}")"
+if [ "${HOST_OS}" == "WIN" ]; then
+  BINDIR="$(normalize_to_mixed_path "${BINDIR}")"
+  DISTDIR="$(normalize_to_mixed_path "${DISTDIR}")"
 fi
 
 mkdir -p "${BINDIR}" "${DISTDIR}"
@@ -324,6 +336,8 @@ TARGET_LINUX=false
 DO_ARCHIVE=false
 DO_RPM=false
 DO_DEB=false
+DO_ALL_PKG=false
+DO_VERIFY_PKG=false
 DO_SIGN=false
 SIGN_KEY=""
 GENERATE_KEY=false
@@ -378,13 +392,12 @@ while [ $# -gt 0 ]; do
       HAS_ACTION=true
       shift
       ;;
-    --all-pkg|--all)
+    --all-pkg | --all)
+      DO_ALL_PKG=true
       DO_ARCHIVE=true
+      DO_RPM=true
+      DO_DEB=true
       HAS_ACTION=true
-      if [ "${HOST_OS}" == "LINUX" ]; then
-        DO_RPM=true
-        DO_DEB=true
-      fi
       shift
       ;;
     --compile-only)
@@ -403,6 +416,11 @@ while [ $# -gt 0 ]; do
       ;;
     --testsuite)
       RUN_TESTSUITE=true
+      HAS_ACTION=true
+      shift
+      ;;
+    --verify-pkg | --verify-packages)
+      DO_VERIFY_PKG=true
       HAS_ACTION=true
       shift
       ;;
@@ -458,12 +476,12 @@ while [ $# -gt 0 ]; do
       log_error "--comment requires a value. Format: --comment=<text>"
       usage "${EXIT_USAGE}"
       ;;
-    --genkey|--generate-key)
+    --genkey | --generate-key)
       GENERATE_KEY=true
       GENERATE_KEY_PATH="${DEFAULT_SIGN_KEY}"
       shift
       ;;
-    --genkey=*|--generate-key=*)
+    --genkey=* | --generate-key=*)
       GENERATE_KEY=true
       GENERATE_KEY_PATH="${1#*=}"
       shift
@@ -483,37 +501,94 @@ if [ "${GENERATE_KEY}" = true ]; then
 fi
 
 if [ -n "${NDJSON_LOG_FILE}" ]; then
-  LOG_DIR_PATH="$(mkdir -p "$(dirname "${NDJSON_LOG_FILE}")" 2>/dev/null && cd "$(dirname "${NDJSON_LOG_FILE}")" &>/dev/null && pwd)"
+  LOG_DIR_PATH="$(mkdir -p "$(dirname "${NDJSON_LOG_FILE}")" 2> /dev/null && cd "$(dirname "${NDJSON_LOG_FILE}")" &> /dev/null && pwd)"
   NDJSON_LOG_FILE="${LOG_DIR_PATH}/$(basename "${NDJSON_LOG_FILE}")"
-  touch "${NDJSON_LOG_FILE}" 2>/dev/null || true
+  touch "${NDJSON_LOG_FILE}" 2> /dev/null || true
 fi
 
 if [ "${DO_SIGN}" = true ]; then
   SIGN_KEY="$(resolve_signing_key_path "${SIGN_KEY}")"
 fi
 
-# If no target platform was specified, default to the current host OS
+# Target Platform Resolution
 if [ "${TARGET_WIN}" = false ] && [ "${TARGET_LINUX}" = false ]; then
   if [ "${HOST_OS}" == "WIN" ]; then
-    TARGET_WIN=true
+    if [ "${DO_ALL_PKG}" = true ]; then
+      # If --all-pkg was passed without platform flags on Windows, target both
+      TARGET_WIN=true
+      TARGET_LINUX=true
+    elif [ "${DO_RPM}" = true ] || [ "${DO_DEB}" = true ]; then
+      TARGET_LINUX=true
+    else
+      TARGET_WIN=true
+    fi
   else
     TARGET_LINUX=true
   fi
 fi
 
 # ------------------------------------------------------------------------------
-# Windows Host Handling (Cygwin / MSYS2 Environment Filter)
+# Windows Host & WSL Delegation Readiness
 # ------------------------------------------------------------------------------
-if [ "${HOST_OS}" == "WIN" ]; then
-  # Inform and ignore native Linux package managers (RPM / DEB) on Windows
-  if [ "${DO_RPM}" = true ]; then
-    log_info "--rpm is ignored on Windows (native Linux package managers are unsupported on Windows hosts)."
-    DO_RPM=false
+CONFIG_FILE="${CONFIG_FILE:-${DEFAULT_CONFIG_FILE}}"
+RAW_CGO="false"
+if [ -f "${CONFIG_FILE}" ]; then
+  RAW_CGO="$(parse_json_field "${CONFIG_FILE}" "cgo" "false")"
+fi
+USE_CGO=false
+if [ "${RAW_CGO,,}" = "true" ] || [ "${RAW_CGO}" = "1" ]; then
+  USE_CGO=true
+fi
+
+DELEGATE_LINUX_TO_WSL=false
+if [ "${HOST_OS}" == "WIN" ] && [ "${TARGET_LINUX}" = true ]; then
+  # If any Linux packaging action or CGO compilation is requested, delegate to WSL
+  if [ "${DO_ARCHIVE}" = true ] || [ "${DO_RPM}" = true ] || [ "${DO_DEB}" = true ] || [ "${USE_CGO}" = true ]; then
+    if ! check_wsl_available; then
+      log_error "WSL is required on Windows for Linux release packages or CGO builds. Please ensure WSL is installed."
+      exit "${EXIT_DEPENDENCY}"
+    fi
+    DELEGATE_LINUX_TO_WSL=true
   fi
-  if [ "${DO_DEB}" = true ]; then
-    log_info "--deb is ignored on Windows (native Linux package managers are unsupported on Windows hosts)."
-    DO_DEB=false
+fi
+
+WSL_FORWARDED_ARGS=()
+
+# Helper to construct forwarded flags for WSL delegation (DRY)
+build_wsl_forwarded_args() {
+  WSL_FORWARDED_ARGS=("--linux")
+  [ "${DO_ARCHIVE}" = true ] && WSL_FORWARDED_ARGS+=("--archive")
+  [ "${DO_RPM}" = true ] && WSL_FORWARDED_ARGS+=("--rpm")
+  [ "${DO_DEB}" = true ] && WSL_FORWARDED_ARGS+=("--deb")
+  [ "${DO_VERIFY_PKG}" = true ] && WSL_FORWARDED_ARGS+=("--verify-pkg")
+  [ "${COMPILE_ONLY}" = true ] && WSL_FORWARDED_ARGS+=("--compile-only")
+  [ "${LINT_ONLY}" = true ] && WSL_FORWARDED_ARGS+=("--lint-only")
+  [ "${IGNORE_AUDIT}" = true ] && WSL_FORWARDED_ARGS+=("--ignore-audit")
+  [ "${RUN_TESTSUITE}" = true ] && WSL_FORWARDED_ARGS+=("--testsuite")
+  [ "${UPDATE_MODULES}" = true ] && WSL_FORWARDED_ARGS+=("--update-modules")
+  [ "${SYNC_VENDOR}" = true ] && WSL_FORWARDED_ARGS+=("--vendor")
+  [ -n "${MAIN_PATH_OVERRIDE}" ] && WSL_FORWARDED_ARGS+=("--main-path=${MAIN_PATH_OVERRIDE}")
+  if [ "${DO_CLEAN}" = true ] && [ "${TARGET_WIN}" = false ]; then
+    WSL_FORWARDED_ARGS+=("--clean")
   fi
+  if [ "${DO_SIGN}" = true ]; then
+    WSL_FORWARDED_ARGS+=("--sign=$(mixed_to_wsl_path "${SIGN_KEY}")")
+  fi
+  if [ -n "${NDJSON_LOG_FILE:-}" ]; then
+    WSL_FORWARDED_ARGS+=("--log=$(mixed_to_wsl_path "${NDJSON_LOG_FILE}")")
+  fi
+}
+
+# If only Linux is targeted and WSL delegation is active on Windows, dispatch immediately
+if [ "${DELEGATE_LINUX_TO_WSL}" = true ] && [ "${TARGET_WIN}" = false ]; then
+  log_info "Delegating Linux build and packaging to WSL (default distribution)..."
+  wsl_script="$(mixed_to_wsl_path "${BASH_SOURCE[0]}")"
+  wsl_cwd="$(mixed_to_wsl_path "$(pwd)")"
+  wsl_bindir="$(mixed_to_wsl_path "${BINDIR}")"
+  wsl_distdir="$(mixed_to_wsl_path "${DISTDIR}")"
+  build_wsl_forwarded_args
+  run_in_wsl "${wsl_cwd}" env BIN_DIR="${wsl_bindir}" DIST_DIR="${wsl_distdir}" bash "${wsl_script}" "${WSL_FORWARDED_ARGS[@]}"
+  exit $?
 fi
 
 CONFIG_FILE="${CONFIG_FILE:-${DEFAULT_CONFIG_FILE}}"
@@ -548,6 +623,8 @@ APP_NAME="$(parse_json_field "${CONFIG_FILE}" "name" "$(basename "$(pwd)")")"
 VERSION="$(parse_json_field "${CONFIG_FILE}" "version" "${DEFAULT_VERSION}")"
 RELEASE="$(parse_json_field "${CONFIG_FILE}" "release" "${DEFAULT_RELEASE}")"
 CHANNEL="$(parse_json_field "${CONFIG_FILE}" "channel" "${DEFAULT_CHANNEL}")"
+export CHANNEL
+RAW_HISTORY="$(parse_json_history "${CONFIG_FILE}")"
 MAIN_PATH="$(parse_json_field "${CONFIG_FILE}" "entrypoint" "${DEFAULT_ENTRYPOINT}")"
 VERSION_PKG="$(parse_json_field "${CONFIG_FILE}" "version_pkg" "${DEFAULT_VERSION_PKG}")"
 BUILD_PKG="$(parse_json_field "${CONFIG_FILE}" "build_pkg" "${DEFAULT_BUILD_PKG}")"
@@ -556,9 +633,15 @@ RAW_DESCRIPTION="$(parse_json_field "${CONFIG_FILE}" "description" "${APP_NAME} 
 RAW_MAINTAINER="$(parse_json_field "${CONFIG_FILE}" "maintainer" "${DEFAULT_MAINTAINER}")"
 RAW_LICENSE="$(parse_json_field "${CONFIG_FILE}" "license" "${DEFAULT_LICENSE}")"
 RAW_URL="$(parse_json_field "${CONFIG_FILE}" "url" "${DEFAULT_URL}")"
+RAW_GROUP="$(parse_json_field "${CONFIG_FILE}" "group" "${DEFAULT_GROUP}")"
 SECTION="$(parse_json_field "${CONFIG_FILE}" "section" "${DEFAULT_SECTION}")"
 PRIORITY="$(parse_json_field "${CONFIG_FILE}" "priority" "${DEFAULT_PRIORITY}")"
 INSTALL_PATH="$(parse_json_field "${CONFIG_FILE}" "install_path" "${DEFAULT_INSTALL_PATH}")"
+RAW_CGO="$(parse_json_field "${CONFIG_FILE}" "cgo" "false")"
+USE_CGO=false
+if [ "${RAW_CGO,,}" = "true" ] || [ "${RAW_CGO}" = "1" ]; then
+  USE_CGO=true
+fi
 
 if [ -n "${MAIN_PATH_OVERRIDE}" ]; then
   MAIN_PATH="${MAIN_PATH_OVERRIDE}"
@@ -567,26 +650,31 @@ fi
 # Git Hash Resolution
 GIT_HASH="unknown"
 if command -v git &> /dev/null && git rev-parse --is-inside-work-tree &> /dev/null; then
-  GIT_HASH="$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+  GIT_HASH="$(git rev-parse --short HEAD 2> /dev/null || echo "unknown")"
 fi
 
-# Release & Distribution Tags
-OS_VER="${DEFAULT_OS_VER}"
-if [ -f /etc/distrib ]; then
-  OS_VER="$(cat /etc/distrib 2>/dev/null || echo "${DEFAULT_OS_VER}")"
-elif [ -f /etc/os-release ]; then
-  OS_VER="$(grep -E '^ID=' /etc/os-release | cut -d= -f2 | tr -d '"' 2>/dev/null || echo "${DEFAULT_OS_VER}")"
-fi
-
-RPM_RELEASE="${RELEASE}.${OS_VER}.${CHANNEL}"
-DEB_VERSION="${VERSION}-${RELEASE}.${OS_VER}.${CHANNEL}"
+# Release & Version Tags
+RPM_RELEASE="${RELEASE}"
+DEB_VERSION="${VERSION}-${RELEASE}"
 DIST_BASE="${DISTDIR}/${APP_NAME}-${VERSION}"
-ARCH="$(dpkg --print-architecture 2>/dev/null || echo "${DEFAULT_ARCH}")"
+ARCH="$(dpkg --print-architecture 2> /dev/null || echo "${DEFAULT_ARCH}")"
 [ -z "${ARCH}" ] && ARCH="${DEFAULT_ARCH}"
 
 # Multi-threaded XZ compression & secure proxy
 export GOPROXY="${DEFAULT_GOPROXY}"
 export XZ_OPT="${DEFAULT_XZ_OPT}"
+
+# Standalone Package Verification Gate
+if [ "${DO_VERIFY_PKG}" = true ] && [ "${HAS_PACKAGING}" = false ] && [ "${COMPILE_ONLY}" = false ] && [ "${RUN_TESTSUITE}" = false ] && [ "${LINT_ONLY}" = false ] && [ "${DO_CLEAN}" = false ]; then
+  log_info "Executing standalone package verification for ${APP_NAME} in ${DISTDIR}..."
+  if verify_package_artifacts "${APP_NAME}" "${CONFIG_FILE}" "${DISTDIR}"; then
+    log_success "Package verification passed for ${APP_NAME}."
+    exit "${EXIT_SUCCESS}"
+  else
+    log_error "Package verification failed for ${APP_NAME}."
+    exit "${EXIT_PACKAGE}"
+  fi
+fi
 
 # ------------------------------------------------------------------------------
 # Quality Assurance, Test Suite & Security Audit Phase
@@ -653,7 +741,7 @@ if [ "${COMPILE_ONLY}" = false ]; then
   log_info "Linting and static analysis"
   LINT_ERR=0
   if command -v gofumpt &> /dev/null; then
-    gofumpt -l -w -extra . 2>/dev/null || true
+    gofumpt -l -w -extra . 2> /dev/null || true
   fi
 
   if ! go vet ./...; then
@@ -728,7 +816,7 @@ fi
 #   $2 - Target binary filename (e.g. '${APP_NAME}' or '${APP_NAME}.exe').
 #   $3 - (Optional) Extra linker or compiler flags (e.g. '-tags netgo').
 # Architecture & Security:
-#   - Enforces CGO_ENABLED=0 to eliminate external glibc/musl dynamic runtime dependencies.
+#   - Configures CGO_ENABLED (defaults to 0 for static binaries; 1 when "cgo": true in build.json).
 #   - Applies -trimpath to remove developer machine filesystem paths from binary stack traces.
 #   - Injects semantic version and Git commit hash via -ldflags -X symbols.
 #   - Compiles to a temporary file (${tmp_bin}) before atomically moving into ${BINDIR}.
@@ -755,8 +843,13 @@ compile_target_binary() {
   cmd+=(-o "${tmp_bin}")
   [ -n "${MAIN_PATH}" ] && cmd+=("${MAIN_PATH}")
 
-  if ! CGO_ENABLED=0 GOOS="${target_os}" GOARCH="${ARCH}" "${cmd[@]}"; then
-    rm -f "${tmp_bin}" 2>/dev/null || true
+  local cgo_setting="0"
+  if [ "${USE_CGO}" = true ]; then
+    cgo_setting="1"
+  fi
+
+  if ! CGO_ENABLED="${cgo_setting}" GOOS="${target_os}" GOARCH="${ARCH}" "${cmd[@]}"; then
+    rm -f "${tmp_bin}" 2> /dev/null || true
     log_error "${target_desc} compilation failed."
     exit "${EXIT_COMPILE}"
   fi
@@ -766,12 +859,12 @@ compile_target_binary() {
   log_success "Compiled: ${bin_path}"
 
   if [ "${HOST_OS}" == "${host_match}" ]; then
-    "${bin_path}" --version 2>/dev/null || true
+    "${bin_path}" --version 2> /dev/null || true
   fi
 }
 
 # 1. Compile Static Linux Binary (Single binary reused across tarball, RPM, and DEB)
-if [ "${TARGET_LINUX}" = true ]; then
+if [ "${TARGET_LINUX}" = true ] && [ "${DELEGATE_LINUX_TO_WSL}" = false ]; then
   compile_target_binary "linux" "${APP_NAME}" "${DEFAULT_LINUX_EXTRA_FLAGS}"
 fi
 
@@ -792,7 +885,7 @@ for doc in "${DEFAULT_DOC_FILES[@]}"; do
 done
 
 # 1. Package Linux Tarball Archive (.tar.xz) if --archive passed for Linux target
-if [ "${TARGET_LINUX}" = true ] && [ "${DO_ARCHIVE}" = true ]; then
+if [ "${TARGET_LINUX}" = true ] && [ "${DO_ARCHIVE}" = true ] && [ "${DELEGATE_LINUX_TO_WSL}" = false ]; then
   log_info "Packaging Linux Tarball Archive"
   STAGE_ARC="$(make_temp_dir "arc_${APP_NAME}")"
   mkdir -p "${STAGE_ARC}/doc"
@@ -819,7 +912,7 @@ if [ "${TARGET_WIN}" = true ] && [ "${DO_ARCHIVE}" = true ]; then
   for doc in "${DOC_FILES[@]}"; do
     cp -af "${doc}" "${STAGE_WIN}/doc/"
     if command -v unix2dos &> /dev/null; then
-      unix2dos -k -q "${STAGE_WIN}/doc/$(basename "${doc}")" 2>/dev/null || true
+      unix2dos -k -q "${STAGE_WIN}/doc/$(basename "${doc}")" 2> /dev/null || true
     fi
   done
 
@@ -833,7 +926,7 @@ if [ "${TARGET_WIN}" = true ] && [ "${DO_ARCHIVE}" = true ]; then
 fi
 
 # 3. Package Debian .deb (Static binary + docs + md5sums + control)
-if [ "${TARGET_LINUX}" = true ] && [ "${DO_DEB}" = true ]; then
+if [ "${TARGET_LINUX}" = true ] && [ "${DO_DEB}" = true ] && [ "${DELEGATE_LINUX_TO_WSL}" = false ]; then
   if ! command -v dpkg-deb &> /dev/null; then
     log_error "dpkg-deb not found. Cannot build Debian package."
     exit "${EXIT_DEPENDENCY}"
@@ -851,6 +944,14 @@ if [ "${TARGET_LINUX}" = true ] && [ "${DO_DEB}" = true ]; then
   for doc in "${DOC_FILES[@]}"; do
     cp -af "${doc}" "${STAGE_DEB}/usr/share/doc/${APP_NAME}/"
   done
+
+  # Generate Debian RFC 822 changelog and compressed archive
+  DEB_DOC_DIR="${STAGE_DEB}/usr/share/doc/${APP_NAME}"
+  format_deb_changelog "${APP_NAME}" "${RAW_HISTORY}" "${VERSION}" "${RELEASE}" "stable" "${RAW_MAINTAINER}" > "${DEB_DOC_DIR}/changelog.Debian"
+  gzip -9nc "${DEB_DOC_DIR}/changelog.Debian" > "${DEB_DOC_DIR}/changelog.Debian.gz"
+  rm -f "${DEB_DOC_DIR}/changelog.Debian"
+  chmod 0644 "${DEB_DOC_DIR}/changelog.Debian.gz"
+  (cd "${DEB_DOC_DIR}" && ln -sf changelog.Debian.gz changelog.gz)
 
   INSTALLED_SIZE=$(du -sk --exclude=DEBIAN "${STAGE_DEB}" | cut -f1)
 
@@ -870,11 +971,11 @@ Description: ${RAW_SUMMARY}
 ${DEB_FORMATTED_DESC}
 EOF
 
-  (cd "${STAGE_DEB}" && find usr -type f -exec md5sum {} + > DEBIAN/md5sums 2>/dev/null || true)
-  chmod 0644 "${STAGE_DEB}/DEBIAN/control" "${STAGE_DEB}/DEBIAN/md5sums" 2>/dev/null || true
+  (cd "${STAGE_DEB}" && find usr -type f -exec md5sum {} + > DEBIAN/md5sums 2> /dev/null || true)
+  chmod 0644 "${STAGE_DEB}/DEBIAN/control" "${STAGE_DEB}/DEBIAN/md5sums" 2> /dev/null || true
 
   DEB_FILE="${DIST_BASE}-linux_${ARCH}.deb"
-  if ! dpkg-deb --build --root-owner-group "${STAGE_DEB}" "${DEB_FILE}" >/dev/null; then
+  if ! dpkg-deb --build --root-owner-group "${STAGE_DEB}" "${DEB_FILE}" > /dev/null; then
     log_error "dpkg-deb packaging failed."
     exit "${EXIT_PACKAGE}"
   fi
@@ -883,7 +984,7 @@ EOF
 fi
 
 # 4. Package RPM .rpm (Static binary + docs via rpmbuild)
-if [ "${TARGET_LINUX}" = true ] && [ "${DO_RPM}" = true ]; then
+if [ "${TARGET_LINUX}" = true ] && [ "${DO_RPM}" = true ] && [ "${DELEGATE_LINUX_TO_WSL}" = false ]; then
   if ! command -v rpmbuild &> /dev/null; then
     log_error "rpmbuild not found. Cannot build RPM package."
     exit "${EXIT_DEPENDENCY}"
@@ -913,16 +1014,19 @@ install -p -m 0644 \"%{_builddir}/$(basename "${doc}")\" \"%{buildroot}/usr/shar
 
   # Sanitize spec variables to escape % macros
   RPM_SPEC_SUMMARY="$(sanitize_rpm_spec_string "${RAW_SUMMARY}")"
+  RPM_SPEC_GROUP="$(sanitize_rpm_spec_string "${RAW_GROUP}")"
   RPM_SPEC_DESC="$(sanitize_rpm_spec_string "${RAW_DESCRIPTION}")"
   RPM_SPEC_MAINT="$(sanitize_rpm_spec_string "${RAW_MAINTAINER}")"
   RPM_SPEC_LIC="$(sanitize_rpm_spec_string "${RAW_LICENSE}")"
   RPM_SPEC_URL="$(sanitize_rpm_spec_string "${RAW_URL}")"
+  RPM_SPEC_CHANGELOG="$(format_rpm_changelog "${RAW_HISTORY}" "${VERSION}" "${RELEASE}" "${RPM_SPEC_MAINT}" "${DATE_STR}")"
 
   cat << EOF > "${SPEC_FILE}"
 Name:           ${APP_NAME}
 Version:        ${VERSION}
 Release:        ${RPM_RELEASE}
 Summary:        ${RPM_SPEC_SUMMARY}
+Group:          ${RPM_SPEC_GROUP}
 License:        ${RPM_SPEC_LIC}
 URL:            ${RPM_SPEC_URL}
 Packager:       ${RPM_SPEC_MAINT}
@@ -945,11 +1049,10 @@ ${INSTALL_PATH}/${APP_NAME}
 ${DOC_FILES_SNIPPET}
 
 %changelog
-* ${DATE_STR} ${RPM_SPEC_MAINT} - ${VERSION}-${RPM_RELEASE}
-- Static binary package for universal Linux distribution
+${RPM_SPEC_CHANGELOG}
 EOF
 
-  if ! rpmbuild --define "_topdir ${RPM_TOPDIR}" -bb "${SPEC_FILE}" >/dev/null; then
+  if ! rpmbuild --define "_topdir ${RPM_TOPDIR}" -bb "${SPEC_FILE}" > /dev/null; then
     log_error "rpmbuild failed to create package."
     rm -rf "${RPM_TOPDIR}"
     exit "${EXIT_PACKAGE}"
@@ -972,7 +1075,7 @@ fi
 # Securely excludes sensitive files (.env*, tokens, certificates, private keys)
 SOURCE_EXCLUDES=("${DEFAULT_SOURCE_EXCLUDES[@]}")
 
-if [ "${DO_ARCHIVE}" = true ]; then
+if [ "${DO_ARCHIVE}" = true ] && [ "${DELEGATE_LINUX_TO_WSL}" = false ]; then
   log_info "Packaging Source Archive"
   if [ "${TARGET_WIN}" = true ] && [ "${TARGET_LINUX}" = false ]; then
     SRC_ARC="${DIST_BASE}-src.zip"
@@ -990,11 +1093,35 @@ if [ "${DO_ARCHIVE}" = true ]; then
   finalize_artifact "${SRC_ARC}"
 fi
 
-# 6. Intermediate Binary Cleanup (if packaging was requested)
+# 6. WSL Delegation Dispatch for Dual-Target Builds (Windows Host -> WSL)
+if [ "${DELEGATE_LINUX_TO_WSL}" = true ] && [ "${TARGET_WIN}" = true ]; then
+  log_info "Delegating Linux build and packaging to WSL (default distribution)..."
+  wsl_script="$(mixed_to_wsl_path "${BASH_SOURCE[0]}")"
+  wsl_cwd="$(mixed_to_wsl_path "$(pwd)")"
+  wsl_bindir="$(mixed_to_wsl_path "${BINDIR}")"
+  wsl_distdir="$(mixed_to_wsl_path "${DISTDIR}")"
+  build_wsl_forwarded_args
+  if ! run_in_wsl "${wsl_cwd}" env BIN_DIR="${wsl_bindir}" DIST_DIR="${wsl_distdir}" bash "${wsl_script}" "${WSL_FORWARDED_ARGS[@]}"; then
+    log_error "WSL Linux packaging build failed."
+    exit "${EXIT_PACKAGE}"
+  fi
+fi
+
+# 7. Post-Packaging Verification Gate (if --verify-pkg was requested)
+if [ "${DO_VERIFY_PKG}" = true ]; then
+  log_info "Executing post-packaging verification gate for ${APP_NAME} in ${DISTDIR}..."
+  if ! verify_package_artifacts "${APP_NAME}" "${CONFIG_FILE}" "${DISTDIR}"; then
+    log_error "Post-packaging verification gate failed for ${APP_NAME}."
+    exit "${EXIT_PACKAGE}"
+  fi
+  log_success "Post-packaging verification gate passed for ${APP_NAME}."
+fi
+
+# 8. Intermediate Binary Cleanup (if packaging was requested)
 if [ "${HAS_PACKAGING}" = true ]; then
   log_info "Cleaning up intermediate binaries for ${APP_NAME} in ${BINDIR}"
-  rm -f "${BINDIR}/${APP_NAME}" "${BINDIR}/${APP_NAME}.exe" "${BINDIR}/${APP_NAME}.tmp."* 2>/dev/null || true
-  mkdir -p "${BINDIR}" 2>/dev/null || true
+  rm -f "${BINDIR}/${APP_NAME}" "${BINDIR}/${APP_NAME}.exe" "${BINDIR}/${APP_NAME}.tmp."* 2> /dev/null || true
+  mkdir -p "${BINDIR}" 2> /dev/null || true
 fi
 
 echo "================================================================================"

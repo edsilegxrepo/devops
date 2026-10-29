@@ -162,7 +162,7 @@ cleanup_on_interrupt() {
   local exit_status=$?
   if [[ "${CLONING_IN_PROGRESS}" == "true" && -n "${CODE_BASE}" && -n "${PROJECT}" && -d "${CODE_BASE}/${PROJECT}" ]]; then
     echo -e "\n>> Interrupted during git clone. Cleaning up partial directory..." >&2
-    rm -rf "${CODE_BASE:?}/${PROJECT:?}" 2>/dev/null || true
+    rm -rf "${CODE_BASE:?}/${PROJECT:?}" 2> /dev/null || true
   fi
   exit "${exit_status}"
 }
@@ -179,7 +179,7 @@ trap cleanup_on_interrupt INT TERM
 # ------------------------------------------------------------------------------
 usage() {
   local exit_code="${1:-${EXIT_SUCCESS}}"
-  cat <<EOF
+  cat << EOF
 Usage: $(basename "$0") --mode <git-clone|local> --code-base <path> --project <project> --custom-objects <path> [options]
 
 Required Arguments:
@@ -237,7 +237,7 @@ while [[ $# -gt 0 ]]; do
       GIT_URL="$2"
       shift 2
       ;;
-    --help|-h)
+    --help)
       usage "${EXIT_SUCCESS}"
       ;;
     *)
@@ -364,7 +364,7 @@ fi
 
 # Ensure build engine has execute permissions
 if [[ ! -x "${BUILD_GO_SCRIPT}" ]]; then
-  chmod +x "${BUILD_GO_SCRIPT}" 2>/dev/null || true
+  chmod +x "${BUILD_GO_SCRIPT}" 2> /dev/null || true
   if [[ ! -x "${BUILD_GO_SCRIPT}" ]]; then
     abort "${EXIT_CONFIG}" "Build engine script is not executable: ${BUILD_GO_SCRIPT}"
   fi

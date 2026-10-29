@@ -26,10 +26,12 @@ This document provides the architectural specification, operational sequence bre
 
 ### Core Objectives
 * **Single Static Binary Parity:** Compiles 100% static binaries (`CGO_ENABLED=0`) on Linux, eliminating external `glibc`/`musl` dependencies and reusing a single binary across Tarball archives, Debian packages, and RPM packages.
-* **Cygwin / MSYS2 Windows Support:** Native Windows execution without WSL requirements; cross-compiles for Linux natively via Go (`GOOS=linux`) and builds Windows executables (`.exe`) and Zip archives using host utilities.
+* **Windows Feature Parity via WSL Delegation:** Native Windows execution with full Linux packaging and compilation parity. Standalone Windows compilation and zipball packaging run on the Windows host, while Linux packaging actions (`--rpm`, `--deb`, `--archive`, `--all-pkg`) and CGO-enabled Linux builds (`"cgo": true` in `build.json`) are transparently delegated to the default WSL distribution (`AlmaLinuxOS-9`). Paths are normalized to canonical mixed format (`drive:/path/sub`) and WSL mount paths (`/mnt/drive/path/sub`).
+* **CGO Cross-Platform Delegation:** Enables full CGO support (`CGO_ENABLED=1`) when `"cgo": true` is defined in `build.json`. When invoked on Windows, Linux CGO builds automatically route through WSL to compile against the native Linux C toolchain (`gcc`), eliminating complex cross-compilers.
 * **Metadata Autodetection via `build.json`:** Extracts application settings, semantic versions, entrypoints, and packaging metadata dynamically from `build.json`, backed by a robust multi-engine fallback parser.
 * **Zero-Trust Quality Assurance & Testing:** Enforces automated test suites with coverage (`--testsuite`), formatting (`gofumpt`), static analysis (`go vet`, `golangci-lint`), and security vulnerability detection (`govulncheck`, `gosec`).
 * **Orthogonal Platform & Packaging Controls:** Decouples platform targets (`--windows`, `--linux`, `--all-platform`) from packaging formats (`--archive`, `--rpm`, `--deb`, `--all-pkg`), allowing flexible matrix builds.
+* **Automated Package Verification Engine (`--verify-pkg`):** Deep inspection gate for distribution packages in `../distrib/`. Verifies SHA256 checksums, RPM spec metadata (via WSL on Windows), Debian control fields (via WSL on Windows), and archive integrity/contents.
 * **Parallel-Safe Integrity & Code Signing:** Generates dedicated per-archive `.sha256` checksums and optional Ed25519 OpenSSH digital signatures (`.sig`) without concurrency locking.
 * **Intermediate Binary Cleanup:** Automatically cleans intermediate binaries in `../bin/` (relative to `CODE_HOME`) after packaging into `../distrib/`, preserving disk space and preventing stale binary reuse.
 * **Artifact Lifecycle Management:** Supports `--clean` to cleanly wipe previously built module binaries and distribution packages.
@@ -130,10 +132,15 @@ The build engine dynamically discovers project and compiler metadata from `build
   "maintainer": "Critical Systems <mis@criticalsys.net>",
   "license": "MIT",
   "url": "https://criticalsys.net",
+  "group": "Applications/System",
   "section": "utils",
   "priority": "optional",
   "install_path": "/usr/local/bin",
-  "cgo": false
+  "cgo": false,
+  "history": [
+    "* Wed Oct 21 2026 Mis Center <support@criticalsys.net> - <version>-<release>",
+    "- Updated to new upstream release"
+  ]
 }
 ```
 
@@ -141,7 +148,7 @@ The build engine dynamically discovers project and compiler metadata from `build
 | :--- | :--- | :--- | :--- |
 | `name` | String | `$(basename $(pwd))` | Name of the compiled binary and base package name. |
 | `version` | String | `0.1.0` | Base semantic version string (e.g. `1.0.5`). |
-| `release` | String | `1` | Packaging release increment. Combined with OS ID and channel for RPM/DEB tags. |
+| `release` | String | `1` | Packaging release increment. Used directly for RPM Release tag and Debian package Version. |
 | `channel` | String | `xg` | Distribution channel (e.g. `xg`, `release`, `stable`, `beta`). |
 | `entrypoint` | String | `.` | Relative path to the Go main package (can be overridden via `--main-path=<path>`). |
 | `version_pkg` | String | `main.version` | Target Go variable symbol for version injection (`-X ${version_pkg}=${version}`). |
@@ -151,10 +158,12 @@ The build engine dynamically discovers project and compiler metadata from `build
 | `maintainer` | String | `Mis Center <support@criticalsys.net>` | Package maintainer name and email address. |
 | `license` | String | `MIT` | Open source or proprietary software license identifier. |
 | `url` | String | `https://criticalsys.net` | Corporate or project homepage URL. |
+| `group` | String | `Applications/System` | RPM package group classification (e.g. `Applications/System`, `Development/Tools`). |
 | `section` | String | `utils` | Debian package repository classification. |
 | `priority` | String | `optional` | Debian package priority level. |
 | `install_path` | String | `/usr/bin` | Destination directory where the binary is installed in DEB and RPM packages. |
-| `cgo` | Boolean | `false` | Specifies whether CGO dynamic linking is disabled (enforcing 100% static compilation). |
+| `cgo` | Boolean | `false` | When `true`, enables CGO compilation (`CGO_ENABLED=1`). On Windows hosts, Linux compilation is transparently delegated to WSL to use native GCC. When `false`, enforces pure static compilation (`CGO_ENABLED=0`). |
+| `history` | Array / String | *(Default changelog)* | Packaging changelog history. Dynamically formats RPM `%changelog` and Debian RFC 822 `/usr/share/doc/<app>/changelog.Debian.gz`. Tokens `<version>` and `<release>` substitute strictly with `${VERSION}` and `${RELEASE}` (e.g. `0.2.1-1`). |
 
 ### Go Code Variable Injection Example
 
@@ -220,6 +229,7 @@ When packaging flags are supplied, artifacts are staged in isolated temporary di
 * **Structure:** 
   - Binary installed to `${INSTALL_PATH}/${APP_NAME}` (`chmod 0755`)
   - Documentation installed to `/usr/share/doc/${APP_NAME}/`
+  - RFC 822 changelog installed to `/usr/share/doc/${APP_NAME}/changelog.Debian.gz` (with symlink `changelog.gz`)
   - Computed MD5 file hashes in `DEBIAN/md5sums`
   - RFC 822-compliant control file in `DEBIAN/control`
 * **Builder:** `dpkg-deb --build --root-owner-group ${STAGE_DEB} ${DEB_FILE}`
@@ -228,14 +238,57 @@ When packaging flags are supplied, artifacts are staged in isolated temporary di
 * **Trigger:** `--linux --rpm` (or `--all-pkg`)
 * **Structure:**
   - Generates standalone RPM spec file in `${RPM_TOPDIR}/SPECS/${APP_NAME}.spec`
-  - Sanitizes `%` macros in summary, description, URL, and license
+  - Sanitizes `%` macros in summary, group, description, URL, and license
+  - Generates `%changelog` dynamically from `build.json` history (or default release entry) with `<version>` and `<release>` substituted strictly as `${VERSION}-${RELEASE}` (e.g. `0.2.1-1`)
   - Sets `AutoReqProv: no` (100% static binary requires no dynamic glibc package dependencies)
   - Sets `%define _build_id_links none` and `%define debug_package %{nil}`
 * **Builder:** `rpmbuild --define "_topdir ${RPM_TOPDIR}" -bb ${SPEC_FILE}`
 
-### 5. Sanitized Source Archive (`-src.tar.xz` / `-src.zip`)
+### 5. Unified Packaging Changelog History (`build.json`)
+The build engine dynamically synchronizes changelog records defined in `build.json` across both RPM and Debian packaging formats:
+
+#### Configuration in `build.json`:
+```json
+"history": [
+  "* Wed Oct 21 2026 Mis Center <support@criticalsys.net> - <version>-<release>",
+  "- Updated to new upstream release"
+]
+```
+
+#### Generated RPM Spec Output (`%changelog`):
+```spec
+%changelog
+* Wed Oct 21 2026 Mis Center <support@criticalsys.net> - 0.2.1-1
+- Updated to new upstream release
+```
+
+#### Generated Debian Output (`/usr/share/doc/<app>/changelog.Debian.gz`):
+```text
+checkcert (0.2.1-1) stable; urgency=low
+
+  * Updated to new upstream release
+
+ -- Mis Center <support@criticalsys.net>  Wed, 21 Oct 2026 00:00:00 -0500
+```
+
+> [!NOTE]
+> The tokens `<version>` and `<release>` are strictly substituted with the base semantic version and numeric release iteration (e.g. `0.2.1-1`), omitting distribution and channel identifiers (`.almalinux.xg`).
+
+### 6. Sanitized Source Archive (`-src.tar.xz` / `-src.zip`)
 * **Trigger:** `--archive` (or `--all-pkg`)
 * **Security Filter:** Enforces `SOURCE_EXCLUDES` denylist from [build.inc](build.inc#L168-L200) to strip `.git`, `.env*`, `*.key`, `*.pem`, `*.token`, `id_*`, binaries, and temporary files.
+
+### 7. Package Verification Engine (`--verify-pkg`)
+* **Trigger:** `--verify-pkg` (or `--verify-packages`)
+* **Execution:** Operates as an additive post-build gate (runs automatically when combined with packaging flags) or as a standalone verification audit.
+* **Checks Performed:**
+  1. **SHA256 Checksum Integrity:** Asserts that every generated `<artifact>.sha256` checksum matches the physical artifact on disk with zero discrepancies. Detects orphan checksums.
+  2. **RPM Header Inspection:** Queries package metadata via `rpm -qp --queryformat` (routed through WSL on Windows) and validates `Name`, `Version`, `Release`, `Group`, and `License` against `build.json`.
+  3. **Debian Control Field Inspection:** Extracts package metadata via `dpkg-deb -I` (routed through WSL on Windows) and validates `Package`, `Section`, and `Priority` against `build.json`.
+  4. **Windows Zipball Integrity & Contents:** Tests archive structure (`unzip -tq`) and verifies that `<app>.exe` exists in the archive index.
+  5. **Linux Tarball Integrity & Contents:** Verifies archive integrity and verifies that `<app>` executable exists in the archive index.
+* **WSL Bridging on Windows:** On Windows hosts lacking native `rpm` or `dpkg-deb` CLI utilities, the verification engine transparently invokes queries through WSL, guaranteeing identical verification behavior across Linux and Windows.
+* **Exit Code:** Exits with `EXIT_SUCCESS` (0) on full pass, or halts the pipeline with `EXIT_PACKAGE` (8) on any validation failure.
 
 ---
 
@@ -253,8 +306,9 @@ When packaging flags are supplied, artifacts are staged in isolated temporary di
 | **gosec** | Security Scanner | Recommended | AST security scanner for risky coding patterns. |
 | **tar / xz** | Archiver | Required for `--archive` | Multi-threaded XZ compression for Linux archives. |
 | **zip** | Archiver | Required for `--archive` | Windows Zip archive packaging. |
-| **dpkg-deb** | Packager | Required for `--deb` | Debian package generator (Linux only). |
-| **rpmbuild** | Packager | Required for `--rpm` | Red Hat package generator (Linux only). |
+| **dpkg-deb** | Packager | Required for `--deb` | Debian package generator (Linux native; executed via WSL on Windows). |
+| **rpmbuild** | Packager | Required for `--rpm` | Red Hat package generator (Linux native; executed via WSL on Windows). |
+| **wsl** | Subsystem Bridge | Required on Windows | Executes Linux packaging workflows transparently via default distro on Windows. |
 | **sha256sum / shasum** | Cryptographic Hash | Required for packaging | Computes per-archive SHA256 checksums. |
 | **ssh-keygen** | Code Signer | Required for `--sign` | OpenSSH digital signature generation. |
 
@@ -293,9 +347,10 @@ When packaging flags are supplied, artifacts are staged in isolated temporary di
 | Argument | Description | Type | Default |
 | :--- | :--- | :--- | :--- |
 | `--archive` | Package release archive (`.zip` on Windows, `.tar.xz` on Linux) + source archive + dedicated `.sha256`. | Flag | `false` |
-| `--rpm` | Build RPM package in `../distrib/` via `rpmbuild` (Linux target only; ignored on Windows). | Flag | `false` |
-| `--deb` | Build DEB package in `../distrib/` via `dpkg-deb` (Linux target only; ignored on Windows). | Flag | `false` |
-| `--all-pkg` | Build all release artifacts (`--archive --rpm --deb` on Linux, `--archive` on Windows). Alias: `--all`. | Flag | `false` |
+| `--rpm` | Build RPM package in `../distrib/` via `rpmbuild` (Linux target; executed via WSL on Windows). | Flag | `false` |
+| `--deb` | Build DEB package in `../distrib/` via `dpkg-deb` (Linux target; executed via WSL on Windows). | Flag | `false` |
+| `--all-pkg` | Build all release artifacts (`--archive --rpm --deb` on Linux, `--archive` on Windows; executed via WSL on Windows). Alias: `--all`. | Flag | `false` |
+| `--verify-pkg` | Deep verification of generated packages in `../distrib/` against `build.json` (checksums, RPM/DEB headers, archive integrity). Additive or standalone. Alias: `--verify-packages`. | Flag | `false` |
 | `--sign` | Sign release archives (`<archive>.sig`) with default SSH key (`~/.ssh/signing/release_key`). | Flag | `false` |
 | `--sign=<path>` | Sign release archives (`<archive>.sig`) with specified SSH private key or directory. | String | *Disabled* |
 | `--genkey` | Generate Ed25519 signing key pair at `~/.ssh/signing/release_key` and exit (requires `--identity=<id>`). Alias: `--generate-key`. | Flag | *None* |
@@ -407,6 +462,87 @@ Force-update dependencies to their latest upstream releases while packaging or c
 # Compile static binary only with updated dependencies
 ../../build_go.sh --compile-only --update-modules
 ```
+
+### 9.9. Building RPM & Debian Packages from Windows (Transparent WSL Bridge)
+On Windows developer workstations (PowerShell, Git Bash, MSYS2, or Cygwin), Linux packaging tools (`rpmbuild`, `dpkg-deb`, GNU `tar`) are executed transparently via WSL without requiring manual VM management:
+
+```bash
+# Navigate to any module on Windows
+cd private/checkcert
+
+# Build RPM and DEB packages directly from Windows:
+../../build_go.sh --rpm --deb
+
+# Build complete Linux release suite from Windows:
+../../build_go.sh --linux --all-pkg
+```
+
+**Execution Flow Under the Hood:**
+1. The engine detects `HOST_OS == "WIN"` and identifies Linux packaging flags (`--rpm`, `--deb`, `--archive`, `--all-pkg`).
+2. Verifies WSL availability using `check_wsl_available`.
+3. Normalizes current workspace paths to mixed format (`drive:/path/sub`) and maps them to WSL mount space (`/mnt/drive/path/sub`).
+4. Dispatches execution to the default WSL distribution via login shell:
+   ```bash
+   wsl --cd / bash -lc "cd <wsl_cwd> && bash <wsl_script> <forwarded_args>"
+   ```
+5. Binaries are compiled statically with `CGO_ENABLED=0`, packaged into `.rpm`, `.deb`, and `.tar.xz`, and emitted to `../distrib/` alongside dedicated `.sha256` checksums.
+
+### 9.10. Dual-Platform Matrix Release from Windows (`--all-platform --all-pkg`)
+Build Windows executables and all Linux native packaging in a single unified command:
+
+```bash
+# Build complete dual-platform suite for the active module:
+../../build_go.sh --all-platform --all-pkg
+```
+
+**Artifacts Generated in `../distrib/`:**
+* `<name>-<version>-windows_amd64.zip` + `.sha256` (Windows binary + CRLF docs)
+* `<name>-<version>-linux_amd64.tar.xz` + `.sha256` (Static Linux binary + docs)
+* `<name>-<version>-linux_amd64.deb` + `.sha256` (Debian package with md5sums and control)
+* `<name>-<version>-linux_amd64.rpm` + `.sha256` (Red Hat / Rocky / AlmaLinux RPM)
+* `<name>-<version>-src.tar.xz` + `.sha256` (Sanitized source archive)
+
+### 9.11. Scaffolding New Modules with `build.json.template`
+When creating a new sub-project or microservice, initialize `build.json` using the reference template:
+
+```bash
+# Copy documented template to new module root
+cp ../devops/build_tasks/build.json.template private/<new_module>/build.json
+
+# Edit fields (name, entrypoint, summary, description, group, section)
+```
+See [build.json.template](build.json.template) for comprehensive documentation of RPM `group` hierarchies and Debian `section` categories.
+
+### 9.12. Automated Package Verification (`--verify-pkg`)
+Validate existing distribution packages or enforce a post-build verification gate:
+
+```bash
+# 1. Standalone verification of previously built packages for this module
+../../build_go.sh --verify-pkg
+
+# 2. Build and verify all packages in a single operation
+../../build_go.sh --all-platform --all-pkg --verify-pkg
+```
+
+The verification engine verifies SHA256 checksums, validates RPM spec headers against `build.json` (routed through WSL on Windows), checks Debian control metadata, and validates archive contents.
+
+### 9.13. CGO Linux Builds via WSL on Windows
+When Go projects require CGO (e.g. SQLite, hardware bindings, or native C libraries), set `"cgo": true` in `build.json`:
+
+```json
+{
+  "name": "myapp",
+  "version": "1.0.0",
+  "cgo": true
+}
+```
+
+When building on Windows:
+```bash
+# Automatically detects "cgo": true and routes the Linux compilation to WSL
+../../build_go.sh --linux --compile-only
+```
+WSL uses its native Linux `gcc` toolchain to compile the binary, producing a genuine Linux ELF binary and saving it into `../bin/` without needing Windows-hosted cross-compilers.
 
 ---
 

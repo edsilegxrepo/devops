@@ -1,0 +1,45 @@
+# ==============================================================================
+# build_wslconfig.example - WSL 2 Global Performance & Resource Template
+# ==============================================================================
+# Copy this file to %USERPROFILE%\.wslconfig (e.g. C:\Users\<Username>\.wslconfig)
+# on your Windows host machine to tune WSL 2 VM resource allocation for high-
+# throughput Go builds, package generation (RPM/DEB), and parallel testing.
+#
+# After applying or updating %USERPROFILE%\.wslconfig, restart WSL from PowerShell:
+#   wsl --shutdown
+# ==============================================================================
+
+[wsl2]
+# Maximum memory allocated to the WSL 2 VM.
+# Default without config is 50% of total host RAM.
+# Recommendation: Set to 8GB-16GB depending on host capacity (leave headroom for Windows).
+memory=8GB
+
+# Number of virtual CPU processors assigned to WSL 2.
+# Default: All logical host processors.
+# Recommendation: Allocate 4-8 cores to allow fast parallel builds while preserving host UI responsiveness.
+processors=6
+
+# Swap space allocated for the WSL 2 VM.
+# Default: 25% of memory size on Windows.
+swap=4GB
+
+# Swap file path on the Windows host (optional; defaults to %TEMP%\swap.vhdx).
+# swapFile=C:\\temp\\wsl-swap.vhdx
+
+# Reclaims unused memory from the WSL VM back to Windows dynamically.
+pageReporting=true
+
+# Allows localhost networking to bridge between Windows and WSL seamlessly.
+localhostForwarding=true
+
+# Enables nested virtualization if container engines or QEMU are used inside WSL.
+nestedVirtualization=true
+
+[experimental]
+# Reclaims cached memory gradually when Linux drops memory pages (WSL 2.0.0+).
+autoMemoryReclaim=gradual
+
+# Automatically mirrors Windows host proxy settings into WSL instances.
+autoProxy=true
+

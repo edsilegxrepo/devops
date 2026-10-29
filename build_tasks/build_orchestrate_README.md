@@ -257,9 +257,10 @@ graph LR
 | `--linux` | Target Linux builds across all sub-projects (builds static `../bin/<name>`). | Flag | Host default on Linux |
 | `--all-platform` | Target both Windows and Linux builds across all sub-projects. | Flag | `false` |
 | `--archive` | Package release archives inside `../distrib/` across all sub-projects. | Flag | Active |
-| `--rpm` | Build RPM packages in `../distrib/` across all sub-projects (Linux only). | Flag | `false` |
-| `--deb` | Build DEB packages in `../distrib/` across all sub-projects (Linux only). | Flag | `false` |
-| `--all-pkg` | Build all release artifacts (`--archive --rpm --deb`) across all sub-projects. Alias: `--all`. | Flag | `false` |
+| `--rpm` | Build RPM packages in `../distrib/` across all sub-projects (Linux native; executed via WSL on Windows). | Flag | `false` |
+| `--deb` | Build DEB packages in `../distrib/` across all sub-projects (Linux native; executed via WSL on Windows). | Flag | `false` |
+| `--all-pkg` | Build all release artifacts (`--archive --rpm --deb`) across all sub-projects (executed via WSL on Windows). Alias: `--all`. | Flag | `false` |
+| `--verify-pkg` | Verify checksums, RPM/DEB metadata, and archive integrity in `../distrib/` across all modules. | Flag | `false` |
 | `--sign` | Sign release archives (`<archive>.sig`) with default SSH key (`~/.ssh/signing/release_key`). See [build_SIGNING.md](build_SIGNING.md). | Flag | `false` |
 | `--sign=<path>` | Sign release archives (`<archive>.sig`) with specified SSH private key or directory. See [build_SIGNING.md](build_SIGNING.md). | String | *Disabled* |
 | `--genkey` | Generate Ed25519 signing key pair at `~/.ssh/signing/release_key` and exit (requires `--identity=<id>`). Alias: `--generate-key`. See [build_SIGNING.md](build_SIGNING.md). | Flag | *None* |
@@ -373,10 +374,72 @@ Force-update dependencies to their latest upstream releases across all sub-proje
 ./build_orchestrate.sh --exec --parallel --jobs=4 --all-pkg --update-modules --sign
 ```
 
+### 8.10. Cross-Platform Release Packaging Across All Modules from Windows
+Run enterprise full-matrix release compilation and packaging across all sub-projects directly from a Windows host (PowerShell, Git Bash, MSYS2, or Cygwin):
+
+```bash
+# Build complete Windows and Linux release artifacts for all modules in parallel:
+./build_orchestrate.sh --exec --all-platform --all-pkg --parallel --jobs=4
+```
+
+**How Orchestration Works on Windows:**
+* For each module in the workpool, `build_go.sh` builds the Windows executable (`.exe`) and `.zip` archive on the Windows host.
+* The Linux phase (`--linux --archive --rpm --deb`) is automatically delegated to the default WSL distribution (`AlmaLinuxOS-9`).
+* Output artifacts across all modules are consolidated directly in `../distrib/`:
+  - 20+ Windows `.zip` releases + `.sha256`
+  - 20+ Linux `.tar.xz` tarballs + `.sha256`
+  - 20+ Debian `.deb` packages + `.sha256`
+  - 20+ Red Hat `.rpm` packages + `.sha256`
+  - Sanitized source archives and optional SSH signatures
+
+### 8.11. Linux Packaging Only from Windows Host
+Generate native Linux packages for all workspace modules without needing a Linux workstation:
+
+```bash
+# Build RPMs and DEBs across all modules in parallel from Windows:
+./build_orchestrate.sh --exec --rpm --deb --parallel --jobs=4
+```
+
+### 8.12. Multi-Module Package Verification (`--verify-pkg`)
+Run exhaustive integrity and metadata validation across all generated packages in `../distrib/`:
+
+```bash
+# 1. Standalone verification across all workspace modules
+./build_orchestrate.sh --exec --verify-pkg
+
+# 2. Sequential full build, packaging, and post-packaging verification gate
+./build_orchestrate.sh --exec --all-pkg --verify-pkg
+
+# 3. Parallel multi-job build, packaging, and verification gate
+./build_orchestrate.sh --exec --parallel --jobs=4 --all-platform --all-pkg --verify-pkg
+```
+
+If any checksum does not match, or if any RPM/DEB package metadata differs from the module's `build.json` specifications, the verification gate halts with `EXIT_PACKAGE` (8) and reports the failing repository.
+
+### 8.13. WSL 2 Performance Tuning for Multi-Module Builds (`.wslconfig`)
+When running multi-job parallel builds (`--parallel --jobs=N`) on a Windows host with WSL delegation, the default WSL 2 configuration may allocate all host logical cores or up to 50% of host RAM without optimal page reclamation.
+
+A ready-to-use template is provided in **[build_wslconfig.example](build_wslconfig.example)**:
+
+```bash
+# Copy the example configuration to your Windows user profile:
+cp build_tasks/build_wslconfig.example /mnt/c/Users/<Username>/.wslconfig
+
+# Restart WSL 2 to apply changes (from PowerShell or Command Prompt):
+wsl --shutdown
+```
+
+**Recommended Settings in `.wslconfig`:**
+* `memory=8GB` (or 16GB on 32GB+ hosts): Caps VM RAM consumption to maintain host responsiveness.
+* `processors=6`: Dedicates balanced CPU resources to parallel compiler workers while leaving host cores free for Windows desktop operations.
+* `swap=4GB`: Provides sufficient swap allocation for bursts during large archive compressions (`XZ_OPT=-T0`).
+* `pageReporting=true` & `autoMemoryReclaim=gradual`: Dynamically returns cached VM memory to Windows once builds and packaging jobs conclude.
+
 ---
 
 ## 9. References & Related Documentation
 
+* **[build_wslconfig.example](build_wslconfig.example)**: WSL 2 performance tuning template configuring CPU core limits, memory caps, swap size, and automatic memory reclamation for parallel compilation workpools.
 * **[build_SIGNING.md](build_SIGNING.md)**: Master architectural guide and reference manual for OpenSSH Ed25519 release artifact signing, key generation, trust anchors (`allowed_signers`), automated verification scripts, and CI/CD security policies.
 * **[build_go_README.md](build_go_README.md)**: In-depth documentation for the module compilation engine (`build_go.sh`), covering `build.json` schema specifications, multi-stage static analysis, dependency vendoring, and packaging mechanics.
 * **[build.inc](build.inc)**: Core include library providing standardized exit codes, host detection, NDJSON audit logging, directory lifecycle tracking, and cryptographic helper routines.
