@@ -6,7 +6,7 @@ This document provides a technical reference and operational guide for `rust_upg
 
 ## 1. Application Overview and Objectives
 
-The `rust_upgrade.sh` utility automates the acquisition, extraction, installation, and post-install linking of the Rust programming language toolchain and the associated Windows cross-compilation target (`x86_64-pc-windows-gnu`). 
+The `rust_upgrade.sh` utility automates the acquisition, extraction, installation, and post-install linking of the Rust programming language toolchain along with the Windows cross-compilation target (`x86_64-pc-windows-gnu`) and the Linux Musl static compilation target (`x86_64-unknown-linux-musl`). 
 
 ### Core Objectives
 * **Consistency**: Standardizes the installed compiler and target library versions across build agents.
@@ -22,8 +22,10 @@ The script is built as a single, self-contained Bash automation file utilizing s
 ### Toolchain and Target Packaging Separation
 Rust separates host-specific toolchain binaries (`rustc`, `cargo`) from target-specific standard libraries (`rust-std`). The architecture of the script reflects this:
 1. It downloads and extracts the host toolchain package (`rust-${VERSION}-${ARCH}-unknown-linux-gnu.tar.xz`).
-2. It separately downloads and extracts the target standard library package (`rust-std-${VERSION}-${ARCH}-pc-windows-gnu.tar.xz`).
-3. It sequentially runs the vendor-provided `install.sh` executable for each package.
+2. It separately downloads and extracts the target standard library packages:
+   - Windows GNU target: `rust-std-${VERSION}-${ARCH}-pc-windows-gnu.tar.xz`
+   - Linux Musl target: `rust-std-${VERSION}-${ARCH}-unknown-linux-musl.tar.xz`
+3. It sequentially runs the vendor-provided `install.sh` executable for each package (host toolchain, Windows GNU target, and Linux Musl target).
 
 ### Installation Target Models
 
@@ -78,7 +80,7 @@ graph TD
     S -- "Yes" --> U{"Check: Disk space >= 1GB?"}
     U -- "No" --> V["Exit with Error 08"]
     U -- "Yes" --> W["Clean old downloads"]
-    W --> X["Download Linux & Windows archives via curl -sSfL"]
+    W --> X["Download Linux GNU, Windows GNU & Linux Musl archives via curl -sSfL"]
     X --> Y{"Check: Downloads exist and non-empty?"}
     Y -- "No" --> Z["Exit with Error 04"]
     Y -- "Yes" --> AA["Extract tar archives"]
@@ -89,7 +91,8 @@ graph TD
     UN -- "No" --> AD["Execute execInstall for Linux Toolchain"]
     RUN --> AD["Execute execInstall for Linux Toolchain"]
     AD --> AE["Execute execInstall for Windows target std lib"]
-    AE --> AF{"Check: Install Mode?"}
+    AE --> AEM["Execute execInstall for Linux Musl target std lib"]
+    AEM --> AF{"Check: Install Mode?"}
     AF -- "SYSTEM" --> AG["Purge downloaded files & folders"]
     AF -- "LOCAL" --> AH["Generate symlinks in /usr/local/bin"]
     AH --> AG
@@ -124,7 +127,7 @@ graph TD
 6. **Download & Space Verification**: Validates that at least 1GB of free space is available on the target partition of the installation path, changes directory to `/opt/install`, deletes stale directories, and downloads the packages via `curl`.
 7. **Decompression**: Extracts `.tar.xz` archives using `tar -Jxf` and validates the extracted directory structures.
 8. **Clean Uninstallation (Cleansing)**: Checks if an uninstaller script (`uninstall.sh`) exists from a previous installation in `/usr/local/lib/rustlib/` (SYSTEM mode) or `${RUST_HOME}/lib/rustlib/` (LOCAL mode). If found, executes it to completely purge the old Rust installation, preventing orphaned files or components from lingering.
-9. **Toolchain & Component Installation**: Invokes `execInstall` sequentially for the main toolchain and target standard libraries. It passes `--destdir=/var/opt/rust` if `--local` is active.
+9. **Toolchain & Component Installation**: Invokes `execInstall` sequentially for the main toolchain and target standard libraries (Windows GNU and Linux Musl). It passes `--destdir=/var/opt/rust` if `--local` is active.
 10. **Linking (Optional)**: If in `LOCAL` mode, traverses `/usr/local/bin` and links all executable targets from `/var/opt/rust/bin/`.
 11. **Purge**: Deletes downloaded archives and temporary directories to reclaim disk space.
 12. **Verification**: Queries the active `rustc` version and checks target list availability.
@@ -175,7 +178,7 @@ The script processes parameters non-positionally:
 | **`--detect [text\|json]`** | Flag + optional arg | Scans the system for an active Rust installation and prints a report listing paths, versions, targets, and toolchain components. The optional argument selects the output format: `text` (default) for a human-readable table; `json` for a machine-readable JSON object. Does **not** require root privileges. | `text` | **No** (Either this, `--version`, or `--auto` must be specified) |
 | **`--local`** | Flag | Forces compiler binaries to be installed in `/var/opt/rust` with symbolic link entrypoints, rather than installing to `/usr/local`. | *Inactive* (System Mode) | **No** |
 | **`--force`** | Flag | Forces download and installation even if the detected local Rust version matches the target version. Also triggers systematic re-installation of all linters. | *Inactive* | **No** |
-| **`--core-components`** | Flag | Excludes optional toolchain components (`rust-docs`, `rust-docs-json-preview`, `rust-analysis-x86_64-pc-windows-gnu`, and `llvm-bitcode-linker-preview`) during toolchain installation. | *Inactive* | **No** |
+| **`--core-components`** | Flag | Excludes optional toolchain components (`rust-docs`, `rust-docs-json-preview`, `rust-analysis-<arch>-unknown-linux-gnu`, `rust-analysis-<arch>-unknown-linux-musl`, `rust-analysis-<arch>-pc-windows-gnu`, and `llvm-bitcode-linker-preview`) during toolchain installation. | *Inactive* | **No** |
 | **`--linters [<fqdn>]`** | String (optional) | Installs Rust code quality tools. If `<fqdn>` is specified, checks and extracts precompiled linter binaries directly from the archive instead of compilation. Otherwise compiles them. Uses native Cargo update checks or forced rebuilds depending on toolchain changes. Requires root. Cannot be combined with `--detect`. | *Inactive* | **No** |
 | **`--package-citools [fqdn]`** | String (optional) | Packages all installed linter binaries into a `tar.xz` archive for distribution. Automatically enables `--linters`. If `[fqdn]` is omitted, defaults to `/opt/done/rust-linters-<version>-<date>-<dist><os_id>-<arch>.tar.xz`. | *Inactive* | **No** |
 | **`--log [<fqdn>]`** | String (optional) | Redirects all script stdout and stderr output to the specified log file in append mode. If `[fqdn]` is omitted, defaults to `/var/log/rust_upgrade.log`. | `/var/log/rust_upgrade.log` | **No** |
@@ -201,22 +204,25 @@ sudo ./rust_upgrade.sh --version 1.96.0
 ```text
 ============================ RUST INSTALLER FOR LINUX ========================================
 
->> 0- Downloading Rust archives: rust-1.96.0-x86_64-unknown-linux-gnu.tar.xz, rust-std-1.96.0-x86_64-pc-windows-gnu.tar.xz
+>> 0- Downloading Rust archives: rust-1.96.0-x86_64-unknown-linux-gnu.tar.xz, rust-std-1.96.0-x86_64-pc-windows-gnu.tar.xz, rust-std-1.96.0-x86_64-unknown-linux-musl.tar.xz
 
->> 1- Extracting Rust archive: rust-1.96.0-x86_64-unknown-linux-gnu.tar.xz, rust-std-1.96.0-x86_64-pc-windows-gnu.tar.xz
+>> 1- Extracting Rust archive: rust-1.96.0-x86_64-unknown-linux-gnu.tar.xz, rust-std-1.96.0-x86_64-pc-windows-gnu.tar.xz, rust-std-1.96.0-x86_64-unknown-linux-musl.tar.xz
 
 >> 2- Installing Rust version [1.96.0 -> rust-1.96.0-x86_64-unknown-linux-gnu]
 ...
 >> 2- Installing Rust version [1.96.0 -> rust-std-1.96.0-x86_64-pc-windows-gnu]
 ...
+>> 2- Installing Rust version [1.96.0 -> rust-std-1.96.0-x86_64-unknown-linux-musl]
+...
 >> 3- SYSTEM mode: Rust binaries are installed in [/usr/local/bin]
 
->> 4- Purging Rust archives [rust-1.96.0-x86_64-unknown-linux-gnu.tar.xz, rust-std-1.96.0-x86_64-pc-windows-gnu.tar.xz]
+>> 4- Purging Rust archives [rust-1.96.0-x86_64-unknown-linux-gnu.tar.xz, rust-std-1.96.0-x86_64-pc-windows-gnu.tar.xz, rust-std-1.96.0-x86_64-unknown-linux-musl.tar.xz]
 
 Rust installation was successful: rustc 1.96.0 (ac68faa20 2026-05-25)
 
 Supported targets:
 x86_64-unknown-linux-gnu
+x86_64-unknown-linux-musl
 x86_64-pc-windows-gnu
 ```
 
@@ -253,6 +259,7 @@ sudo ./rust_upgrade.sh --version 1.96.0 --core-components
 > * **`rust-docs`**: The local HTML documentation for the Rust standard library, compiler, and book. Used for offline browsing. Skipping this significantly reduces the installation footprint and prevents copying tens of thousands of small HTML files.
 > * **`rust-docs-json-preview`**: The JSON-formatted representation of the Rust documentation, used by experimental offline documentation tools.
 > * **`rust-analysis-<arch>-unknown-linux-gnu`**: Compiler analysis metadata files for the host Linux compilation target. These files are used by IDEs and code intelligence engines to query types and definitions. They are not required for compiling code or standard Cargo operations.
+> * **`rust-analysis-<arch>-unknown-linux-musl`**: Compiler analysis metadata files for the Linux Musl static compilation target (`x86_64-unknown-linux-musl`). These files are used by IDEs and source analysis engines to query types and definitions. They are not required for compiling static Musl binaries.
 > * **`rust-analysis-<arch>-pc-windows-gnu`**: Compiler analysis metadata files for the Windows cross-compilation target (`x86_64-pc-windows-gnu`). These files are used by IDEs and source analysis engines to query types and definitions. They are not required for standard cross-compilation or building binaries.
 > * **`llvm-bitcode-linker-preview`**: An experimental linker utility allowing direct LLVM bitcode linking. This is an optional toolchain component not required for standard toolchain or target building.
 
@@ -280,6 +287,7 @@ Runs in informational mode as any user (no root permissions required) to report 
 [2] Installed Standard Library Targets
 --------------------------------------
   - x86_64-unknown-linux-gnu
+  - x86_64-unknown-linux-musl
   - x86_64-pc-windows-gnu
 
 [3] Installed Toolchain Components
@@ -297,6 +305,7 @@ Runs in informational mode as any user (no root permissions required) to report 
   rust-docs                                  Installed
   rust-docs-json-preview                     Excluded
   rust-analysis-x86_64-unknown-linux-gnu     Installed
+  rust-analysis-x86_64-unknown-linux-musl    Installed
   rust-analysis-x86_64-pc-windows-gnu        Installed
   llvm-bitcode-linker-preview                Excluded
 
@@ -341,6 +350,7 @@ Returns a machine-readable JSON object — ideal for CI pipelines, monitoring sc
   "host_target": "x86_64-unknown-linux-gnu",
   "std_targets": [
     "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
     "x86_64-pc-windows-gnu"
   ],
   "toolchain_components": [
@@ -354,6 +364,7 @@ Returns a machine-readable JSON object — ideal for CI pipelines, monitoring sc
     "rust-docs": "installed",
     "rust-docs-json-preview": "excluded",
     "rust-analysis-x86_64-unknown-linux-gnu": "installed",
+    "rust-analysis-x86_64-unknown-linux-musl": "installed",
     "rust-analysis-x86_64-pc-windows-gnu": "installed",
     "llvm-bitcode-linker-preview": "excluded"
   },
@@ -630,7 +641,7 @@ These tools perform deep structural analysis of your code and dependency graph t
 - **Type:** Cargo tool
 - **Install:** `cargo install cargo-bloat`
 - **Objective:** Identify which functions and crates contribute most to the final binary size.
-- **Description:** `cargo bloat` analyzes the compiled binary's symbol table and reports the largest contributors to binary size by function, crate, or section. Run with `cargo bloat --release` for production binaries, or `cargo bloat --release --crates` for a per-crate summary. Especially useful in this environment for monitoring the size of the cross-compiled `leanctx` Windows binary (`cargo bloat --release --target x86_64-pc-windows-gnu`).
+- **Description:** `cargo bloat` analyzes the compiled binary's symbol table and reports the largest contributors to binary size by function, crate, or section. Run with `cargo bloat --release` for production binaries, or `cargo bloat --release --crates` for a per-crate summary. Especially useful in this environment for monitoring the size of the cross-compiled `leanctx` Windows binary (`cargo bloat --release --target x86_64-pc-windows-gnu`) or static Linux binary (`cargo bloat --release --target x86_64-unknown-linux-musl`).
 
 #### cargo-outdated
 - **Type:** Cargo tool

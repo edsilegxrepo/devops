@@ -1,11 +1,11 @@
 #!/bin/bash
 # -----------------------------------------------------------------------------
 #  /usr/src/redhat/SPECS/rust_upgrade.sh
-#  v1.0.8xg  2026/06/01  XDG / MIS Center
+#  v1.0.9xg  2026/11/02  XDG / MIS Center
 # -----------------------------------------------------------------------------
 #  Purpose:
 #    Automates downloading, extracting, and installing specific Rust toolchain
-#    versions along with the Windows GNU target standard library.
+#    versions along with the Windows GNU and Linux Musl target standard libraries.
 #    Supports both system-wide and localized directory installs.
 #
 #  Syntax:
@@ -14,7 +14,7 @@
 #    rust_upgrade.sh --linters [<fqdn>]
 #
 #  Examples:
-#    - System-wide install (specific version):  rust_upgrade.sh --version 1.96.0
+#    - System-wide install (specific version):   rust_upgrade.sh --version 1.96.0
 #    - Local prefix & auto-detect stable:        rust_upgrade.sh --auto --local
 #    - Force reinstall version:                  rust_upgrade.sh --version 1.96.0 --force
 #    - Standalone linter compilation:            rust_upgrade.sh --linters
@@ -33,6 +33,7 @@ OPTIONAL_COMPONENTS=(
   "rust-docs"
   "rust-docs-json-preview"
   "rust-analysis-${RUST_ARCH}-unknown-linux-gnu"
+  "rust-analysis-${RUST_ARCH}-unknown-linux-musl"
   "rust-analysis-${RUST_ARCH}-pc-windows-gnu"
   "llvm-bitcode-linker-preview"
 )
@@ -105,8 +106,10 @@ RUST_URL_BASE="https://static.rust-lang.org/dist"
 # Variables to track temporary paths for signal-trap cleanup
 ABS_RUST_INSTALL_ARCH=""
 ABS_RUST_STD_WIN_ARCH=""
+ABS_RUST_STD_MUSL_ARCH=""
 ABS_RUST_INSTALL_BASE=""
 ABS_RUST_STD_WIN_BASE=""
+ABS_RUST_STD_MUSL_BASE=""
 ABS_TEMP_CARGO_HOME=""
 
 # Cleanup function to purge temporary archives and cache folders on script exit
@@ -120,11 +123,17 @@ function cleanup() {
   if [ -n "${ABS_RUST_STD_WIN_ARCH}" ] && [ -f "${ABS_RUST_STD_WIN_ARCH}" ]; then
     rm -f "${ABS_RUST_STD_WIN_ARCH}"
   fi
+  if [ -n "${ABS_RUST_STD_MUSL_ARCH}" ] && [ -f "${ABS_RUST_STD_MUSL_ARCH}" ]; then
+    rm -f "${ABS_RUST_STD_MUSL_ARCH}"
+  fi
   if [ -n "${ABS_RUST_INSTALL_BASE}" ] && [ -d "${ABS_RUST_INSTALL_BASE}" ]; then
     rm -rf "${ABS_RUST_INSTALL_BASE}"
   fi
   if [ -n "${ABS_RUST_STD_WIN_BASE}" ] && [ -d "${ABS_RUST_STD_WIN_BASE}" ]; then
     rm -rf "${ABS_RUST_STD_WIN_BASE}"
+  fi
+  if [ -n "${ABS_RUST_STD_MUSL_BASE}" ] && [ -d "${ABS_RUST_STD_MUSL_BASE}" ]; then
+    rm -rf "${ABS_RUST_STD_MUSL_BASE}"
   fi
 }
 
@@ -759,11 +768,17 @@ if [ "${STANDALONE_LINTERS}" == "false" ]; then
   RUST_STD_WIN_BASE="rust-std-${RUST_VERSION}-${RUST_ARCH}-pc-windows-gnu"
   RUST_STD_WIN_ARCH="${RUST_STD_WIN_BASE}.tar.xz"
 
+  # Name and archive variables for the Linux Musl target standard library package
+  RUST_STD_MUSL_BASE="rust-std-${RUST_VERSION}-${RUST_ARCH}-unknown-linux-musl"
+  RUST_STD_MUSL_ARCH="${RUST_STD_MUSL_BASE}.tar.xz"
+
   # Populate absolute paths for the cleanup trap
   ABS_RUST_INSTALL_ARCH="${INSTALL_BASE}/${RUST_INSTALL_ARCH}"
   ABS_RUST_STD_WIN_ARCH="${INSTALL_BASE}/${RUST_STD_WIN_ARCH}"
+  ABS_RUST_STD_MUSL_ARCH="${INSTALL_BASE}/${RUST_STD_MUSL_ARCH}"
   ABS_RUST_INSTALL_BASE="${INSTALL_BASE}/${RUST_INSTALL_BASE}"
   ABS_RUST_STD_WIN_BASE="${INSTALL_BASE}/${RUST_STD_WIN_BASE}"
+  ABS_RUST_STD_MUSL_BASE="${INSTALL_BASE}/${RUST_STD_MUSL_BASE}"
 fi
 
 # -----------------------------------------------------------------------------
@@ -1158,31 +1173,33 @@ if [ -d "${INSTALL_BASE}" ]; then
     fi
   fi
 
-  echo -e "\n>> 0- Downloading Rust archives: ${RUST_INSTALL_ARCH}, ${RUST_STD_WIN_ARCH}"
+  echo -e "\n>> 0- Downloading Rust archives: ${RUST_INSTALL_ARCH}, ${RUST_STD_WIN_ARCH}, ${RUST_STD_MUSL_ARCH}"
 
   # Remove older versions / partial downloads to prevent caching issues
-  rm -rf "${RUST_INSTALL_ARCH}" "${RUST_STD_WIN_ARCH}" "${RUST_INSTALL_BASE}" "${RUST_STD_WIN_BASE}"
+  rm -rf "${RUST_INSTALL_ARCH}" "${RUST_STD_WIN_ARCH}" "${RUST_STD_MUSL_ARCH}" \
+         "${RUST_INSTALL_BASE}" "${RUST_STD_WIN_BASE}" "${RUST_STD_MUSL_BASE}"
   
   # Fetch packages securely:
   # -sSfL ensures curl is silent, reports errors on HTTP failures (like 404),
   # and follows redirects.
   curl -sSf -L \
     -C - -O "${RUST_URL_BASE}/${RUST_INSTALL_ARCH}" \
-    -C - -O "${RUST_URL_BASE}/${RUST_STD_WIN_ARCH}"
+    -C - -O "${RUST_URL_BASE}/${RUST_STD_WIN_ARCH}" \
+    -C - -O "${RUST_URL_BASE}/${RUST_STD_MUSL_ARCH}"
 else
   echo -e "\nERROR03: Invalid base installation folder [${INSTALL_BASE}]"
   exit 3
 fi
 
 # Confirm downloaded files exist and are not empty
-if ! [ -s "${RUST_INSTALL_ARCH}" ] || ! [ -s "${RUST_STD_WIN_ARCH}" ]; then
-  echo -e "\n*** ERROR04: Rust install archive [${RUST_INSTALL_ARCH}] or [${RUST_STD_WIN_ARCH}] is missing or invalid."
+if ! [ -s "${RUST_INSTALL_ARCH}" ] || ! [ -s "${RUST_STD_WIN_ARCH}" ] || ! [ -s "${RUST_STD_MUSL_ARCH}" ]; then
+  echo -e "\n*** ERROR04: Rust install archive [${RUST_INSTALL_ARCH}], [${RUST_STD_WIN_ARCH}], or [${RUST_STD_MUSL_ARCH}] is missing or invalid."
   exit 4
 fi
 
 # ----- EXTRACTION -----
-echo -e "\n>> 1- Extracting Rust archive: ${RUST_INSTALL_ARCH}, ${RUST_STD_WIN_ARCH}"
-for a in "${RUST_INSTALL_ARCH}" "${RUST_STD_WIN_ARCH}"; do
+echo -e "\n>> 1- Extracting Rust archive: ${RUST_INSTALL_ARCH}, ${RUST_STD_WIN_ARCH}, ${RUST_STD_MUSL_ARCH}"
+for a in "${RUST_INSTALL_ARCH}" "${RUST_STD_WIN_ARCH}" "${RUST_STD_MUSL_ARCH}"; do
   if ! tar -Jxf "$a"; then
     echo "*** ERROR05: Rust archive [$a] extraction failed"
     exit 5
@@ -1190,8 +1207,8 @@ for a in "${RUST_INSTALL_ARCH}" "${RUST_STD_WIN_ARCH}"; do
 done
 
 # Confirm the directories extracted successfully
-if ! [ -d "${RUST_INSTALL_BASE}" ] || ! [ -d "${RUST_STD_WIN_BASE}" ]; then
-  echo "*** ERROR06: Base Rust install folder [${RUST_INSTALL_BASE}] or [${RUST_STD_WIN_BASE}] is missing or invalid."
+if ! [ -d "${RUST_INSTALL_BASE}" ] || ! [ -d "${RUST_STD_WIN_BASE}" ] || ! [ -d "${RUST_STD_MUSL_BASE}" ]; then
+  echo "*** ERROR06: Base Rust install folder [${RUST_INSTALL_BASE}], [${RUST_STD_WIN_BASE}], or [${RUST_STD_MUSL_BASE}] is missing or invalid."
   exit 6
 fi
 
@@ -1215,6 +1232,8 @@ fi
 execInstall "${RUST_INSTALL_BASE}"
 # Run installer for windows GNU target standard library
 execInstall "${RUST_STD_WIN_BASE}"
+# Run installer for linux musl target standard library
+execInstall "${RUST_STD_MUSL_BASE}"
 
 # ----- SYMLINKS GENERATION (LOCAL MODE ONLY) -----
 if [ "${INSTALL_MODE}" == "LOCAL" ]; then
@@ -1231,18 +1250,21 @@ else
 fi
 
 # ----- PURGE & CLEANUP -----
-echo -e "\n>> 4- Purging Rust archives [${RUST_INSTALL_ARCH}, ${RUST_STD_WIN_ARCH}]"
-echo    "        and base folders [${RUST_INSTALL_BASE}, ${RUST_STD_WIN_BASE}]"
-rm -rf "${RUST_INSTALL_ARCH}" "${RUST_STD_WIN_ARCH}" "${RUST_INSTALL_BASE}" "${RUST_STD_WIN_BASE}"
+echo -e "\n>> 4- Purging Rust archives [${RUST_INSTALL_ARCH}, ${RUST_STD_WIN_ARCH}, ${RUST_STD_MUSL_ARCH}]"
+echo    "        and base folders [${RUST_INSTALL_BASE}, ${RUST_STD_WIN_BASE}, ${RUST_STD_MUSL_BASE}]"
+rm -rf "${RUST_INSTALL_ARCH}" "${RUST_STD_WIN_ARCH}" "${RUST_STD_MUSL_ARCH}" \
+       "${RUST_INSTALL_BASE}" "${RUST_STD_WIN_BASE}" "${RUST_STD_MUSL_BASE}"
 ABS_RUST_INSTALL_ARCH=""
 ABS_RUST_STD_WIN_ARCH=""
+ABS_RUST_STD_MUSL_ARCH=""
 ABS_RUST_INSTALL_BASE=""
 ABS_RUST_STD_WIN_BASE=""
+ABS_RUST_STD_MUSL_BASE=""
 
 # ----- VERIFICATION -----
 echo -e "\nRust installation was successful: $("${RUSTC_BIN}" --version)\n"
 echo -e "Supported targets:"
-"${RUSTC_BIN}" --print target-list | grep -E "x86_64-(unknown-linux|pc-windows)-gnu"
+"${RUSTC_BIN}" --print target-list | grep -E "${RUST_ARCH}-(unknown-linux-(gnu|musl)|pc-windows-gnu)"
 echo ""
 
 # ----- LINTER INSTALLATION (OPTIONAL) -----
