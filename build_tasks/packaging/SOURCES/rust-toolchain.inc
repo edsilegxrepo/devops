@@ -17,8 +17,8 @@
 %{!?rust_target_linux:%global rust_target_linux %{_arch}-unknown-linux-musl}
 %{!?rust_target_win:%global rust_target_win     x86_64-pc-windows-gnu}
 
-# Standard Cargo dependency update command
-%{!?cargo_update:%global cargo_update cargo update --recursive}
+# Standard Cargo dependency update command (fault-tolerant fallback for offline/locked builds)
+%{!?cargo_update:%global cargo_update cargo update --recursive >/dev/null 2>&1 || :}
 
 %if ! %{has_cargo} || ! %{has_rustc}
 %{error:Rust toolchain (cargo/rustc) not found in PATH}

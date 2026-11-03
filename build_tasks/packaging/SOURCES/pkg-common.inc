@@ -57,7 +57,7 @@
 EOF
 
 # Toolchain helper: detect Zig compiler in PATH or standard enterprise locations
-%global has_zig         %(command -v zig >/dev/null 2>&1 || [ -x /var/opt/zig/zig ] || [ -x /u01/zig/zig ] || [ -x /usr/local/bin/zig ] || [ -x /opt/zig/zig ] && echo 1 || echo 0)
+%{!?has_zig:%global has_zig %(command -v zig >/dev/null 2>&1 || [ -x /var/opt/zig/zig ] || [ -x /u01/zig/zig ] || [ -x /usr/local/bin/zig ] || [ -x /opt/zig/zig ] && echo 1 || echo 0)}
 
 # ------------------------------------------------------------------------------
 # 3. Standard Shell Completions Directories
