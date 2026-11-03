@@ -383,36 +383,49 @@ run_detect() {
     detected=false
   fi
 
-  # 3. Global Node Modules Check
-  log_info "3. Global Node Modules:"
-  local global_root
-  # Retrieve the global npm root directory.
+  # 3. Node Modules Check (Local and Global Resolution)
+  log_info "3. Node Modules Resolution:"
+  local local_node_modules global_root node_path_val
+  local_node_modules="${compiler_dir}/node_modules"
   global_root="$(npm root -g 2>/dev/null || echo "")"
-  if [[ -z "$global_root" ]]; then
-    log_error "  - Could not resolve global npm root directory"
-    detected=false
+  node_path_val="$local_node_modules"
+
+  if [[ -d "$local_node_modules" ]]; then
+    log_success "  - Local node_modules: Found ($local_node_modules)"
   else
-    log_success "  - Global npm root: $global_root"
-    # List of required compiler packages.
-    local deps=(
-      "markdown-it"
-      "markdown-it-emoji"
-      "markdown-it-container"
-      "markdown-it-plantuml"
-      "@vscode/markdown-it-katex"
-      "highlight.js"
-      "puppeteer-core"
-    )
-    # Iterate and test loading each dependency within Node.js.
-    for dep in "${deps[@]}"; do
-      if NODE_PATH="$global_root" node -e "require('$dep')" &>/dev/null; then
-        log_success "    * ${dep}: Detected"
-      else
-        log_error "    * ${dep}: NOT FOUND"
-        detected=false
-      fi
-    done
+    log_info "  - Local node_modules: Not found (Run $SCRIPT_NAME --generate-modules to generate on demand)"
   fi
+
+  if [[ -n "$global_root" ]]; then
+    log_success "  - Global npm root: $global_root"
+    if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
+      node_path_val="${node_path_val};${global_root}"
+    else
+      node_path_val="${node_path_val}:${global_root}"
+    fi
+  else
+    log_info "  - Global npm root: Not resolved"
+  fi
+
+  # List of required compiler packages.
+  local deps=(
+    "markdown-it"
+    "markdown-it-emoji"
+    "markdown-it-container"
+    "markdown-it-plantuml"
+    "@vscode/markdown-it-katex"
+    "highlight.js"
+    "puppeteer-core"
+  )
+  # Iterate and test loading each dependency within Node.js.
+  for dep in "${deps[@]}"; do
+    if NODE_PATH="$node_path_val" node -e "require('$dep')" &>/dev/null; then
+      log_success "    * ${dep}: Detected"
+    else
+      log_error "    * ${dep}: NOT FOUND"
+      detected=false
+    fi
+  done
 
   # Print diagnostics result footer
   log_info "============================================================================="
@@ -430,6 +443,35 @@ run_detect() {
 # =============================================================================
 # Installation Module
 # =============================================================================
+
+# generate_modules - Installs required dependencies locally in md2pdf_compiler/node_modules
+generate_modules() {
+  log_info "Generating local compiler node_modules in md2pdf_compiler/..."
+
+  # Verify npm is present in PATH before execution.
+  if ! command -v npm &> /dev/null; then
+    die "npm not found. Please install Node.js first."
+  fi
+
+  local compiler_dir
+  compiler_dir="$(dirname "$SCRIPT_PATH")/md2pdf_compiler"
+  if [[ ! -d "$compiler_dir" ]]; then
+    die "md2pdf_compiler directory not found at $compiler_dir"
+  fi
+
+  if [[ ! -f "$compiler_dir/package.json" ]]; then
+    die "package.json not found in $compiler_dir"
+  fi
+
+  log_info "Running 'npm install' inside $compiler_dir..."
+  if (cd "$compiler_dir" && npm install); then
+    log_success "Local node_modules successfully generated."
+    # Rerun diagnostics tool checks after generation succeeds.
+    run_detect "false"
+  else
+    die "Failed to generate local node_modules in $compiler_dir"
+  fi
+}
 
 # install_dependencies - Installs required dependencies globally via npm
 install_dependencies() {
@@ -500,9 +542,10 @@ convert_single_file() {
   local force_overwrite="${4:-false}"
   local output_format="${5:-json}"
 
-  # Extract the base name of the source markdown file (stripping the path and .md extension).
-  local basename
-  basename="$(basename "$source_file" .md)"
+  # Extract the base name of the source markdown file (stripping the path and any extension).
+  local raw_basename basename
+  raw_basename="$(basename "$source_file")"
+  basename="${raw_basename%.*}"
   
   # Compute the target destination PDF filepath.
   # Use parameter expansion trailing slash strip to prevent double-slash creation.
@@ -837,8 +880,9 @@ validate_args() {
   # Assert the source directory exists.
   [[ -d "$source_dir" ]] || die "Source directory not found: $source_dir"
 
-  # Assert Node.js, CSS styles folder, and layout templates folder exist.
+  # Assert Node.js, compiler script, CSS styles folder, and layout templates folder exist.
   command -v node &> /dev/null || die "Node.js not found. Please install Node.js first."
+  [[ -f "$(dirname "$SCRIPT_PATH")/md2pdf_compiler/md2pdf_compiler.js" ]] || die "Compiler script not found: md2pdf_compiler/md2pdf_compiler.js"
   [[ -d "$(dirname "$SCRIPT_PATH")/md2pdf_compiler/css" ]] || die "Local CSS styles directory not found. Please ensure 'css' folder exists inside the md2pdf_compiler directory."
   [[ -d "$(dirname "$SCRIPT_PATH")/md2pdf_compiler/html" ]] || die "Local HTML templates directory not found. Please ensure 'html' folder exists inside the md2pdf_compiler directory."
 
@@ -867,16 +911,17 @@ Markdown to PDF Converter (md2pdf.sh)
 Usage: $SCRIPT_NAME [OPTIONS]
 
 Primary Options:
-  -d, --detect          Detect Node.js and compiler dependencies.
-  -i, --install         Install compiler dependencies globally (use with --detect).
-  -c, --config <file>   Path to JSON config file (required for conversion).
-  -s, --source <dir>    Source directory containing .md files (required).
-  -t, --target <dir>    Target directory for generated PDFs (required).
-  -f, --force           Force overwrite of existing target PDFs (skipped by default).
+  --detect              Detect Node.js and compiler dependencies.
+  --generate-modules    Generate local node_modules in md2pdf_compiler (on demand).
+  --install             Install compiler dependencies globally (use with --detect).
+  --config <file>       Path to JSON config file (required for conversion).
+  --source <dir>        Source directory containing .md files (required).
+  --target <dir>        Target directory for generated PDFs (required).
+  --force               Force overwrite of existing target PDFs (skipped by default).
   --format <json|text>  Specify the output results format (default: json).
   --log <file>          Path to log output file (receives structured conversion summary).
-  -v, --version         Show script version.
-  -h, --help            Show this help message.
+  --version             Show script version.
+  --help                Show this help message.
 
 Path Normalization (Windows / Linux Compatibility):
   The script automatically normalizes all path inputs to the Windows mixed
@@ -887,14 +932,14 @@ Examples:
   # Detect required tools
   $SCRIPT_NAME --detect
 
-  # Detect and install missing npm packages
+  # Generate or re-create local node_modules on demand
+  $SCRIPT_NAME --generate-modules
+
+  # Detect and install missing npm packages globally
   $SCRIPT_NAME --detect --install
 
   # Run batch markdown conversion
   $SCRIPT_NAME --config config.json --source ./docs --target ./pdfs
-
-  # Run batch conversion using shorthand parameters
-  $SCRIPT_NAME -c config.json -s ./docs -t ./pdfs
 
 =============================================================================
 EOF
@@ -918,6 +963,7 @@ main() {
   # Initialize local configuration variables.
   local do_detect=false
   local do_install=false
+  local do_generate_modules=false
   local force_overwrite=false
   local config_file=""
   local source_dir=""
@@ -928,38 +974,43 @@ main() {
   # Loop through CLI options using a shift parser.
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      -d | --detect)
+      --detect)
         # Set detect mode to true.
         do_detect=true
         shift
         ;;
-      -i | --install)
+      --generate-modules)
+        # Set generate modules mode to true.
+        do_generate_modules=true
+        shift
+        ;;
+      --install)
         # Set install mode to true.
         do_install=true
         shift
         ;;
-      -c | --config)
+      --config)
         # Validate that the config argument has a value.
         [[ -n "${2:-}" ]] || die "--config requires a value"
         # Normalize the config file path.
         config_file="$(format_path "$2")"
         shift 2
         ;;
-      -s | --source)
+      --source)
         # Validate that the source directory argument has a value.
         [[ -n "${2:-}" ]] || die "--source requires a value"
         # Normalize the source directory path.
         source_dir="$(format_path "$2")"
         shift 2
         ;;
-      -t | --target)
+      --target)
         # Validate that the target directory argument has a value.
         [[ -n "${2:-}" ]] || die "--target requires a value"
         # Normalize the target directory path.
         target_dir="$(format_path "$2")"
         shift 2
         ;;
-      -f | --force)
+      --force)
         # Force overwriting existing PDFs.
         force_overwrite=true
         shift
@@ -979,12 +1030,12 @@ main() {
         log_file_path="$(format_path "$2")"
         shift 2
         ;;
-      -v | --version)
+      --version)
         # Print script version and exit.
         show_version
         exit 0
         ;;
-      -h | --help)
+      --help)
         # Print help documentation and exit.
         show_usage
         exit 0
@@ -996,6 +1047,12 @@ main() {
     esac
   done
 
+  # Process logic when generate-modules flag is active.
+  if $do_generate_modules; then
+    generate_modules
+    exit $?
+  fi
+
   # Process logic when detect flag is active.
   if $do_detect; then
     if run_detect "$do_install"; then
@@ -1005,7 +1062,7 @@ main() {
       install_dependencies
       exit $?
     else
-      log_info "Use --install to install missing dependencies"
+      log_info "Use --generate-modules to install locally, or --install to install globally"
       exit 1
     fi
   fi
@@ -1035,8 +1092,9 @@ main() {
   # Call validator to assert filesystem integrity.
   validate_args "$config_file" "$source_dir" "$target_dir"
   
-  # Dispatch parallel compilation workers.
-  run_conversion "$config_file" "$source_dir" "$target_dir" "$force_overwrite" "$output_format" "$log_file_path"
+  # Dispatch parallel compilation workers and capture exit status.
+  local conversion_status=0
+  run_conversion "$config_file" "$source_dir" "$target_dir" "$force_overwrite" "$output_format" "$log_file_path" || conversion_status=$?
 
   # Restore original stdout and stderr descriptors to flush background writers cleanly.
   if $log_redirected; then
@@ -1044,6 +1102,8 @@ main() {
     exec 2>&4 4>&-
     wait
   fi
+
+  return $conversion_status
 }
 
 # Sourcing guard: Prevents automatic script execution if this script file is sourced as a library

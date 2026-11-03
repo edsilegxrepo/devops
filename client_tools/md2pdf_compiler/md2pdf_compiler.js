@@ -112,13 +112,13 @@ let format = "text";
 
 // Loop through all parsed command line options.
 for (let i = 0; i < args.length; i++) {
-	if (args[i] === "--config-file" || args[i] === "-c") {
+	if (args[i] === "--config-file") {
 		// Advance index and retrieve the config JSON path.
 		configFile = args[++i];
-	} else if (args[i] === "--source" || args[i] === "-s") {
+	} else if (args[i] === "--source") {
 		// Advance index and retrieve the source markdown file path.
 		sourceFile = args[++i];
-	} else if (args[i] === "--target" || args[i] === "-t") {
+	} else if (args[i] === "--target") {
 		// Advance index and retrieve the target output PDF path.
 		targetFile = args[++i];
 	} else if (args[i] === "--format") {
@@ -295,6 +295,19 @@ const highlightStyle =
 	config.markdown_options?.highlight_style || "tomorrow.css";
 const tomorrowCss = fs.readFileSync(path.join(cssDir, highlightStyle), "utf8");
 
+// Read KaTeX math styling stylesheet if available in node_modules or css folder.
+let katexCss = "";
+const katexCandidates = [
+	path.join(__dirname, "node_modules", "katex", "dist", "katex.min.css"),
+	path.join(cssDir, "katex.min.css"),
+];
+for (const cand of katexCandidates) {
+	if (fs.existsSync(cand)) {
+		katexCss = fs.readFileSync(cand, "utf8");
+		break;
+	}
+}
+
 // Inject custom CSS adjustments to fix Mermaid layout and page breaks
 // Fixes height overflow bounds and forces logical blocks to avoid breaking across printed pages.
 const customAdjustments = `
@@ -312,6 +325,7 @@ const combinedStyles = `
 ${markdownCss}
 ${markdownPdfCss}
 ${tomorrowCss}
+${katexCss}
 ${config.css || ""}
 ${customAdjustments}
 `;
@@ -358,7 +372,15 @@ ${htmlBody}
 // 8. Write temporary HTML file next to source markdown (resolves relative assets)
 // The HTML file is temporarily saved next to the Markdown file, which allows Chromium
 // to successfully resolve and render relative image resources and links.
-const tempHtmlPath = sourceFile.replace(/\.md$/i, ".tmp.html");
+let tempHtmlPath = sourceFile.replace(/\.[^./\\]+$/i, ".tmp.html");
+if (tempHtmlPath === sourceFile) {
+	tempHtmlPath = `${sourceFile}.tmp.html`;
+}
+if (path.resolve(tempHtmlPath) === path.resolve(sourceFile)) {
+	throw new Error(
+		`Temporary HTML path collision with source file: ${sourceFile}`,
+	);
+}
 // Write the fully constructed HTML document to the temp file.
 fs.writeFileSync(tempHtmlPath, finalHtml, "utf8");
 
@@ -470,12 +492,15 @@ process.on("SIGTERM", async () => {
 
 		// Create a new tab page.
 		const page = await browser.newPage();
-		// Disable page load timeouts to ensure large files render completely.
-		await page.setDefaultTimeout(0);
+		// Set a bounded navigation & evaluation timeout (60s) to prevent infinite worker hangs.
+		await page.setDefaultTimeout(60000);
 
 		// Navigate to temp HTML file, wait for network idle to ensure Mermaid scripts render
-		const fileUrl = `file:///${path.resolve(tempHtmlPath).replace(/\\/g, "/")}`;
-		await page.goto(fileUrl, { waitUntil: "networkidle0" });
+		const resolvedTempPath = path.resolve(tempHtmlPath).replace(/\\/g, "/");
+		const fileUrl = resolvedTempPath.startsWith("/")
+			? `file://${resolvedTempPath}`
+			: `file:///${resolvedTempPath}`;
+		await page.goto(fileUrl, { waitUntil: "networkidle0", timeout: 60000 });
 
 		// Wait for all document fonts to load completely
 		await page.evaluate(() => document.fonts.ready);
@@ -483,10 +508,18 @@ process.on("SIGTERM", async () => {
 		// Conditional waiting if Mermaid is present in the rendered HTML
 		const hasMermaid = htmlBody.includes('class="mermaid"');
 		if (hasMermaid) {
-			// Wait for Mermaid SVGs to be inserted into the DOM.
+			// Wait for all Mermaid container blocks to render their SVGs.
 			// Catches rendering timeouts to prevent compilation crashes on bad diagram codes.
 			await page
-				.waitForSelector(".mermaid svg", { timeout: 15000 })
+				.waitForFunction(
+					() => {
+						const containers = document.querySelectorAll(".mermaid");
+						if (containers.length === 0) return true;
+						const svgs = document.querySelectorAll(".mermaid svg");
+						return svgs.length >= containers.length;
+					},
+					{ timeout: 15000 },
+				)
 				.catch(() => {
 					if (format === "json") {
 						console.error(

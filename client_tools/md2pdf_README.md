@@ -137,7 +137,12 @@ sequenceDiagram
     
     CLI->>Main: Execute script with arguments
     
-    alt Option: --detect
+    alt Option: --generate-modules
+        Main->>Main: generate_modules() (npm install in md2pdf_compiler/)
+        Main->>Detect: Re-run environment diagnostics
+        Detect-->>CLI: Print final status
+        Note over Main: Exit with status code
+    else Option: --detect
         Main->>Detect: Perform environment diagnostics
         alt All Dependencies Present
             Detect-->>CLI: Print success status
@@ -148,7 +153,7 @@ sequenceDiagram
             Detect-->>CLI: Print final status
             Note over Main: Exit with status code
         else Dependencies Missing & No --install
-            Main-->>CLI: Print warning (Use --install) & Exit 1
+            Main-->>CLI: Print warning (Use --generate-modules or --install) & Exit 1
         end
     else Option: --config --source --target
         Main->>Main: Normalize paths via format_path()
@@ -250,6 +255,12 @@ To prevent command injection via malformed filenames (e.g., `$(reboot).md`), the
 *   Avoids evaluation commands like `eval`.
 *   Passes arguments to worker subshells as positional parameters (`$1`, `$2`, etc.), preventing argument injection.
 
+### Dependency Hardening & Vulnerability Management
+All compiler modules and transitive dependencies are actively pinned, audited, and hardened against known CVEs:
+*   **Zod Hardening (`CVE-2023-54404`)**: `puppeteer-core` is pinned to `25.16.0`, which resolves transitive `zod` to version `4.6.7` (satisfying `>= 4.6.6` and mitigating regular expression denial of service / prototype vulnerabilities).
+*   **KaTeX Prototype Pollution Mitigation (`GHSA-238p-pmpm-9mq7`)**: The Markdown-It KaTeX plugin (`@vscode/markdown-it-katex@1.1.2`) originally pinned `katex@^0.16.4`, pulling versions vulnerable to prototype pollution bypass. An explicit npm `overrides` block in `package.json` elevates KaTeX to `0.19.1`, bringing `npm audit` to **0 vulnerabilities**.
+*   **Local Isolated Environment**: Generating dependencies locally via `--generate-modules` ensures that project-level overrides and exact lockfile checksums are enforced, removing dependencies on unverified system-wide global packages.
+
 ---
 
 ## 6. Code Quality and Linting Compliance
@@ -269,26 +280,27 @@ Code quality is enforced using the repository's linter framework:
 
 ## 7. Command Line Arguments
 
-The script parses options using an iterative case-loop. Options can be passed in short or long forms.
+The script parses options using an iterative case-loop. All parameters use long-form flags exclusively.
 
-| Short Flag | Long Flag | Parameter Type | Default Value | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `-d` | `--detect` | Switch | `false` | Executes diagnostic check for Node.js and global dependencies. |
-| `-i` | `--install` | Switch | `false` | Automatically downloads and installs compiler node modules globally. |
-| `-c` | `--config` | File Path | N/A | Path to the JSON configuration file for the converter. |
-| `-s` | `--source` | Directory Path| N/A | Source folder containing the input `.md` files. |
-| `-t` | `--target` | Directory Path| N/A | Destination folder where the `.pdf` outputs are saved. |
-| `-f` | `--force` | Switch | `false` | Force overwrite of existing target PDFs (skipped by default). |
-| N/A | `--format` | String | `json` | Specify the output results format (`json` or `text`). |
-| N/A | `--log` | File Path | N/A | Path to log output file (appends combined stdout and stderr logs). |
-| `-v` | `--version` | Switch | `false` | Prints the version string (`1.2.0xg`) and exits. |
-| `-h` | `--help` | Switch | `false` | Renders the formatted help manual and exits. |
+| Long Flag | Parameter Type | Default Value | Description |
+| :--- | :--- | :--- | :--- |
+| `--detect` | Switch | `false` | Executes diagnostic check for Node.js, system binaries, and compiler dependencies. |
+| `--generate-modules` | Switch | `false` | Generates local `node_modules` in `md2pdf_compiler/` on demand (`npm install`). |
+| `--install` | Switch | `false` | Automatically downloads and installs compiler node modules globally (`npm install -g`). |
+| `--config` | File Path | N/A | Path to the JSON configuration file for the converter. |
+| `--source` | Directory Path| N/A | Source folder containing the input `.md` files. |
+| `--target` | Directory Path| N/A | Destination folder where the `.pdf` outputs are saved. |
+| `--force` | Switch | `false` | Force overwrite of existing target PDFs (skipped by default). |
+| `--format` | String | `json` | Specify the output results format (`json` or `text`). |
+| `--log` | File Path | N/A | Path to log output file (appends combined stdout and stderr logs). |
+| `--version` | Switch | `false` | Prints the version string (`1.2.0xg`) and exits. |
+| `--help` | Switch | `false` | Renders the formatted help manual and exits. |
 
 ---
 
 ## 8. Configuration Specification (`md2pdf_config.json`)
 
-The conversion utility accepts a JSON configuration file passed via the `-c` or `--config` argument to customize rendering engine options. A reference configuration is located at [md2pdf_config.json](md2pdf_config.json).
+The conversion utility accepts a JSON configuration file passed via the `--config` argument to customize rendering engine options. A reference configuration is located at [md2pdf_config.json](md2pdf_config.json).
 
 ### Structure Breakdown
 The parameters follow standard structures parsed by our Node.js compiler:
@@ -330,24 +342,24 @@ The utility separates program output into two distinct streams in accordance wit
 1. **Capture Data Only**:
    To parse the results programmatically without progress info:
    ```bash
-   ./md2pdf.sh -c config.json -s ./docs -t ./pdfs > data.json
+   ./md2pdf.sh --config config.json --source ./docs --target ./pdfs > data.json
    ```
    *Only the clean JSON array is written to `data.json`. All progress logs remain visible in the terminal.*
 
 2. **Capture Logs Only**:
    To capture diagnostics and error details in a file while viewing the data table on the screen:
    ```bash
-   ./md2pdf.sh -c config.json -s ./docs -t ./pdfs --format text 2> progress.log
+   ./md2pdf.sh --config config.json --source ./docs --target ./pdfs --format text 2> progress.log
    ```
 
 3. **Capture Both Separately**:
    ```bash
-   ./md2pdf.sh -c config.json -s ./docs -t ./pdfs --format json > data.json 2> progress.log
+   ./md2pdf.sh --config config.json --source ./docs --target ./pdfs --format json > data.json 2> progress.log
    ```
 
 4. **Discard All Logs (Silent Mode)**:
    ```bash
-   ./md2pdf.sh -c config.json -s ./docs -t ./pdfs 2> /dev/null
+   ./md2pdf.sh --config config.json --source ./docs --target ./pdfs 2> /dev/null
    ```
 
 ---
@@ -355,89 +367,100 @@ The utility separates program output into two distinct streams in accordance wit
 ## 10. Execution Examples and Output Samples
 
 ### Example 1: Environment Detection (Dependencies Available)
-Checks if Node.js, npm, jq, configurations, local stylesheets, and the global Node modules are ready:
+Checks if Node.js, npm, jq, configurations, local stylesheets, and the Node modules (local and global) are ready:
 ```bash
-./md2pdf.sh -d
+./md2pdf.sh --detect
 ```
 
 **Output:**
 ```text
-[INFO] =============================================================================
-[INFO]  md2pdf Diagnostics - Prerequisites Verification
-[INFO] =============================================================================
-[INFO] 1. System Binaries:
-[OK]   - Node.js: Found (v24.17.0)
-[OK]   - npm: Found (v11.17.0)
-[INFO]   - jq: Not found (Optional; using fallback Node.js parser for JSON validation)
-[INFO] 2. Workspace Assets & Configs:
-[OK]   - md2pdf_config.json: Found
-[OK]   - md2pdf_compiler/ folder: Found
-[OK]   - md2pdf_compiler.js: Found
-[OK]   - package.json: Found
-[OK]   - package-lock.json: Found
-[OK]   - html/ folder: Found
-[OK]     * html/header.html: Found
-[OK]     * html/footer.html: Found
-[OK]   - css/ folder: Found
-[OK]     * css/markdown.css: Found
-[OK]     * css/markdown-pdf.css: Found
-[OK]     * css/tomorrow.css: Found
-[INFO] 3. Global Node Modules:
-[OK]   - Global npm root: D:\dev\node\node_modules
-[OK]     * markdown-it: Detected
-[OK]     * markdown-it-emoji: Detected
-[OK]     * markdown-it-container: Detected
-[OK]     * markdown-it-plantuml: Detected
-[OK]     * @vscode/markdown-it-katex: Detected
-[OK]     * highlight.js: Detected
-[OK]     * puppeteer-core: Detected
-[INFO] =============================================================================
-[OK] All prerequisites are satisfied. Ready for conversion.
-[INFO] =============================================================================
+{"timestamp":"2026-11-03T12:02:36-0600","level":"info","msg":"============================================================================="}
+{"timestamp":"2026-11-03T12:02:36-0600","level":"info","msg":" md2pdf Diagnostics - Prerequisites Verification"}
+{"timestamp":"2026-11-03T12:02:36-0600","level":"info","msg":"============================================================================="}
+{"timestamp":"2026-11-03T12:02:36-0600","level":"info","msg":"1. System Binaries:"}
+{"timestamp":"2026-11-03T12:02:36-0600","level":"success","msg":"  - Node.js: Found (v26.13.0)"}
+{"timestamp":"2026-11-03T12:02:37-0600","level":"success","msg":"  - npm: Found (v12.2.1)"}
+{"timestamp":"2026-11-03T12:02:37-0600","level":"success","msg":"  - jq: Found (jq-1.8.1)"}
+{"timestamp":"2026-11-03T12:02:37-0600","level":"info","msg":"2. Workspace Assets & Configs:"}
+{"timestamp":"2026-11-03T12:02:37-0600","level":"success","msg":"  - md2pdf_config.json: Found"}
+{"timestamp":"2026-11-03T12:02:37-0600","level":"success","msg":"  - Configured browser path: Found (D:\\inet\\www\\chromium\\chrome.exe)"}
+{"timestamp":"2026-11-03T12:02:37-0600","level":"success","msg":"  - md2pdf_compiler/ folder: Found"}
+{"timestamp":"2026-11-03T12:02:37-0600","level":"success","msg":"  - md2pdf_compiler.js: Found"}
+{"timestamp":"2026-11-03T12:02:37-0600","level":"success","msg":"  - package.json: Found"}
+{"timestamp":"2026-11-03T12:02:37-0600","level":"success","msg":"  - package-lock.json: Found"}
+{"timestamp":"2026-11-03T12:02:37-0600","level":"success","msg":"  - html/ folder: Found"}
+{"timestamp":"2026-11-03T12:02:37-0600","level":"success","msg":"    * html/header.html: Found"}
+{"timestamp":"2026-11-03T12:02:37-0600","level":"success","msg":"    * html/footer.html: Found"}
+{"timestamp":"2026-11-03T12:02:37-0600","level":"success","msg":"  - css/ folder: Found"}
+{"timestamp":"2026-11-03T12:02:37-0600","level":"success","msg":"    * css/markdown.css: Found"}
+{"timestamp":"2026-11-03T12:02:37-0600","level":"success","msg":"    * css/markdown-pdf.css: Found"}
+{"timestamp":"2026-11-03T12:02:37-0600","level":"success","msg":"    * css/tomorrow.css: Found"}
+{"timestamp":"2026-11-03T12:02:37-0600","level":"success","msg":"    * css/mermaid.min.js: Found (Local asset resolved)"}
+{"timestamp":"2026-11-03T12:02:37-0600","level":"info","msg":"3. Node Modules Resolution:"}
+{"timestamp":"2026-11-03T12:02:38-0600","level":"success","msg":"  - Local node_modules: Found (E:/data/devel/build/code/private/devops/client_tools/md2pdf_compiler/node_modules)"}
+{"timestamp":"2026-11-03T12:02:38-0600","level":"success","msg":"  - Global npm root: d:\\dev\\node\\node_modules"}
+{"timestamp":"2026-11-03T12:02:38-0600","level":"success","msg":"    * markdown-it: Detected"}
+{"timestamp":"2026-11-03T12:02:38-0600","level":"success","msg":"    * markdown-it-emoji: Detected"}
+{"timestamp":"2026-11-03T12:02:38-0600","level":"success","msg":"    * markdown-it-container: Detected"}
+{"timestamp":"2026-11-03T12:02:38-0600","level":"success","msg":"    * markdown-it-plantuml: Detected"}
+{"timestamp":"2026-11-03T12:02:38-0600","level":"success","msg":"    * @vscode/markdown-it-katex: Detected"}
+{"timestamp":"2026-11-03T12:02:39-0600","level":"success","msg":"    * highlight.js: Detected"}
+{"timestamp":"2026-11-03T12:02:39-0600","level":"success","msg":"    * puppeteer-core: Detected"}
+{"timestamp":"2026-11-03T12:02:39-0600","level":"info","msg":"============================================================================="}
+{"timestamp":"2026-11-03T12:02:39-0600","level":"success","msg":"All prerequisites are satisfied. Ready for conversion."}
+{"timestamp":"2026-11-03T12:02:39-0600","level":"info","msg":"============================================================================="}
 ```
 
 ---
 
-### Example 2: Installation Lifecycle
-Installs missing npm dependencies globally:
+### Example 2: On-Demand Local Node Modules Generation
+Generates or updates local `node_modules` in `md2pdf_compiler/` strictly adhering to `package.json` and `package-lock.json` (idempotent, safe, and zero vulnerabilities):
+```bash
+./md2pdf.sh --generate-modules
+```
+
+**Output:**
+```text
+{"timestamp":"2026-11-03T12:04:00-0600","level":"info","msg":"Generating local compiler node_modules in md2pdf_compiler/..."}
+{"timestamp":"2026-11-03T12:04:00-0600","level":"info","msg":"Running 'npm install' inside E:/data/devel/build/code/private/devops/client_tools/md2pdf_compiler..."}
+
+up to date, audited 40 packages in 758ms
+found 0 vulnerabilities
+
+{"timestamp":"2026-11-03T12:04:00-0600","level":"success","msg":"Local node_modules successfully generated."}
+{"timestamp":"2026-11-03T12:04:00-0600","level":"info","msg":"============================================================================="}
+{"timestamp":"2026-11-03T12:04:00-0600","level":"info","msg":" md2pdf Diagnostics - Prerequisites Verification"}
+{"timestamp":"2026-11-03T12:04:00-0600","level":"info","msg":"============================================================================="}
+...
+{"timestamp":"2026-11-03T12:04:03-0600","level":"success","msg":"All prerequisites are satisfied. Ready for conversion."}
+```
+
+---
+
+### Example 3: Global Installation Lifecycle
+Installs missing npm dependencies globally via npm:
 ```bash
 ./md2pdf.sh --detect --install
 ```
 
 **Output:**
 ```text
-[INFO] =============================================================================
-[INFO]  md2pdf Diagnostics - Prerequisites Verification
-[INFO] =============================================================================
-[INFO] 1. System Binaries:
-[OK]   - Node.js: Found (v24.17.0)
-[OK]   - npm: Found (v11.17.0)
+{"timestamp":"2026-11-03T12:02:36-0600","level":"info","msg":"============================================================================="}
+{"timestamp":"2026-11-03T12:02:36-0600","level":"info","msg":" md2pdf Diagnostics - Prerequisites Verification"}
+{"timestamp":"2026-11-03T12:02:36-0600","level":"info","msg":"============================================================================="}
 ...
-[INFO] 3. Global Node Modules:
-[OK]   - Global npm root: D:\dev\node\node_modules
-[ERROR]   * markdown-it: NOT FOUND
-...
-[INFO] =============================================================================
-[ERROR] Some prerequisites are missing. Please fix the errors above.
-[INFO] =============================================================================
 [INFO] Installing compiler dependencies globally via npm...
 [OK]   Installation complete
-[INFO] =============================================================================
-[INFO]  md2pdf Diagnostics - Prerequisites Verification
-[INFO] =============================================================================
-[INFO] 1. System Binaries:
-[OK]   - Node.js: Found (v24.17.0)
 ...
 [OK] All prerequisites are satisfied. Ready for conversion.
-[INFO] =============================================================================
 ```
 
 ---
 
-### Example 3: Batch Conversion Pass (Default: JSON format)
+### Example 4: Batch Conversion Pass (Default: JSON format)
 Converts a folder of markdown files and outputs the results summary in JSON:
 ```bash
-./md2pdf.sh -c md2pdf_config.json -s ./docs -t ./pdfs
+./md2pdf.sh --config md2pdf_config.json --source ./docs --target ./pdfs
 ```
 
 **Output:**
@@ -472,10 +495,10 @@ Converts a folder of markdown files and outputs the results summary in JSON:
 
 ---
 
-### Example 4: Batch Conversion Pass (Tabular Text layout)
+### Example 5: Batch Conversion Pass (Tabular Text layout)
 Converts a folder of markdown files and outputs the results summary in a clean tabular text table:
 ```bash
-./md2pdf.sh -c md2pdf_config.json -s ./docs -t ./pdfs --format text
+./md2pdf.sh --config md2pdf_config.json --source ./docs --target ./pdfs --format text
 ```
 
 **Output:**
@@ -500,10 +523,10 @@ Converts a folder of markdown files and outputs the results summary in a clean t
 
 ---
 
-### Example 5: Log File Redirection
+### Example 6: Log File Redirection
 Generates conversion results and appends the combined stdout and stderr streams directly to an output log file while still outputting to the terminal:
 ```bash
-./md2pdf.sh -c md2pdf_config.json -s ./docs -t ./pdfs --format json --log results_log.json
+./md2pdf.sh --config md2pdf_config.json --source ./docs --target ./pdfs --format json --log results_log.json
 ```
 
 **Output:**
@@ -531,7 +554,7 @@ Generates conversion results and appends the combined stdout and stderr streams 
 
 ---
 
-### Example 6: Reference Configuration File (`md2pdf_config.json`)
+### Example 7: Reference Configuration File (`md2pdf_config.json`)
 A complete reference configuration file detailing all supported PDF, Puppeteer browser launch, Markdown parsing, and Mermaid rendering settings:
 ```json
 {
