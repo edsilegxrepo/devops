@@ -91,3 +91,6 @@ repomix.config.json
 
 # --- Vendor / Local Assets ---
 **/mermaid.min.js
+
+# Packaging Sources
+!**/SOURCES/**

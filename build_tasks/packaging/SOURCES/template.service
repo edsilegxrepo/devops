@@ -1,0 +1,79 @@
+# ==============================================================================
+# systemd Unit Service Template for Daemons (RHEL 8/9/10 & Ubuntu/Debian)
+# ==============================================================================
+# Installed to: %{_unitdir}/<name>.service  (/usr/lib/systemd/system/<name>.service)
+#
+# Cross-Distribution Compatibility Highlights:
+#   1. Environment Files:
+#      Includes both /etc/default/<name> (Debian/Ubuntu) and
+#      /etc/sysconfig/<name> (RHEL/CentOS) with leading '-' to safely ignore missing files.
+#   2. Dynamic Directory Management (systemd v235+):
+#      StateDirectory=, LogsDirectory=, ConfigurationDirectory=, RuntimeDirectory=
+#      automatically provision /var/lib/<name>, /var/log/<name>, /etc/<name>,
+#      and /run/<name> with correct user/group ownership on service start.
+#   3. Security Sandboxing:
+#      Hardened baseline adhering to CIS benchmarks for both RHEL and Debian.
+#   4. Process Lifecycle:
+#      Uses Type=simple (or notify for sd_notify daemons) with auto-restart on failure.
+# ==============================================================================
+
+[Unit]
+Description=<summary_description>
+Documentation=<url>
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<name>
+Group=<name>
+
+# Cross-distribution environment file ingestion
+EnvironmentFile=-/etc/default/<name>
+EnvironmentFile=-/etc/sysconfig/<name>
+EnvironmentFile=-/etc/<name>/<name>.env
+
+# Automatic directory provisioning and runtime isolation (systemd v235+)
+StateDirectory=<name>
+StateDirectoryMode=0750
+LogsDirectory=<name>
+LogsDirectoryMode=0750
+ConfigurationDirectory=<name>
+ConfigurationDirectoryMode=0750
+RuntimeDirectory=<name>
+RuntimeDirectoryMode=0750
+
+WorkingDirectory=/var/lib/<name>
+ExecStart=/usr/bin/<name>
+ExecReload=/bin/kill -s HUP $MAINPID
+
+# Process management and resource limits
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=15s
+LimitNOFILE=65536
+KillMode=mixed
+
+# ------------------------------------------------------------------------------
+# Security Sandboxing & Hardening Baseline (RHEL 8/9/10 & Debian/Ubuntu)
+# ------------------------------------------------------------------------------
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Allow binding to privileged ports (< 1024) without running as root (if needed):
+# CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+# AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+# Read-write paths when ProtectSystem=strict is active
+ReadWritePaths=/var/lib/<name> /var/log/<name>
+
+[Install]
+WantedBy=multi-user.target
+

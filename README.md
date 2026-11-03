@@ -38,6 +38,7 @@ Automation for building, and validating core system components.
 - `rust_upgrade.sh`: Automated management of Rust toolchain deployments and target libraries.
 - `rust_upgrade_win.sh`: Unified, parallelized Rust toolchain deployment, linter compilation, and environment detection manager for Windows (Cygwin/MSYS2).
 - `rust_cachemgr.sh`: Safety-critical caching manager and pruning optimizer for Cargo and compiler caches.
+- `packaging/`: Multi-distribution packaging framework for universal Rust and Go applications, automating static musl compilation, Zig cross-compilation, and unified RPM, Debian (.deb), Linux (.tar.xz), and Windows (.zip) artifact generation.
 
 ### 3. Git Management (`/git_repomgr`)
 Tools for orchestrating large-scale repository synchronization and user management.
