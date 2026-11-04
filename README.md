@@ -27,6 +27,7 @@ Automation for building, and validating core system components.
 - `build_go_exec.sh`: Orchestration wrapper preparing, patching, configuring, and executing Go projects (supporting `git-clone` and `local` modes) with non-interactive overlay patch staging and handover to `build_go.sh`.
 - `build_python_win.sh`: Packaging for Windows Python distributions, focusing on a minimal binary only archive.
 - `bun_upgrade.sh`: Automated lifecycle management, installation, upgrading, caching, and package registry tool for the Bun JavaScript runtime across Windows (Cygwin/MSYS2) and Linux environments.
+- `chartdb-setup.sh`: Repeatable deployment, automated security remediation, and build orchestration framework for the ChartDB database visualization suite (integrating `chartdb-patch.py` for CVE patching, dependency overrides, Vite/Monaco compatibility shims, and SPA dev/production serving).
 - `chromium_upgrade.sh`: Automates downloading, locale-pruning, repackaging, and deploying Chromium browser builds across Windows (Cygwin/MSYS2) and Linux environments.
 - `javacmd_build.sh`: Unified, generic Java compilation and packaging wrapper integrating Checkstyle, PMD, and SpotBugs validation.
 - `jdk_packaging.sh`: Automates Azul Zulu JDK repackaging, footprint minimization, Maven integration, and JTLSTester diagnostic injection.
