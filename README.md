@@ -92,6 +92,7 @@ A comprehensive suite for managing multi-version Python environments and package
 ### 7. Client Connectivity Tools (`/client_tools`)
 Specialized utilities for end-user environment management.
 - `CitrixTool.ps1`: Citrix Workspace Backup & Restore CLI Utility.
+- `craftapps_package.sh`: Cross-platform packaging and release automation pipeline for Storytold desktop applications (monitoring GitHub releases, validating Linux/Windows binaries, bundling unified multi-platform archives, and atomically synchronizing libraries and upload staging).
 - `md2pdf.sh`: High-performance, concurrent Markdown to PDF batch converter (using a custom Node.js compiler with Puppeteer browser rendering).
 - `generate_pdf.sh`: High-performance, concurrent Office to PDF batch converter (using LibreOffice headless rendering, preserving original file modification timestamps for compliance auditing, and outputting NDJSON logs).
 - `pdf_text-extractor.sh`: High-performance, concurrent layout-preserved plain text extractor from PDF documents, supporting single-file/batch operations, throttle concurrency, and NDJSON logging.
