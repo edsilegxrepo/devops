@@ -1,12 +1,12 @@
 # `check-container-updates.sh` Documentation
 
-Comprehensive operational and architecture guide for [`/opt/scripts/check-container-updates.sh`](file:///opt/scripts/check-container-updates.sh).
+Comprehensive operational and architecture guide for [`/opt/scripts/check-container-updates.sh`](../check-container-updates.sh).
 
 ---
 
 ## 1. Application Overview and Objectives
 
-[`check-container-updates.sh`](file:///opt/scripts/check-container-updates.sh) is a container lifecycle monitor and update automation tool designed for production Podman environments running systemd Quadlet container services.
+[`check-container-updates.sh`](../check-container-updates.sh) is a container lifecycle monitor and update automation tool designed for production Podman environments running systemd Quadlet container services.
 
 ### Key Objectives
 * **Non-Intrusive Registry Inspection:** Inspect remote registries via `podman auto-update --dry-run` to detect newer container images without interrupting active workloads.
@@ -70,10 +70,10 @@ Quadlets translate declarative container configuration files into standard syste
 * **Generator Location:** `/usr/lib/systemd/system-generators/podman-system-generator`
 * **Configuration Directory:** `/etc/containers/systemd/`
 * **Active Production Specifications on Host:**
-  1. [`caddy.container`](file:///etc/containers/systemd/caddy.container): Manages the edge reverse proxy and TLS termination engine.
-  2. [`uptime-kuma.container`](file:///etc/containers/systemd/uptime-kuma.container): Manages the application health monitoring service.
-  3. [`ntfy.container`](file:///etc/containers/systemd/ntfy.container): Manages the HTTP-based push notification server.
-  4. [`kuma.network`](file:///etc/containers/systemd/kuma.network): Declares the isolated user-defined container bridge network.
+  1. [`caddy.container`](../../../etc/containers/systemd/caddy.container): Manages the edge reverse proxy and TLS termination engine.
+  2. [`uptime-kuma.container`](../../../etc/containers/systemd/uptime-kuma.container): Manages the application health monitoring service.
+  3. [`ntfy.container`](../../../etc/containers/systemd/ntfy.container): Manages the HTTP-based push notification server.
+  4. [`kuma.network`](../../../etc/containers/systemd/kuma.network): Declares the isolated user-defined container bridge network.
 
 ### 3. Automated Lifecycle Tracking (`AutoUpdate=registry`)
 Every active `.container` unit declares:
@@ -106,7 +106,7 @@ AutoUpdate=registry
 
 ### Architecture and Design Choices
 * **Quadlet Standard Integration:** Leverages systemd Quadlet architecture (`.container` units with `AutoUpdate=registry`).
-* **DRY Template Engine:** Employs modular HTML snippet templates located in [`templates/container-update/`](file:///opt/scripts/templates) and shared email layouts from [`lib/common.sh`](file:///opt/scripts/lib/common.sh).
+* **DRY Template Engine:** Employs modular HTML snippet templates located in [`templates/container-update/`](../templates) and shared email layouts from [`lib/common.sh`](../lib/common.sh).
 * **Timeout Protection:** Encapsulates registry network operations within configurable timeouts (`timeout 900`) to prevent hanging processes during upstream registry latency.
 * **Clean Trapped Scratch Space:** Uses `mktemp` with automated trap cleanup hooks (`register_cleanup`) to guarantee zero temporary file leakage.
 
@@ -247,7 +247,7 @@ graph TD
     
     subgraph "Privileged Boundary"
         Lock --> PodmanSocket["/run/podman/podman.sock"]
-        Lock --> LogDir["/var/log/jobs/ (0750 root:csysadm)"]
+        Lock --> LogDir["/var/log/jobs/ (0750 root:sysadmin)"]
         Lock --> TempFiles["/tmp/container-scan-*.XXXXXX (0600 root:root)"]
     end
     
@@ -300,7 +300,7 @@ sudo /opt/scripts/check-container-updates.sh --check-only
 ```
 **Sample Terminal Output:**
 ```text
-[*] Starting Podman container update inspection on cs-us-pweb001.criticalsys.net...
+[*] Starting Podman container update inspection on server.example.com...
 [*] Mode: Dry-Run Inspection via 'podman auto-update --dry-run --format json'
 [*] Scan complete: 3 services scanned | 0 updates pending | 3 up to date | 0 failed
 ================================================================================
@@ -317,14 +317,14 @@ Summary: 3 containers monitored, 0 updates available, 0 scan failures.
 ```text
 ================================================================================
 Execution Log: container-updates
-Host:       cs-us-pweb001.criticalsys.net
+Host:       server.example.com
 Start Time: 2026-10-02 18:07:57 UTC
 Script:     /opt/scripts/check-container-updates.sh
 Arguments:  --check-only
 User:       root (UID: 0)
 PID:        109219
 ================================================================================
-[2026-10-02 18:07:57 UTC] [*] Starting Podman container update inspection on cs-us-pweb001.criticalsys.net...
+[2026-10-02 18:07:57 UTC] [*] Starting Podman container update inspection on server.example.com...
 [2026-10-02 18:07:57 UTC] [*] Mode: Dry-Run Inspection via 'podman auto-update --dry-run --format json'
 [2026-10-02 18:07:58 UTC] [*] Scan complete: 3 services scanned | 0 updates pending | 3 up to date | 0 failed
 
@@ -343,7 +343,7 @@ sudo /opt/scripts/check-container-updates.sh --notify-new-only
 ```
 **Sample Output (When all containers are up to date):**
 ```text
-[*] Starting Podman container update inspection on cs-us-pweb001.criticalsys.net...
+[*] Starting Podman container update inspection on server.example.com...
 [*] Mode: Dry-Run Inspection via 'podman auto-update --dry-run --format json'
 [*] Scan complete: 3 services scanned | 0 updates pending | 3 up to date | 0 failed
 [*] Notification policy: All 3 containers up to date. Suppressing email notification (--notify-new-only active).
@@ -355,13 +355,13 @@ sudo /opt/scripts/check-container-updates.sh --auto-update
 ```
 **Sample Output:**
 ```text
-[*] Starting Podman container update inspection on cs-us-pweb001.criticalsys.net...
+[*] Starting Podman container update inspection on server.example.com...
 [*] Scan complete: 3 services scanned | 1 updates pending | 2 up to date | 0 failed
 [!] Policy Mode: AUTO_UPDATE enabled. Applying updates to pending containers...
 Trying to pull docker.io/library/caddy:latest...
 Restarting caddy.service...
 [✓] Auto-update successfully completed.
-[✓] Email notification successfully dispatched to criticalsys.mis@gmail.com.
+[✓] Email notification successfully dispatched to alerts@example.com.
 ```
 
 ---
@@ -370,28 +370,38 @@ Restarting caddy.service...
 
 Deploy automated daily container update checks using systemd:
 
-1. **Service Unit:** `/etc/systemd/system/container-updates.service`
+1. **Service Unit:** `/etc/systemd/system/container-update-check.service`
    ```ini
    [Unit]
-   Description=Podman Container Update Advisory Scan
+   Description=Container Image Update Advisor (Dry-Run Registry Scan)
+   Documentation=file:///opt/scripts/check-container-updates.sh
    After=network-online.target
+   Wants=network-online.target
 
    [Service]
    Type=oneshot
+   User=root
    ExecStart=/opt/scripts/check-container-updates.sh --notify-new-only
+   Nice=10
+   IOSchedulingClass=best-effort
    StandardOutput=journal
    StandardError=journal
+   TimeoutStartSec=15m
+
+   [Install]
+   WantedBy=multi-user.target
    ```
 
-2. **Timer Unit:** `/etc/systemd/system/container-updates.timer`
+2. **Timer Unit:** `/etc/systemd/system/container-update-check.timer`
    ```ini
    [Unit]
-   Description=Daily Podman Container Update Check Timer
+   Description=Daily Container Image Update Advisor Scan
+   Documentation=file:///opt/scripts/check-container-updates.sh
 
    [Timer]
-   OnCalendar=*-*-* 04:00:00
-   RandomizedDelaySec=1800
+   OnCalendar=*-*-* 09:00:00
    Persistent=true
+   RandomizedDelaySec=5m
 
    [Install]
    WantedBy=timers.target
@@ -400,5 +410,5 @@ Deploy automated daily container update checks using systemd:
 3. **Activate:**
    ```bash
    sudo systemctl daemon-reload
-   sudo systemctl enable --now container-updates.timer
+   sudo systemctl enable --now container-update-check.timer
    ```

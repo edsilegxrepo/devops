@@ -27,10 +27,12 @@ SHARED_TEMPLATES_DIR="${COMMON_TEMPLATES_DIR}/shared"
 
 # Sourcing Decoupled System Foundation Library (provides require_root, PKG_MGR, etc.)
 LIB_SYSTEM="${COMMON_LIB_DIR}/system.sh"
-if [[ -f "${LIB_SYSTEM}" ]]; then
-    # shellcheck source=/dev/null
-    source "${LIB_SYSTEM}"
+if [[ ! -f "${LIB_SYSTEM}" ]]; then
+    echo "[-] Fatal Error: Shared system foundation library not found at ${LIB_SYSTEM}" >&2
+    exit 1
 fi
+# shellcheck source=/dev/null
+source "${LIB_SYSTEM}"
 
 DEFAULT_MAIL_TO="criticalsys.mis@gmail.com"
 DEFAULT_SENDMAIL="/usr/sbin/sendmail"
@@ -60,35 +62,26 @@ load_config() {
     SYS_HOSTNAME="${SYS_HOSTNAME:-$(hostname -f 2>/dev/null || hostname)}"
     SHORT_HOSTNAME="${SYS_HOSTNAME%%.*}"
 
-    # Step 2: Load Global Common Properties
-    local common_configs=(
-        "/etc/devops/common.conf"
-        "/etc/sysconfig/devops-common"
-        "/etc/default/devops-common"
-        "${COMMON_CONFIG_DIR}/common.env"
-    )
-    for cfg in "${common_configs[@]}"; do
-        if [[ -f "${cfg}" ]]; then
-            # shellcheck source=/dev/null
-            source "${cfg}"
-            break
-        fi
-    done
+    # Step 2 & 3: Load Configuration Hierarchy (Common & Job-Specific)
+    _load_config_layer() {
+        local name="$1"
+        local candidates=(
+            "/etc/devops/${name}.conf"
+            "/etc/sysconfig/${name}"
+            "/etc/default/${name}"
+            "${COMMON_CONFIG_DIR}/${name}.env"
+        )
+        for cfg in "${candidates[@]}"; do
+            if [[ -f "${cfg}" ]]; then
+                # shellcheck source=/dev/null
+                source "${cfg}"
+                break
+            fi
+        done
+    }
 
-    # Step 3: Load Job-Specific Properties
-    local job_configs=(
-        "/etc/devops/${job_name}.conf"
-        "/etc/sysconfig/${job_name}"
-        "/etc/default/${job_name}"
-        "${COMMON_CONFIG_DIR}/${job_name}.env"
-    )
-    for cfg in "${job_configs[@]}"; do
-        if [[ -f "${cfg}" ]]; then
-            # shellcheck source=/dev/null
-            source "${cfg}"
-            break
-        fi
-    done
+    _load_config_layer "common"
+    _load_config_layer "${job_name}"
 
     # Step 4: Apply Dynamic Auto-Discovery Defaults
     MAIL_TO="${MAIL_TO:-${DEFAULT_MAIL_TO}}"
@@ -116,6 +109,8 @@ load_config() {
         validate_backup_config
     elif [[ "${job_name}" == "container-updates" ]] && declare -f validate_container_config >/dev/null 2>&1; then
         validate_container_config
+    elif [[ "${job_name}" == "pkg-updates" || "${job_name}" == "check-pkg-updates" || "${job_name}" == "rpm-updates" || "${job_name}" == "check-rpm-updates" ]] && declare -f validate_pkg_updates_config >/dev/null 2>&1; then
+        validate_pkg_updates_config
     fi
 }
 
@@ -217,6 +212,33 @@ validate_vm_backup_config() { validate_backup_config "$@"; }
 validate_container_updates_config() { validate_container_config "$@"; }
 
 # ------------------------------------------------------------------------------
+# Function: validate_pkg_updates_config
+# Purpose:  Initializes default settings and verifies package manager
+#           availability for OS package update inspection and alert jobs.
+# Arguments:
+#   None (operates on global configuration variables).
+# Returns:
+#   0 on success; 1 if package manager binary is not found.
+# ------------------------------------------------------------------------------
+validate_pkg_updates_config() {
+    PKG_MGR="${PKG_MGR:-$(command -v dnf 2>/dev/null || command -v yum 2>/dev/null || command -v apt-get 2>/dev/null || echo "dnf")}"
+    NOTIFY_NEW_ONLY="${NOTIFY_NEW_ONLY:-false}"
+    CHECK_TIMEOUT="${CHECK_TIMEOUT:-600}"
+    CHECK_SECURITY_ONLY="${CHECK_SECURITY_ONLY:-false}"
+    REFRESH_METADATA="${REFRESH_METADATA:-true}"
+
+    if ! command -v "${PKG_MGR}" >/dev/null 2>&1; then
+        echo "[-] Fatal Config Error: Configured package manager '${PKG_MGR}' is not installed." >&2
+        return 1
+    fi
+}
+
+# Backward-compatibility aliases
+validate_check_pkg_updates_config() { validate_pkg_updates_config "$@"; }
+validate_rpm_updates_config() { validate_pkg_updates_config "$@"; }
+validate_check_rpm_updates_config() { validate_pkg_updates_config "$@"; }
+
+# ------------------------------------------------------------------------------
 # Function: bootstrap_job
 # Purpose:  Orchestrates standard startup lifecycle for batch automation jobs:
 #           enforces root constraints, checks CLI dependencies, sources configuration,
@@ -254,6 +276,49 @@ bootstrap_job() {
     load_config "${job_name}"
     acquire_lock "${job_name}"
     init_job_log "${job_name}" "${log_base:-${LOG_BASE_DIR:-/var/log/jobs}}" "${retention:-${LOG_RETENTION_DAYS:-14}}"
+}
+
+# ------------------------------------------------------------------------------
+# Function: handle_common_cli_option
+# Purpose:  Processes standard cross-job CLI options (--check-only, --dry-run,
+#           --notify-new-only, --notify-all, --force, --test, --always-notify, -h, --help).
+# Arguments:
+#   $1 - Current CLI argument being inspected.
+# Returns:
+#   0 if argument was handled as a recognized common option; 1 otherwise.
+# ------------------------------------------------------------------------------
+# shellcheck disable=SC2034 # Global CLI flags consumed by sourcing scripts
+handle_common_cli_option() {
+    case "$1" in
+        --check-only | --dry-run)
+            CHECK_ONLY=1
+            return 0
+            ;;
+        --notify-new-only)
+            CLI_NOTIFY_NEW_ONLY="true"
+            NOTIFY_NEW_ONLY="true"
+            return 0
+            ;;
+        --notify-all)
+            CLI_NOTIFY_NEW_ONLY="false"
+            NOTIFY_NEW_ONLY="false"
+            return 0
+            ;;
+        --force | --test | --always-notify)
+            FORCE_NOTIFY=1
+            return 0
+            ;;
+        -h | --help)
+            if declare -f show_help >/dev/null 2>&1; then
+                show_help
+                exit 0
+            fi
+            return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 # ------------------------------------------------------------------------------
@@ -649,6 +714,8 @@ EOF
 #   --log-file <path>          Path to log file (default: $JOB_LOG_FILE)
 #   --log-lines <count>        Max log lines to include (default: 350, 0 to suppress)
 #   --terminal-title <title>   Title of log card (default: "Execution Log")
+#   --terminal-content <text>  Raw text content for terminal card (auto-escaped)
+#   --terminal-block <html>    Pre-rendered terminal block HTML
 #   --extra-header <header>    Custom SMTP header (e.g. "X-Backup-Status: SUCCESS")
 #   --to <email>               Recipient address (default: $MAIL_TO)
 #   --from <email>             Sender address (default: $MAIL_FROM)
@@ -667,6 +734,8 @@ dispatch_job_notification() {
     local log_file="${JOB_LOG_FILE:-}"
     local log_lines=350
     local terminal_title="Execution Log"
+    local terminal_content=""
+    local terminal_block=""
     local extra_header="X-DevOps-Job: ${JOB_NAME:-automation}"
     local to="${MAIL_TO:-${DEFAULT_MAIL_TO}}"
     local from="${MAIL_FROM:-${MAIL_FROM_NAME:-DevOps Automation} <automation@${SYS_HOSTNAME}>}"
@@ -684,6 +753,8 @@ dispatch_job_notification() {
             --log-file) shift; log_file="$1"; shift ;;
             --log-lines) shift; log_lines="$1"; shift ;;
             --terminal-title) shift; terminal_title="$1"; shift ;;
+            --terminal-content) shift; terminal_content="$1"; shift ;;
+            --terminal-block) shift; terminal_block="$1"; shift ;;
             --extra-header) shift; extra_header="$1"; shift ;;
             --to) shift; to="$1"; shift ;;
             --from) shift; from="$1"; shift ;;
@@ -704,15 +775,23 @@ dispatch_job_notification() {
     local status_badge
     status_badge="$(get_status_badge "${status}" "${badge_icon}" "${badge_label}")"
 
-    # Render terminal block if log lines > 0 and log file exists
-    local terminal_block=""
-    if (( log_lines > 0 )) && [[ -n "${log_file}" && -f "${log_file}" ]]; then
-        local formatted_log
-        formatted_log="$(prepare_email_log "${log_file}" "${log_lines}")"
-        terminal_block="$(render_template "${SHARED_TEMPLATES_DIR}/terminal-card.html" \
-            "TERMINAL_TITLE" "${terminal_title}" \
-            "TERMINAL_SUBTITLE" "" \
-            "TERMINAL_CONTENT" "${formatted_log}")"
+    # Render terminal block (custom content, pre-rendered block, or extracted from log file)
+    if [[ -z "${terminal_block}" ]]; then
+        if [[ -n "${terminal_content}" ]]; then
+            local formatted_content
+            formatted_content="$(escape_html "${terminal_content}")"
+            terminal_block="$(render_template "${SHARED_TEMPLATES_DIR}/terminal-card.html" \
+                "TERMINAL_TITLE" "${terminal_title}" \
+                "TERMINAL_SUBTITLE" "" \
+                "TERMINAL_CONTENT" "${formatted_content}")"
+        elif (( log_lines > 0 )) && [[ -n "${log_file}" && -f "${log_file}" ]]; then
+            local formatted_log
+            formatted_log="$(prepare_email_log "${log_file}" "${log_lines}")"
+            terminal_block="$(render_template "${SHARED_TEMPLATES_DIR}/terminal-card.html" \
+                "TERMINAL_TITLE" "${terminal_title}" \
+                "TERMINAL_SUBTITLE" "" \
+                "TERMINAL_CONTENT" "${formatted_log}")"
+        fi
     fi
 
     # Format action block if provided
@@ -736,6 +815,73 @@ dispatch_job_notification() {
         "LOG_FILE_PATH" "${log_file}")"
 
     send_html_email "${to}" "${from}" "${subject}" "${email_body}" "${extra_header}"
+}
+
+# ------------------------------------------------------------------------------
+# Function: dispatch_failure_alert
+# Purpose:  Standardized failure handler for batch jobs: logs failure diagnostics,
+#           records stderr traces in the execution log file, prints to stderr
+#           if check-only mode is active, dispatches email alert if notifying,
+#           and terminates execution with exit code 1.
+# Arguments (Named Options):
+#   --title <title>            Job Title (e.g. "Package Update Advisor")
+#   --category <category>      Service Category (e.g. "Operating System Lifecycle")
+#   --subject <subject>        Email Subject (optional)
+#   --message <html/text>      Short error summary explanation
+#   --err-file <path>          Path to captured stderr/output diagnostic file
+#   --terminal-title <title>   Title of the diagnostic terminal card
+#   --check-only <0|1>         Whether check-only mode is active (default: $CHECK_ONLY)
+# Returns:
+#   Exits immediately with code 1.
+# ------------------------------------------------------------------------------
+dispatch_failure_alert() {
+    local title="${JOB_NAME:-DevOps Automation}"
+    local category="SYSTEM AUTOMATION"
+    local subject=""
+    local message="Execution failed during inspection."
+    local err_file=""
+    local terminal_title="Diagnostic Stderr"
+    local check_only="${CHECK_ONLY:-0}"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --title) shift; title="$1"; shift ;;
+            --category) shift; category="$1"; shift ;;
+            --subject) shift; subject="$1"; shift ;;
+            --message) shift; message="$1"; shift ;;
+            --err-file) shift; err_file="$1"; shift ;;
+            --terminal-title) shift; terminal_title="$1"; shift ;;
+            --check-only) shift; check_only="$1"; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    log_msg "[-] Error: ${title} failed."
+    if [[ -n "${err_file}" && -s "${err_file}" ]]; then
+        log_msg "--- Stderr Output ---"
+        cat "${err_file}" >> "${JOB_LOG_FILE}"
+        [[ "${check_only}" -eq 1 ]] && cat "${err_file}" >&2
+    fi
+
+    if [[ "${check_only}" -eq 0 ]]; then
+        local term_content=""
+        [[ -n "${err_file}" && -f "${err_file}" ]] && term_content="$(< "${err_file}")"
+
+        [[ -z "${subject}" ]] && subject="[ALERT] ${title} Failed - ${SYS_HOSTNAME}"
+
+        dispatch_job_notification \
+            --title "${title}" \
+            --category "${category}" \
+            --status "failed" \
+            --badge-icon "✕" \
+            --badge-label "SCAN FAILED" \
+            --subject "${subject}" \
+            --content "<p style=\"color: #991b1b; font-weight: 600;\">${message}</p>" \
+            --terminal-title "${terminal_title}" \
+            --terminal-content "${term_content}" \
+            --log-lines 0
+    fi
+    exit 1
 }
 
 # ------------------------------------------------------------------------------

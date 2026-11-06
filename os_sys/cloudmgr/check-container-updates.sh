@@ -78,6 +78,10 @@ EOF
 }
 
 while [[ $# -gt 0 ]]; do
+  if handle_common_cli_option "$1"; then
+    shift
+    continue
+  fi
   case "$1" in
     --auto-update)
       CLI_AUTO_UPDATE="true"
@@ -86,26 +90,6 @@ while [[ $# -gt 0 ]]; do
     --no-auto-update)
       CLI_AUTO_UPDATE="false"
       shift
-      ;;
-    --notify-new-only)
-      CLI_NOTIFY_NEW_ONLY="true"
-      shift
-      ;;
-    --notify-all)
-      CLI_NOTIFY_NEW_ONLY="false"
-      shift
-      ;;
-    --check-only | --dry-run)
-      CHECK_ONLY=1
-      shift
-      ;;
-    --force | --test | --always-notify)
-      FORCE_NOTIFY=1
-      shift
-      ;;
-    -h | --help)
-      show_help
-      exit 0
       ;;
     *)
       echo "[-] Error: Unknown argument: $1" >&2
@@ -139,31 +123,12 @@ RAW_SCAN_ERR_TMP="$(mktemp /tmp/container-scan-err.XXXXXX)"
 register_cleanup "rm -f '${RAW_SCAN_ERR_TMP}'"
 
 if ! RAW_SCAN_OUTPUT=$(timeout "${SCAN_TIMEOUT:-900}" "${CONTAINER_ENGINE:-podman}" auto-update --dry-run --format json 2> "${RAW_SCAN_ERR_TMP}"); then
-  log_msg "[-] Error: Container inspection command failed."
-  if [[ -s "${RAW_SCAN_ERR_TMP}" ]]; then
-    log_msg "--- Stderr Output ---"
-    cat "${RAW_SCAN_ERR_TMP}" >> "${JOB_LOG_FILE}"
-    [[ "${CHECK_ONLY}" -eq 1 ]] && cat "${RAW_SCAN_ERR_TMP}" >&2
-  fi
-
-  if [[ "${CHECK_ONLY}" -eq 0 ]]; then
-    err_content="$(escape_html "$(< "${RAW_SCAN_ERR_TMP}")")"
-    terminal_block="$(render_template "${SHARED_TEMPLATES_DIR}/terminal-card.html" \
-      "TERMINAL_TITLE" "Scan Diagnostic Stderr" \
-      "TERMINAL_SUBTITLE" "" \
-      "TERMINAL_CONTENT" "${err_content}")"
-
-    dispatch_job_notification \
-      --title "Container Image Update Advisor" \
-      --category "Container Lifecycle Monitor" \
-      --status "failed" \
-      --badge-icon "✕" \
-      --badge-label "SCAN FAILED" \
-      --subject "[ALERT] Container Update Scan Failed - ${SYS_HOSTNAME}" \
-      --content "<p style=\"color: #991b1b; font-weight: 600;\">Container registry update check failed during inspection execution.</p>${terminal_block}" \
-      --log-lines 0
-  fi
-  exit 1
+  dispatch_failure_alert \
+    --title "Container Image Update Advisor" \
+    --category "Container Lifecycle Monitor" \
+    --message "Container registry update check failed during inspection execution." \
+    --err-file "${RAW_SCAN_ERR_TMP}" \
+    --terminal-title "Scan Diagnostic Stderr"
 fi
 
 # Validate JSON schema
@@ -325,26 +290,28 @@ if [[ "${PENDING_COUNT}" -gt 0 ]]; then
   if [[ "${AUTO_UPDATE_EXECUTED}" -eq 1 ]]; then
     escaped_auto_output="$(escape_html "${AUTO_UPDATE_OUTPUT}")"
     if [[ "${AUTO_UPDATE_SUCCESS}" -eq 1 && -f "${TEMPLATE_INSTR_AUTO_SUCCESS}" ]]; then
-      UPDATE_INSTRUCTIONS_BLOCK="$(cat "${TEMPLATE_INSTR_AUTO_SUCCESS}")"
+      UPDATE_INSTRUCTIONS_BLOCK="$(render_template "${TEMPLATE_INSTR_AUTO_SUCCESS}" \
+        "HOST_NAME" "${SYS_HOSTNAME}" \
+        "AUTO_UPDATE_OUTPUT" "${escaped_auto_output}")"
     elif [[ "${AUTO_UPDATE_SUCCESS}" -eq 0 && -f "${TEMPLATE_INSTR_AUTO_FAILED}" ]]; then
-      UPDATE_INSTRUCTIONS_BLOCK="$(cat "${TEMPLATE_INSTR_AUTO_FAILED}")"
+      UPDATE_INSTRUCTIONS_BLOCK="$(render_template "${TEMPLATE_INSTR_AUTO_FAILED}" \
+        "HOST_NAME" "${SYS_HOSTNAME}" \
+        "AUTO_UPDATE_OUTPUT" "${escaped_auto_output}")"
     else
       UPDATE_INSTRUCTIONS_BLOCK="<pre>${escaped_auto_output}</pre>"
     fi
-    UPDATE_INSTRUCTIONS_BLOCK="${UPDATE_INSTRUCTIONS_BLOCK//\{\{HOST_NAME\}\}/${SYS_HOSTNAME}}"
-    UPDATE_INSTRUCTIONS_BLOCK="${UPDATE_INSTRUCTIONS_BLOCK//\{\{AUTO_UPDATE_OUTPUT\}\}/${escaped_auto_output}}"
   else
     if [[ -f "${TEMPLATE_INSTR_PENDING}" ]]; then
-      UPDATE_INSTRUCTIONS_BLOCK="$(cat "${TEMPLATE_INSTR_PENDING}")"
-      UPDATE_INSTRUCTIONS_BLOCK="${UPDATE_INSTRUCTIONS_BLOCK//\{\{HOST_NAME\}\}/${SYS_HOSTNAME}}"
-      UPDATE_INSTRUCTIONS_BLOCK="${UPDATE_INSTRUCTIONS_BLOCK//\{\{SPECIFIC_COMMANDS\}\}/${SPECIFIC_COMMANDS}}"
+      UPDATE_INSTRUCTIONS_BLOCK="$(render_template "${TEMPLATE_INSTR_PENDING}" \
+        "HOST_NAME" "${SYS_HOSTNAME}" \
+        "SPECIFIC_COMMANDS" "${SPECIFIC_COMMANDS}")"
     else
       UPDATE_INSTRUCTIONS_BLOCK="<p>Pending Updates: Run 'sudo podman auto-update'</p>"
     fi
   fi
 else
   if [[ -f "${TEMPLATE_INSTR_UPTODATE}" ]]; then
-    UPDATE_INSTRUCTIONS_BLOCK="$(cat "${TEMPLATE_INSTR_UPTODATE}")"
+    UPDATE_INSTRUCTIONS_BLOCK="$(render_template "${TEMPLATE_INSTR_UPTODATE}")"
   else
     UPDATE_INSTRUCTIONS_BLOCK="<p>All containers up to date.</p>"
   fi
@@ -359,12 +326,6 @@ CONTENT_BODY="$(render_template "${TEMPLATE_SUMMARY_GRID}" \
   "POLICY_MODE" "${POLICY_MODE}" \
   "CONTAINER_TABLE_ROWS" "${TABLE_ROWS}")"
 
-ESCAPED_RAW_OUTPUT="$(escape_html "${RAW_SCAN_OUTPUT}")"
-TERMINAL_BLOCK="$(render_template "${SHARED_TEMPLATES_DIR}/terminal-card.html" \
-  "TERMINAL_TITLE" "Registry Scan Raw Output" \
-  "TERMINAL_SUBTITLE" "" \
-  "TERMINAL_CONTENT" "${ESCAPED_RAW_OUTPUT}")"
-
 log_msg "[*] Dispatching notification email to ${MAIL_TO}..."
 dispatch_job_notification \
   --title "Container Image Update Advisor" \
@@ -373,9 +334,10 @@ dispatch_job_notification \
   --badge-icon "${badge_icon}" \
   --badge-label "${badge_label}" \
   --subject "${SUBJECT}" \
-  --content "${CONTENT_BODY}${TERMINAL_BLOCK}" \
+  --content "${CONTENT_BODY}" \
   --action "${UPDATE_INSTRUCTIONS_BLOCK}" \
-  --log-lines 0
+  --terminal-title "Registry Scan Raw Output" \
+  --terminal-content "${RAW_SCAN_OUTPUT}"
 
 log_msg "[✓] Email notification successfully dispatched."
 

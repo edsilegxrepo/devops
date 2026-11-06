@@ -1,12 +1,12 @@
 # `vm-backup-gdrive.sh` Documentation
 
-Comprehensive operational and architecture guide for [`/opt/scripts/vm-backup-gdrive.sh`](file:///opt/scripts/vm-backup-gdrive.sh).
+Comprehensive operational and architecture guide for [`/opt/scripts/vm-backup-gdrive.sh`](../vm-backup-gdrive.sh).
 
 ---
 
 ## 1. Application Overview and Objectives
 
-[`vm-backup-gdrive.sh`](file:///opt/scripts/vm-backup-gdrive.sh) is an enterprise-grade Virtual Machine snapshot and disaster recovery backup orchestrator. It manages live state capture, online database snapshots, multi-core streaming compression, symmetric AES-256 encryption, cloud synchronization (Google Drive / S3 / SFTP), dual retention enforcement, and executive HTML status reporting.
+[`vm-backup-gdrive.sh`](../vm-backup-gdrive.sh) is an enterprise-grade Virtual Machine snapshot and disaster recovery backup orchestrator. It manages live state capture, online database snapshots, multi-core streaming compression, symmetric AES-256 encryption, cloud synchronization (Google Drive / S3 / SFTP), dual retention enforcement, and executive HTML status reporting.
 
 ### Key Objectives
 * **Consistent Hot State Capture:** Perform live, non-blocking online snapshots of active SQLite databases (e.g. Uptime Kuma, Ntfy) via SQLite's `.backup` API.
@@ -124,7 +124,7 @@ sequenceDiagram
 
     rect rgb(240, 255, 240)
         Note over Script,Rclone: Cloud Offsite Sync
-        Script->>Rclone: rclone copy /var/backups/... gdrive:cs-us-pweb001
+        Script->>Rclone: rclone copy /var/backups/... remote:server-backups
         Rclone->>Drive: Upload encrypted archive & .sha256
         Drive-->>Rclone: 200 OK
         Rclone-->>Script: Transfer completed
@@ -259,47 +259,47 @@ sudo /opt/scripts/vm-backup-gdrive.sh
 ```
 **Sample Terminal Output:**
 ```text
-[*] Starting VM snapshot & cloud backup routine on cs-us-pweb001.criticalsys.net...
-[*] Backup destination: /var/backups/vm-snapshots/cs-pweb001-backup-20261002_180806.tar.zst.gpg
+[*] Starting VM snapshot & cloud backup routine on server.example.com...
+[*] Backup destination: /var/backups/vm-snapshots/server-backup-20261002_180806.tar.zst.gpg
 [+] Performing safe staging of container volumes and databases...
     [✓] Online hot-backup created: /var/lib/uptime-kuma/data/kuma.db
     [✓] Online hot-backup created: /var/lib/ntfy/data/user.db
     [✓] Online hot-backup created: /var/lib/ntfy/cache/cache.db
 [+] Generating cross-platform Disaster Recovery manifest in /var/recovery-manifest...
     [✓] DR recovery manifest successfully captured.
-[+] Creating and encrypting archive: cs-pweb001-backup-20261002_180806.tar.zst.gpg...
+[+] Creating and encrypting archive: server-backup-20261002_180806.tar.zst.gpg...
 [+] SHA-256 checksum generated: 238db071e46f95e7dcd95e45157be25449822bc61c831b0bbcb41319e0945a74
 [✓] Archive validated: 4.4M (25.3M uncompressed, 1,661 files, 352 directories)
-[+] Syncing archive to remote via Rclone: gdrive:cs-us-pweb001...
+[+] Syncing archive to remote via Rclone: remote:server-backups...
 [+] Pruning local files in /var/backups/vm-snapshots: count (2) <= retention floor (2). Preserving all existing recovery points.
-[+] Pruning remote backups in gdrive:cs-us-pweb001: count (14) <= retention floor (14). Preserving all existing recovery points.
+[+] Pruning remote backups in remote:server-backups: count (14) <= retention floor (14). Preserving all existing recovery points.
 [✓] Encrypted backup completed successfully.
-[✓] Email notification dispatched to criticalsys.mis@gmail.com.
+[✓] Email notification dispatched to alerts@example.com.
 ```
 
 **Corresponding Production Execution Log (`/var/log/backups/vm-backup-20261002_180806.log`):**
 ```text
 ================================================================================
 Execution Log: vm-backup
-Host:       cs-us-pweb001.criticalsys.net
+Host:       server.example.com
 Start Time: 2026-10-02 18:08:06 UTC
 Script:     /opt/scripts/vm-backup-gdrive.sh
 Arguments:  (none)
 User:       root (UID: 0)
 PID:        109347
 ================================================================================
-[2026-10-02 18:08:06 UTC] [*] Starting VM snapshot & cloud backup routine on cs-us-pweb001.criticalsys.net...
-[2026-10-02 18:08:06 UTC] [*] Backup destination: /var/backups/vm-snapshots/cs-pweb001-backup-20261002_180806.tar.zst.gpg
+[2026-10-02 18:08:06 UTC] [*] Starting VM snapshot & cloud backup routine on server.example.com...
+[2026-10-02 18:08:06 UTC] [*] Backup destination: /var/backups/vm-snapshots/server-backup-20261002_180806.tar.zst.gpg
 [2026-10-02 18:08:06 UTC] [+] Performing safe staging of container volumes and databases...
 [2026-10-02 18:08:06 UTC]     [✓] Online hot-backup created: /var/lib/uptime-kuma/data/kuma.db
 [2026-10-02 18:08:06 UTC]     [✓] Online hot-backup created: /var/lib/ntfy/data/user.db
 [2026-10-02 18:08:06 UTC]     [✓] Online hot-backup created: /var/lib/ntfy/cache/cache.db
 [2026-10-02 18:08:06 UTC] [+] Generating cross-platform Disaster Recovery manifest in /var/recovery-manifest...
 [2026-10-02 18:08:08 UTC]     [✓] DR recovery manifest successfully captured.
-[2026-10-02 18:08:08 UTC] [+] Creating and encrypting archive: cs-pweb001-backup-20261002_180806.tar.zst.gpg...
+[2026-10-02 18:08:08 UTC] [+] Creating and encrypting archive: server-backup-20261002_180806.tar.zst.gpg...
 === Backed Up Files Manifest (2013 items: 1661 files, 352 directories) ===
 home/
-home/csysadm/
+home/sysadmin/
 ...
 var/lib/uptime-kuma/data/kuma.db
 var/recovery-manifest/installed-packages.txt
@@ -308,11 +308,11 @@ var/recovery-manifest/system-summary.txt
 === End of Backed Up Files Manifest ===
 [2026-10-02 18:08:08 UTC] [+] SHA-256 checksum generated: 238db071e46f95e7dcd95e45157be25449822bc61c831b0bbcb41319e0945a74
 [2026-10-02 18:08:08 UTC] [✓] Archive validated: 4.4M (25.3M uncompressed, 1,661 files, 352 directories)
-[2026-10-02 18:08:08 UTC] [+] Syncing archive to remote via Rclone: gdrive:cs-us-pweb001...
+[2026-10-02 18:08:08 UTC] [+] Syncing archive to remote via Rclone: remote:server-backups...
 [2026-10-02 18:08:16 UTC] [+] Pruning local backups older than 2 days...
 [2026-10-02 18:08:16 UTC] [+] Pruning remote backups older than 14 days...
 [2026-10-02 18:08:16 UTC] [✓] Encrypted backup completed successfully.
-[2026-10-02 18:08:16 UTC] [✓] Email notification dispatched to criticalsys.mis@gmail.com.
+[2026-10-02 18:08:16 UTC] [✓] Email notification dispatched to alerts@example.com.
 
 ================================================================================
 Execution Summary:
@@ -331,11 +331,11 @@ sudo /opt/scripts/vm-backup-gdrive.sh --notify-only-failures
 #### 3. Test Archive Integrity & Decrypt
 ```bash
 # Verify checksum
-sha256sum -c /var/backups/vm-snapshots/cs-pweb001-backup-20261002_180806.tar.zst.gpg.sha256
+sha256sum -c /var/backups/vm-snapshots/server-backup-20261002_180806.tar.zst.gpg.sha256
 
 # Test decryption and list archive contents
 gpg --decrypt --passphrase-file /root/.secrets/backup-passphrase \
-    /var/backups/vm-snapshots/cs-pweb001-backup-20261002_180806.tar.zst.gpg \
+    /var/backups/vm-snapshots/server-backup-20261002_180806.tar.zst.gpg \
     | zstd -d | tar -tvf - | head -n 20
 ```
 
