@@ -165,10 +165,12 @@ disktemp.sh [OPTIONS]
 
 | Flag | Long Option | Parameter | Default | Technical Description |
 | :--- | :--- | :--- | :--- | :--- |
-| `-h` | `--help` | None | N/A | Prints command syntax, argument descriptions, and operational examples. |
+| `-h` | `--help` | None | N/A | Prints command syntax, argument descriptions, default thresholds, and operational examples. |
 | `-j` | `--json` | None | N/A | Emits a structured JSON array payload and suppresses human-readable headers and tables. |
-| `-w` | `--warn` | `<TEMP_C>` | `45` | Positive integer defining the thermal warning threshold in degrees Celsius. |
-| `-c` | `--crit` | `<TEMP_C>` | `55` | Positive integer defining the thermal critical threshold in degrees Celsius. |
+| `-w` | `--warn` | `<TEMP_C>` | `50` | Positive integer defining the thermal warning threshold in degrees Celsius for SATA, SAS, and HDD devices. |
+| `-c` | `--crit` | `<TEMP_C>` | `65` | Positive integer defining the thermal critical threshold in degrees Celsius for SATA, SAS, and HDD devices. |
+| | `--nvme-warn` | `<TEMP_C>` | `60` | Positive integer defining the thermal warning threshold in degrees Celsius for PCIe NVMe solid-state storage. |
+| | `--nvme-crit` | `<TEMP_C>` | `75` | Positive integer defining the thermal critical threshold in degrees Celsius for PCIe NVMe solid-state storage. |
 | | `--hide-virtual` | None | N/A | Suppresses virtual and hypervisor-managed block storage devices from the output. |
 | | `--no-color` | None | N/A | Suppresses ANSI escape sequences, producing unformatted plain text suitable for logging pipelines. |
 
@@ -177,7 +179,7 @@ disktemp.sh [OPTIONS]
 | Exit Code | Meaning | Operational Guidance |
 | :--- | :--- | :--- |
 | `0` | Success | Command completed successfully. All storage devices were processed. Note: Individual disk threshold breaches do not alter the exit code; threshold states are reported within the payload data structure. |
-| `1` | Command-Line Error | Invalid arguments supplied (e.g., non-numeric threshold values, unknown flags). |
+| `1` | Command-Line Error | Invalid arguments supplied (e.g., non-numeric threshold values, unknown flags, or warning threshold $\ge$ critical threshold). |
 
 ---
 
@@ -193,21 +195,31 @@ Interactive executions produce an aligned ASCII table. Hostname identification u
 Device           Bus      Temp       Status       Model
 --------------------------------------------------------------------------------
 /dev/nvme0n1     nvme     38 C       NORMAL       Samsung SSD 980 PRO 1TB
-/dev/nvme1n1     nvme     47 C       WARNING      WD_BLACK SN850X 2000GB
+/dev/nvme1n1     nvme     62 C       WARNING      WD_BLACK SN850X 2000GB
 /dev/sda         sata     32 C       NORMAL       Crucial CT1000MX500SSD1
-/dev/sdb         sata     56 C       CRITICAL     ST4000VN008-2DR166
+/dev/sdb         sata     66 C       CRITICAL     ST4000VN008-2DR166
 /dev/sdc         usb      33 C       NORMAL       Generic Disk
 /dev/sdd         virtual  N/A        VIRTUAL      Virtual Disk
 ================================================================================
 ```
 
 #### Status Classification Definitions:
-- `NORMAL`: Drive temperature is below the warning threshold ($T < T_{\text{warn}}$).
-- `WARNING`: Drive temperature is equal to or exceeds warning threshold, but below critical threshold ($T_{\text{warn}} \le T < T_{\text{crit}}$).
-- `CRITICAL`: Drive temperature is equal to or exceeds critical threshold ($T \ge T_{\text{crit}}$).
-- `VIRTUAL`: Device is backed by an emulated or hypervisor-managed virtual volume.
-- `NO_ROOT`: Physical device detected, but query requires elevated permissions.
-- `NO_SMARTCTL`: Physical device detected, but `smartmontools` is not installed and no `sysfs` sensor is available.
+Storage hardware thermal envelopes vary fundamentally between bus topologies: high-performance PCIe NVMe controller ASICs operate within higher thermal specifications than legacy SATA/SAS controllers. The engine evaluates status dynamically according to device bus classification:
+
+- **SATA / SAS / HDD Evaluation Profile**:
+  - `NORMAL`: Drive temperature is below warning threshold ($T < 50^\circ\text{C}$).
+  - `WARNING`: Drive temperature equals or exceeds warning threshold, but below critical ($50^\circ\text{C} \le T < 65^\circ\text{C}$).
+  - `CRITICAL`: Drive temperature equals or exceeds critical threshold ($T \ge 65^\circ\text{C}$).
+
+- **NVMe Evaluation Profile**:
+  - `NORMAL`: Controller composite temperature is below NVMe warning threshold ($T < 60^\circ\text{C}$).
+  - `WARNING`: Controller composite temperature equals or exceeds NVMe warning threshold, but below critical ($60^\circ\text{C} \le T < 75^\circ\text{C}$).
+  - `CRITICAL`: Controller composite temperature equals or exceeds NVMe critical threshold ($T \ge 75^\circ\text{C}$).
+
+- **System and Diagnostic States**:
+  - `VIRTUAL`: Device is backed by an emulated or hypervisor-managed virtual volume.
+  - `NO_ROOT`: Physical device detected, but query requires elevated permissions (`sudo`).
+  - `NO_SMARTCTL`: Physical device detected, but `smartmontools` is not installed and no `sysfs` sensor is available.
 
 ### 5.2 JSON Telemetry Schema
 

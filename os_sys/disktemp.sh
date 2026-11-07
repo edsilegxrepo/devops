@@ -32,6 +32,7 @@
 #        elevation requirements when physical hardware sensors are unreadable.
 # ==============================================================================
 set -euo pipefail
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
 # ------------------------------------------------------------------------------
 # 1. Foundation Library & Environment Initialization
@@ -54,8 +55,10 @@ if ! declare -f get_safe_hostname >/dev/null 2>&1; then
 fi
 
 # Configuration defaults
-WARN_TEMP=45
-CRIT_TEMP=55
+WARN_TEMP=50
+CRIT_TEMP=65
+NVME_WARN_TEMP=60
+NVME_CRIT_TEMP=75
 OUTPUT_JSON=false
 HIDE_VIRTUAL=false
 USE_COLOR=true
@@ -76,15 +79,16 @@ Cross-Platform Storage Device Temperature Audit Utility (NVMe / SATA / SAS).
 Options:
   -h, --help                Show this help documentation and exit.
   -j, --json                Output drive temperature data as formatted JSON.
-  -w, --warn <TEMP>         Warning temperature threshold in C (default: ${WARN_TEMP} C).
-  -c, --crit <TEMP>         Critical temperature threshold in C (default: ${CRIT_TEMP} C).
+  -w, --warn <TEMP>         Warning threshold for SATA/SAS/HDD in C (default: ${WARN_TEMP} C).
+  -c, --crit <TEMP>         Critical threshold for SATA/SAS/HDD in C (default: ${CRIT_TEMP} C).
+  --nvme-warn <TEMP>        Warning threshold for NVMe SSDs in C (default: ${NVME_WARN_TEMP} C).
+  --nvme-crit <TEMP>        Critical threshold for NVMe SSDs in C (default: ${NVME_CRIT_TEMP} C).
   --hide-virtual            Exclude virtualized hypervisor disks from the output.
   --no-color                Disable ANSI terminal color output.
 
-Threshold Levels:
-  - Normal    : < ${WARN_TEMP} C
-  - Warning   : ${WARN_TEMP} C - $((CRIT_TEMP - 1)) C
-  - Critical  : >= ${CRIT_TEMP} C
+Default Threshold Profiles:
+  - SATA / SAS / HDD : Normal < ${WARN_TEMP} C, Warning ${WARN_TEMP}-$((CRIT_TEMP - 1)) C, Critical >= ${CRIT_TEMP} C
+  - NVMe SSD         : Normal < ${NVME_WARN_TEMP} C, Warning ${NVME_WARN_TEMP}-$((NVME_CRIT_TEMP - 1)) C, Critical >= ${NVME_CRIT_TEMP} C
 EOF
 }
 
@@ -116,6 +120,24 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             ;;
+        --nvme-warn)
+            if [[ -n "${2:-}" && "$2" =~ ^[0-9]+$ ]]; then
+                NVME_WARN_TEMP="$2"
+                shift 2
+            else
+                echo "[-] Error: --nvme-warn requires a numeric temperature value." >&2
+                exit 1
+            fi
+            ;;
+        --nvme-crit)
+            if [[ -n "${2:-}" && "$2" =~ ^[0-9]+$ ]]; then
+                NVME_CRIT_TEMP="$2"
+                shift 2
+            else
+                echo "[-] Error: --nvme-crit requires a numeric temperature value." >&2
+                exit 1
+            fi
+            ;;
         --hide-virtual)
             HIDE_VIRTUAL=true
             shift
@@ -135,6 +157,10 @@ done
 # Ensure valid thresholds
 if [[ ${WARN_TEMP} -ge ${CRIT_TEMP} ]]; then
     echo "[-] Error: Warning threshold (${WARN_TEMP} C) must be less than critical threshold (${CRIT_TEMP} C)." >&2
+    exit 1
+fi
+if [[ ${NVME_WARN_TEMP} -ge ${NVME_CRIT_TEMP} ]]; then
+    echo "[-] Error: NVMe warning threshold (${NVME_WARN_TEMP} C) must be less than critical threshold (${NVME_CRIT_TEMP} C)." >&2
     exit 1
 fi
 
@@ -361,9 +387,16 @@ while IFS= read -r blk_line; do
     if [[ "${is_virt}" == "true" ]]; then
         status="VIRTUAL"
     elif [[ "${temp_val}" =~ ^[0-9]+$ ]]; then
-        if [[ ${temp_val} -ge ${CRIT_TEMP} ]]; then
+        warn_limit="${WARN_TEMP}"
+        crit_limit="${CRIT_TEMP}"
+        if [[ "${bus_type}" == "nvme" ]]; then
+            warn_limit="${NVME_WARN_TEMP}"
+            crit_limit="${NVME_CRIT_TEMP}"
+        fi
+
+        if [[ ${temp_val} -ge ${crit_limit} ]]; then
             status="CRITICAL"
-        elif [[ ${temp_val} -ge ${WARN_TEMP} ]]; then
+        elif [[ ${temp_val} -ge ${warn_limit} ]]; then
             status="WARNING"
         else
             status="NORMAL"
@@ -379,7 +412,7 @@ while IFS= read -r blk_line; do
 
     DISK_RECORDS+=("${NAME}|${bus_type}|${temp_val}|${status}|${clean_model}|${is_virt}")
 
-done < <(lsblk -d -P -o NAME,TYPE,MODEL,TRAN,SUBSYSTEMS 2>/dev/null)
+done < <(lsblk -d -P -o NAME,TYPE,MODEL,TRAN,SUBSYSTEMS 2>/dev/null || lsblk -d -P -o NAME,TYPE,MODEL,TRAN 2>/dev/null || lsblk -d -P)
 
 # ------------------------------------------------------------------------------
 # 6. JSON Output Generation
