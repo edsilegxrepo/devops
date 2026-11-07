@@ -1,20 +1,21 @@
 # `dnf_check.sh` Documentation
 
-Comprehensive operational and architecture guide for [`/opt/scripts/dnf_check.sh`](../dnf_check.sh).
+Comprehensive operational and architecture guide for [`/opt/scripts/dnf_check.sh`](dnf_check.sh).
 
 ---
 
 ## 1. Application Overview and Objectives
 
-[`dnf_check.sh`](../dnf_check.sh) is a system maintenance wrapper around the Enterprise Linux package manager (`dnf` / `yum`). It bridges routine package management tasks with automated bootloader kernel synchronization, database integrity validation, storage capacity safeguards, and service restart auditing.
+[`dnf_check.sh`](dnf_check.sh) is a system maintenance wrapper around the Enterprise Linux package manager (`dnf` / `yum`). It bridges routine package management tasks with automated bootloader kernel synchronization, database integrity validation, storage capacity safeguards, and service restart auditing.
 
 ### Key Objectives
 * **Package Management Gateway:** Execute arbitrary DNF subcommands transparently, preserving options and exit statuses.
 * **RPM Database Auditing & Safe Recovery:** Inspect RPM database health, SQLite engine integrity, active transaction locks, and queryable package inventory via `--verify-rpmdb`; and safely rebuild corrupted RPM databases via `--rebuild-rpmdb` with process concurrency checks, automated pre-rebuild safety backup snapshots in `/var/backups/rpmdb/`, stale lock cleanup, and post-rebuild inventory validation.
 * **Database Integrity Auditing & Vacuuming:** Inspect the structural integrity of DNF's core SQLite databases (`packages.db` and `history.sqlite`), checkpoint active WAL journals, and vacuum databases to recover fragmented disk space.
 * **Pre-Flight Storage Safeguards:** Proactively inspect `/boot` filesystem capacity (>= 100 MB free recommended) prior to mutating package transactions, preventing `dracut` initramfs generation failures.
+* **Comprehensive Package & DB Cleanup (`--clean`):** Single-command holistic system maintenance combining native cache purging (`dnf clean all`), automated orphan package removal (`dnf autoremove -y`), and WAL checkpointing with SQLite vacuuming for all DNF and RPM databases.
 * **Safe Cache Purging:** Execute clean, native cache invalidation via `dnf clean all` instead of risky direct filesystem deletions.
-* **Automated Bootloader Synchronization:** Detect mutating package transactions (`update`, `install`, `upgrade`, etc.) and automatically trigger [`kernel-default.sh`](../kernel-default.sh) to ensure the bootloader default points to the newest valid kernel.
+* **Automated Bootloader Synchronization:** Detect mutating package transactions (`update`, `install`, `upgrade`, etc.) and automatically trigger [`kernel-default.sh`](kernel-default.sh) to ensure the bootloader default points to the newest valid kernel.
 * **Execution Safety:** Never modify the bootloader on read-only queries (e.g. `check-update`, `search`, `info`, `list`) or failed package operations.
 * **Service Restart & Core Library Auditing:** Integrate `dnf needs-restarting` checks to audit whether running services or core libraries require post-transaction reboots or restarts.
 
@@ -140,7 +141,7 @@ sequenceDiagram
 
 ```mermaid
 graph LR
-    Main["dnf_check.sh"] --> LibSystem["lib/system.sh"]
+    Main["dnf_check.sh"] --> LibRhel["lib/rhel_sys.sh"]
     Main --> BinaryDNF["/usr/bin/dnf or /usr/bin/yum"]
     Main --> BinaryRPM["/usr/bin/rpmdb or /usr/bin/rpm"]
     Main --> BinarySqlite["/usr/bin/sqlite3 (sqlite package)"]
@@ -162,7 +163,7 @@ graph LR
 | `tar` | Archive Utility | `tar` | 1.30+ | Compressed pre-rebuild safety snapshots in `/var/backups/rpmdb/` |
 | `sqlite3` | SQLite Utility | `sqlite` | 3.26+ | Database integrity validation in `sqliteWalCheck` and `verify_rpmdb` |
 | `kernel-default.sh` | Sibling Script | Repository Internal | 1.1.0+ | Post-transaction default boot kernel synchronization |
-| `lib/system.sh` | Shared Library | Repository Internal | 1.4.0+ | Foundation library (`require_root`, `sqlite_integrity_check`, `log_audit`) |
+| `lib/rhel_sys.sh` | Shared Library | Repository Internal | 1.4.0+ | Foundation library (`require_root`, `sqlite_integrity_check`, `log_audit`) |
 
 ---
 
@@ -211,6 +212,7 @@ graph TD
 
 | Argument | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
+| `--clean`, `--clean-all` | Flag | N/A | Comprehensive package system cleanup: executes `dnf clean all`, autoremoves orphaned packages (`dnf autoremove -y`), and checkpoints/vacuums DNF and RPM SQLite databases. |
 | `--verify-rpmdb`, `--rpmdb-verify` | Flag | N/A | Inspects RPM database structural integrity, active transaction locks, underlying SQLite engine health, and queryable package counts. |
 | `--rebuild-rpmdb`, `--rpmdb-rebuild` | Flag | N/A | Safely rebuilds the RPM database with active process concurrency checks, automated pre-rebuild safety archive in `/var/backups/rpmdb/`, stale lock cleanup, and post-rebuild verification. |
 | `--sqlite-check` | Flag | N/A | Validates the integrity of DNF's SQLite databases (`packages.db`, `history.sqlite`). |
@@ -372,7 +374,31 @@ sudo /opt/scripts/dnf_check.sh --purge-cache
 49 files removed
 ```
 
-#### 9. Display Detailed Errata and Security Advisory Info
+#### 9. Comprehensive Package & SQLite Database Cleanup (--clean)
+```bash
+sudo /opt/scripts/dnf_check.sh --clean
+```
+**Sample Output:**
+```text
+==============================================================================
+[*] Comprehensive DNF & SQLite Package System Maintenance
+==============================================================================
+[*] Purging DNF cache via '/usr/bin/dnf clean all'...
+56 files removed
+[*] Removing orphaned packages via '/usr/bin/dnf autoremove -y'...
+Dependencies resolved.
+Nothing to do.
+Complete!
+[*] Checkpointing and vacuuming DNF & RPM SQLite databases...
+    Optimizing / vacuuming [/var/cache/dnf/packages.db]... OK
+    Optimizing / vacuuming [/var/lib/dnf/history.sqlite]... OK
+    Optimizing / vacuuming [/var/lib/rpm/rpmdb.sqlite]... OK
+[+] All SQLite databases vacuumed and checkpointed successfully.
+==============================================================================
+[+] DNF and SQLite system cleanup completed successfully.
+```
+
+#### 10. Display Detailed Errata and Security Advisory Info
 ```bash
 sudo /opt/scripts/dnf_check.sh --show-update-details
 ```

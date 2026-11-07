@@ -1,12 +1,12 @@
 # `kernel-default.sh` Documentation
 
-Comprehensive operational and architecture guide for [`/opt/scripts/kernel-default.sh`](../kernel-default.sh).
+Comprehensive operational and architecture guide for [`/opt/scripts/kernel-default.sh`](kernel-default.sh).
 
 ---
 
 ## 1. Application Overview and Objectives
 
-[`kernel-default.sh`](../kernel-default.sh) is a system administration utility designed for Enterprise Linux 8, 9, and 10 (RHEL, AlmaLinux, Rocky Linux, CentOS Stream, Oracle Linux). Its primary mission is to provide safe, deterministic, and scriptable management of GRUB2 bootloader defaults following kernel installations, updates, or maintenance cycles.
+[`kernel-default.sh`](kernel-default.sh) is a system administration utility designed for Enterprise Linux 8, 9, and 10 (RHEL, AlmaLinux, Rocky Linux, CentOS Stream, Oracle Linux). Its primary mission is to provide safe, deterministic, and scriptable management of GRUB2 bootloader defaults following kernel installations, updates, or maintenance cycles.
 
 ### Key Objectives
 * **Default Bootloader Management:** Inspect and configure default boot entries across modern Boot Loader Specification (BLS) configurations by index or version string.
@@ -15,7 +15,7 @@ Comprehensive operational and architecture guide for [`/opt/scripts/kernel-defau
 * **Rescue Kernel Assignment Safeguard:** Proactively detect and prevent accidental assignment of rescue kernel images as the default boot entry unless `--allow-rescue` is explicitly specified.
 * **Non-Destructive Fail-Safe Design:** Validate kernel indexes and version strings prior to applying configuration changes to prevent unbootable server states.
 * **Storage Visibility:** Monitor and report `/boot` filesystem storage headroom in all status summaries to prevent `dracut` initramfs exhaustion.
-* **Automated Package Manager Integration:** Serve as an idempotent post-transaction hook for [`dnf_check.sh`](../dnf_check.sh).
+* **Automated Package Manager Integration:** Serve as an idempotent post-transaction hook for [`dnf_check.sh`](dnf_check.sh).
 * **System Audit Logging:** Record all kernel modifications and package removals to syslog via `logger` for traceability in `journalctl`.
 
 ---
@@ -25,7 +25,7 @@ Comprehensive operational and architecture guide for [`/opt/scripts/kernel-defau
 ### Architecture and Design Choices
 * **Native Tooling Layer:** Built directly on top of `grubby` and `${PKG_MGR}` (`dnf`/`yum`), avoiding manual editing or parsing of `/boot/grub2/grub.cfg` or `/boot/loader/entries/`.
 * **Universal EL8/9/10 Compatibility:** Operates seamlessly across UEFI and legacy BIOS firmware layouts.
-* **Loose Coupling with Shared Infrastructure:** Sources [`/opt/scripts/lib/system.sh`](../lib/system.sh) for DRY conventions, with complete standalone fallback definitions if executed in isolation.
+* **Loose Coupling with Shared Infrastructure:** Sources [`/opt/scripts/lib/rhel_sys.sh`](lib/rhel_sys.sh) for DRY conventions, with complete standalone fallback definitions if executed in isolation.
 * **Strict Shell Governance:** Enforces `set -euo pipefail` and `umask 022`.
 
 ### Assumptions
@@ -137,7 +137,7 @@ sequenceDiagram
 
 ```mermaid
 graph LR
-    SubScript["kernel-default.sh"] --> LibSystem["lib/system.sh"]
+    SubScript["kernel-default.sh"] --> LibRhel["lib/rhel_sys.sh"]
     SubScript --> BinaryGrubby["/usr/sbin/grubby (grubby package)"]
     SubScript --> BinaryDNF["/usr/bin/dnf or /usr/bin/yum"]
     SubScript --> CoreUtils["util-linux (logger, uname)"]
@@ -155,7 +155,7 @@ graph LR
 | `dnf` / `yum` | Package Manager | `dnf` | 4.0+ | Querying and removing retired installonly kernel packages |
 | `logger` | Syslog Utility | `util-linux` | 2.32+ | Recording operational audit events to systemd journal |
 | `grep`, `uname`, `awk` | Core Utilities | `grep`, `coreutils`, `gawk` | Any | String filtering, metrics parsing, and active kernel detection |
-| `lib/system.sh` | Shared Library | Repository Internal | 1.4.0+ | Foundation library (`require_root`, `verify_dependencies`, `is_wsl`, `log_audit`) |
+| `lib/rhel_sys.sh` | Shared Library | Repository Internal | 1.4.0+ | Foundation library (`require_root`, `verify_dependencies`, `is_wsl`, `log_audit`) |
 
 ---
 

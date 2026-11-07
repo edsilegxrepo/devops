@@ -5,10 +5,9 @@
 # Standard:    DRY Architecture Framework (Job Automation & Reporting Layer)
 # Author:      DevOps Systems Administration <criticalsys.mis@gmail.com>
 # Compatibility: Enterprise Linux 8, 9, 10 (RHEL, AlmaLinux, Rocky, CentOS)
-#              Debian 12+ (Bookworm), Ubuntu 22.04+ (Jammy/Noble)
 # Description: Central DevOps automation library for scheduled batch jobs
 #              (vm-backup-gdrive.sh, check-container-updates.sh, job-skeleton.sh).
-#              Builds on lib/system.sh, supplying configuration resolution,
+#              Builds on lib/rhel_sys.sh, supplying configuration resolution,
 #              concurrency locking, execution logging, LIFO cleanup traps,
 #              HTML templating, email dispatching, and offsite storage sync/pruning.
 # ==============================================================================
@@ -27,12 +26,14 @@ SHARED_TEMPLATES_DIR="${COMMON_TEMPLATES_DIR}/shared"
 
 # Sourcing Decoupled System Foundation Library (provides require_root, PKG_MGR, etc.)
 LIB_SYSTEM="${COMMON_LIB_DIR}/system.sh"
+[[ -f "${LIB_SYSTEM}" ]] || LIB_SYSTEM="/opt/scripts/lib/system.sh"
 if [[ ! -f "${LIB_SYSTEM}" ]]; then
-    echo "[-] Fatal Error: Shared system foundation library not found at ${LIB_SYSTEM}" >&2
+    echo "[-] Fatal Error: Universal system foundation library not found at ${LIB_SYSTEM}" >&2
     exit 1
 fi
 # shellcheck source=/dev/null
 source "${LIB_SYSTEM}"
+validate_rhel_os
 
 DEFAULT_MAIL_TO="criticalsys.mis@gmail.com"
 DEFAULT_SENDMAIL="/usr/sbin/sendmail"
@@ -221,7 +222,7 @@ validate_container_updates_config() { validate_container_config "$@"; }
 #   0 on success; 1 if package manager binary is not found.
 # ------------------------------------------------------------------------------
 validate_pkg_updates_config() {
-    PKG_MGR="${PKG_MGR:-$(command -v dnf 2>/dev/null || command -v yum 2>/dev/null || command -v apt-get 2>/dev/null || echo "dnf")}"
+    PKG_MGR="${PKG_MGR:-$(command -v dnf 2>/dev/null || command -v yum 2>/dev/null || echo "dnf")}"
     NOTIFY_NEW_ONLY="${NOTIFY_NEW_ONLY:-false}"
     CHECK_TIMEOUT="${CHECK_TIMEOUT:-600}"
     CHECK_SECURITY_ONLY="${CHECK_SECURITY_ONLY:-false}"

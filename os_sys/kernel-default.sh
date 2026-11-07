@@ -17,11 +17,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_SYSTEM="${SCRIPT_DIR}/lib/system.sh"
 [[ -f "${LIB_SYSTEM}" ]] || LIB_SYSTEM="/opt/scripts/lib/system.sh"
 if [[ ! -f "${LIB_SYSTEM}" ]]; then
-  echo "[-] Fatal Error: Shared system library not found at ${LIB_SYSTEM}" >&2
+  echo "[-] Fatal Error: Universal system foundation library not found at ${LIB_SYSTEM}" >&2
   exit 1
 fi
 # shellcheck source=/dev/null
 source "${LIB_SYSTEM}"
+validate_rhel_os
 
 # ------------------------------------------------------------------------------
 # 2. CLI Usage & Help
@@ -95,9 +96,7 @@ verify_dependencies "grubby" "${PKG_MGR}" "grep" "uname" "awk"
 #   Outputs formatted partition metrics (e.g. "/boot (193M free / 62% used)").
 # ------------------------------------------------------------------------------
 get_boot_summary() {
-  local boot_path="/boot"
-  [[ -d "${boot_path}" ]] || boot_path="/"
-  df -h "${boot_path}" 2>/dev/null | awk 'NR==2 {print $6 " (" $4 " free / " $5 " used)"}' || echo "N/A"
+  get_partition_summary "/boot"
 }
 
 # ------------------------------------------------------------------------------

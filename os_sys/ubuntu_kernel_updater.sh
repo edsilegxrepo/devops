@@ -1,7 +1,7 @@
 #!/bin/bash
 # ----------------------------------------
 # /opt/scripts/ubuntu_kernel_updater.sh
-# v1.0.5xg  2026/08/31  XDG / MIS Center
+# v1.1.0xg  2026/11/06  XDG / MIS Center
 # ----------------------------------------
 
 # ==============================================================================
@@ -11,9 +11,15 @@
 # Designed for maximum safety: Atomic operations, isolated sandboxing, & strict checks.
 # Supports:
 #   -h, --help        : Display this structural system help documentation matrix.
-#   -f, --force       : Force re-installation of the latest stable version.
+#   -f, --force       : Force re-installation of the latest stable version and bypass disk capacity warnings.
 #   --purge-list      : Safely list redundant custom mainline and packaged distribution kernels eligible for removal.
 #   --purge           : Safely remove redundant older custom mainline kernels and older packaged distribution kernels (keeps current active and latest packaged distribution kernel).
+#   --detect          : Scan system and print all operations that would be performed without executing writes or deletions (dry-run).
+#
+# Foundation Library:
+#   Sourced from lib/debian_sys.sh for centralized logging, root enforcement, OS
+#   validation, version sort detection, storage capacity safeguards, 4-point APT/dpkg
+#   lock inspection, GRUB recovery hardening, and boot symlink synchronization.
 #
 # PURGE MODULE OVERVIEW:
 # ------------------------------------------------------------------------------
@@ -68,15 +74,23 @@ LOG_FILE="/var/log/kernel_updater.log"
 CURL_OPTS=(-sSf -C - --connect-timeout 15 --speed-limit 10240 --speed-time 30 --max-time 900 --retry 5 --retry-delay 3 --retry-all-errors)
 
 # ==============================================================================
-# UTILITY: LOGGING ARCHITECTURE
+# ENVIRONMENT & FOUNDATION LIBRARY INITIALIZATION
 # ------------------------------------------------------------------------------
-# Provides timestamped logs to stdout and appends them to the persistent $LOG_FILE.
-# Three levels of logs are defined: Info ([+]), Warning ([!]), and Error ([-]).
+# Sources the shared Debian/Ubuntu foundation library for logging, storage safety,
+# lock management, GRUB bootloader hardening, and kernel symlink synchronization.
 # ==============================================================================
-# Setup logging architecture
-log_info() {  echo -e "[+] $(date '+%Y-%m-%d %H:%M:%S') : $1" | tee -a "$LOG_FILE"; }
-log_warn() {  echo -e "[!] $(date '+%Y-%m-%d %H:%M:%S') : $1" | tee -a "$LOG_FILE"; }
-log_error() { echo -e "[-] $(date '+%Y-%m-%d %H:%M:%S') : $1" >&2 | tee -a "$LOG_FILE"; }
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
+LIB_SYSTEM="${SCRIPT_DIR}/lib/system.sh"
+[[ -f "${LIB_SYSTEM}" ]] || LIB_SYSTEM="/opt/scripts/lib/system.sh"
+if [[ ! -f "${LIB_SYSTEM}" ]]; then
+    echo "[-] Fatal Error: Universal system foundation library not found at ${LIB_SYSTEM}" >&2
+    exit 1
+fi
+# shellcheck source=/dev/null
+source "${LIB_SYSTEM}"
+
+# Initialize logging architecture
+init_debian_logging "${LOG_FILE}"
 
 # ==============================================================================
 # UTILITY: HELP MATRIX DISPLAY
@@ -94,7 +108,8 @@ Manages cutting-edge upstream kernels safely outside the native APT package data
 Options:
   -h, --help        Show this help message layout matrix and exit.
   -f, --force       Force the system to re-download, unpack, and re-verify the
-                    latest upstream kernel even if it matches the active runtime version.
+                    latest upstream kernel even if it matches the active runtime version,
+                    or bypass pre-flight storage capacity warnings.
   --purge-list      Scan the system and securely display older custom mainline 
                     kernels and older packaged distribution kernels eligible for removal.
   --purge           Safely remove redundant older custom mainline kernels and older 
@@ -154,28 +169,10 @@ fi
 # and validates log write-access.
 # ==============================================================================
 # Ensure script is executed with root privileges
-if [ "$EUID" -ne 0 ]; then
-    echo "[-] Security Error: This script must be executed as root (sudo)." >&2
-    exit 1
-fi
+require_root
 
 # Ensure running on a supported Ubuntu, Debian, or Linux Mint distribution
-if [ -f /etc/os-release ]; then
-    # shellcheck disable=SC1091
-    . /etc/os-release
-    case "${ID:-}" in
-        ubuntu|debian|linuxmint)
-            # OS is supported, continue execution
-            ;;
-        *)
-            log_error "Unsupported Operating System (${ID:-unknown}): This utility is designed exclusively for Ubuntu, Debian, or Linux Mint."
-            exit 1
-            ;;
-    esac
-else
-    log_error "Unsupported Operating System: /etc/os-release not found."
-    exit 1
-fi
+validate_debian_os
 
 # Touch log file to ensure permissions are verified early
 touch "$LOG_FILE"
@@ -188,244 +185,17 @@ if ! flock -n 9; then
 fi
 
 # Detect version sort command globally
-if command -v linux-version >/dev/null 2>&1; then
-    SORT_CMD=(linux-version sort)
-else
-    SORT_CMD=(sort -V)
-fi
+resolve_version_sort_cmd
 
 # ==============================================================================
-# COMPONENT: GRUB HARDENING
+# COMPONENT: FILESYSTEM STORAGE & LOCK SAFETY CONSTANTS
 # ------------------------------------------------------------------------------
-# Enforces safety options in /etc/default/grub (panic recovery, timeout style,
-# and visible menu) to guarantee administrative recovery if the new kernel fails.
+# Aligned with DRY Architecture Framework & dnf_check.sh safety standards:
+# Storage capacity metrics, lock contention inspection, GRUB hardening,
+# and boot symlink management are provided by lib/debian.sys.sh.
 # ==============================================================================
-harden_grub_config() {
-    if [ "$DETECT_MODE" = true ]; then
-        log_info "[DETECT] Verifying bootloader configurations for recovery safety..."
-    else
-        log_info "Verifying bootloader configurations for recovery safety..."
-    fi
-    local grub_conf="/etc/default/grub"
-    
-    if [ ! -f "$grub_conf" ]; then
-        log_warn "/etc/default/grub not found. Skipping bootloader safety hardening."
-        return 0
-    fi
-    
-    # Store initial state in a temporary backup file
-    local temp_backup
-    if [ "$DETECT_MODE" = false ]; then
-        temp_backup=$(mktemp -u "/tmp/grub.XXXXXX")
-        cp -p "$grub_conf" "$temp_backup"
-    fi
-    
-    local modified=false
-    
-    # 1. Enforce visible recovery menu style
-    if grep -q "^GRUB_TIMEOUT_STYLE=hidden" "$grub_conf"; then
-        if [ "$DETECT_MODE" = true ]; then
-            log_info "[DETECT]   -> Would change GRUB_TIMEOUT_STYLE from 'hidden' to 'menu' for menu visibility."
-        else
-            log_info "  -> Changing GRUB_TIMEOUT_STYLE from 'hidden' to 'menu' for menu visibility."
-            sed -i 's/^GRUB_TIMEOUT_STYLE=hidden/GRUB_TIMEOUT_STYLE=menu/' "$grub_conf"
-            modified=true
-        fi
-    fi
-    
-    # 2. Enforce minimum recovery timeout of 5 seconds
-    if grep -q "^GRUB_TIMEOUT=0" "$grub_conf"; then
-        if [ "$DETECT_MODE" = true ]; then
-            log_info "[DETECT]   -> Would change GRUB_TIMEOUT from '0' to '5' to allow fallback selection."
-        else
-            log_info "  -> Changing GRUB_TIMEOUT from '0' to '5' to allow fallback selection."
-            sed -i 's/^GRUB_TIMEOUT=0/GRUB_TIMEOUT=5/' "$grub_conf"
-            modified=true
-        fi
-    fi
-    
-    # 3. Optimize default kernel parameters in GRUB_CMDLINE_LINUX_DEFAULT:
-    #    - Remove 'quiet' if present (to show diagnostics)
-    #    - Add 'nomodeset' if absent (to guarantee screen compatibility)
-    #    - Add 'panic=30' if absent (to enable auto-reboot on crash)
-    if grep -q "^GRUB_CMDLINE_LINUX_DEFAULT=" "$grub_conf"; then
-        local current_line current_val
-        current_line=$(grep "^GRUB_CMDLINE_LINUX_DEFAULT=" "$grub_conf")
-        current_val=$(echo "$current_line" | sed -e 's/^GRUB_CMDLINE_LINUX_DEFAULT=//' -e 's/^"//' -e 's/"$//')
-        
-        local -a params=()
-        local -a new_params=()
-        read -r -a params <<< "$current_val"
-        
-        local has_nomodeset=false
-        local has_panic=false
-        
-        for param in "${params[@]}"; do
-            [ -z "$param" ] && continue
-            if [ "$param" = "quiet" ]; then
-                continue # Remove quiet
-            fi
-            if [ "$param" = "nomodeset" ]; then
-                has_nomodeset=true
-            fi
-            if [[ "$param" =~ ^panic= ]]; then
-                has_panic=true
-            fi
-            new_params+=("$param")
-        done
-        
-        if [ "$has_nomodeset" = false ]; then
-            new_params+=("nomodeset")
-        fi
-        if [ "$has_panic" = false ]; then
-            new_params+=("panic=30")
-        fi
-        
-        local new_val="${new_params[*]}"
-        local new_line="GRUB_CMDLINE_LINUX_DEFAULT=\"$new_val\""
-        
-        if [ "$current_line" != "$new_line" ]; then
-            if [ "$DETECT_MODE" = true ]; then
-                log_info "[DETECT]   -> Would optimize GRUB_CMDLINE_LINUX_DEFAULT (value: '$new_val'): removing 'quiet', ensuring 'nomodeset' and 'panic=30'."
-            else
-                log_info "  -> Optimizing GRUB_CMDLINE_LINUX_DEFAULT: removing 'quiet', ensuring 'nomodeset' and 'panic=30'."
-                sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|$new_line|" "$grub_conf"
-                modified=true
-            fi
-        fi
-    fi
-    
-    # 4. Enforce GRUB_RECORDFAIL_TIMEOUT to prevent headless boot hangs on failure
-    if ! grep -q "^GRUB_RECORDFAIL_TIMEOUT=" "$grub_conf"; then
-        if [ "$DETECT_MODE" = true ]; then
-            log_info "[DETECT]   -> Would append 'GRUB_RECORDFAIL_TIMEOUT=5' to prevent boot menu hangs after failed boot."
-        else
-            log_info "  -> Appending 'GRUB_RECORDFAIL_TIMEOUT=5' to prevent boot menu hangs after failed boot."
-            echo "GRUB_RECORDFAIL_TIMEOUT=5" >> "$grub_conf"
-            modified=true
-        fi
-    fi
-    
-    if [ "$DETECT_MODE" = false ]; then
-        if [ "$modified" = true ]; then
-            local timestamp_backup
-            timestamp_backup="${grub_conf}.$(date '+%Y%m%d-%H%M%S')"
-            mv "$temp_backup" "$timestamp_backup"
-            log_info "Bootloader settings hardened successfully! Backup saved to ${timestamp_backup}."
-        else
-            rm -f "$temp_backup"
-            log_info "Bootloader recovery settings are already hardened and healthy."
-        fi
-    fi
-}
-
-# ==============================================================================
-# COMPONENT: SYMLINK MANAGEMENT
-# ------------------------------------------------------------------------------
-# Ensures /boot/vmlinuz, /boot/initrd.img, and optionally .old symlinks point
-# to the newest and second newest kernel versions, respectively.
-# Also updates root (/) symlinks if they exist.
-# ==============================================================================
-update_link() {
-    local link_path="$1"
-    local target="$2"
-    
-    log_info "Linking $link_path -> $target"
-    # Atomically update symlink by creating temp symlink and renaming it
-    local tmp_link
-    tmp_link=$(mktemp -u "${link_path}.XXXXXX")
-    ln -s "$target" "$tmp_link"
-    mv -f "$tmp_link" "$link_path"
-}
-
-update_boot_symlinks() {
-    log_info "Updating system boot symlinks..."
-    
-    # 1. Gather all kernel versions where BOTH vmlinuz and initrd.img exist
-    local -a versions=()
-    local f kver
-    for f in /boot/vmlinuz-*; do
-        [ -e "$f" ] || continue
-        # Ignore symlinks, temporary files, and backup files
-        if [ -f "$f" ] && [ ! -L "$f" ] && [[ ! "$f" == *.tmp ]] && [[ ! "$f" == *.bak ]]; then
-            kver=$(basename "$f" | sed 's/^vmlinuz-//')
-            # Critical Safety Check: Both kernel and initrd must exist for this version to be valid
-            if [ -f "/boot/initrd.img-$kver" ]; then
-                versions+=("$kver")
-            else
-                log_warn "Kernel image /boot/vmlinuz-$kver exists, but matching /boot/initrd.img-$kver is missing. Ignoring this version for symlink safety."
-            fi
-        fi
-    done
-    
-    local num_kernels=${#versions[@]}
-    if [ "$num_kernels" -eq 0 ]; then
-        log_warn "No valid kernel versions (with matching initrd) found in /boot. Skipping symlink updates."
-        return 0
-    fi
-    
-    # 2. Sort versions in descending order (newest first)
-    local sorted_versions
-    sorted_versions=$(printf "%s\n" "${versions[@]}" | "${SORT_CMD[@]}" | tac | uniq)
-    
-    # Read sorted versions back into an array
-    local -a sorted_arr=()
-    local line
-    while read -r line; do
-        if [ -n "$line" ]; then
-            sorted_arr+=("$line")
-        fi
-    done <<< "$sorted_versions"
-    
-    local num_sorted=${#sorted_arr[@]}
-    if [ "$num_sorted" -eq 0 ]; then
-        log_warn "No sorted kernel versions resolved. Skipping symlink updates."
-        return 0
-    fi
-    
-    local newest_ver="${sorted_arr[0]}"
-    log_info "Newest valid kernel version resolved: $newest_ver"
-    
-    # Update main symlinks in /boot (both guaranteed to exist due to safety check)
-    update_link "/boot/vmlinuz" "vmlinuz-$newest_ver"
-    update_link "/boot/initrd.img" "initrd.img-$newest_ver"
-    
-    # Update root / symlinks if they exist
-    if [ -L "/vmlinuz" ] || [ -f "/vmlinuz" ]; then
-        update_link "/vmlinuz" "boot/vmlinuz-$newest_ver"
-    fi
-    if [ -L "/initrd.img" ] || [ -f "/initrd.img" ]; then
-        update_link "/initrd.img" "boot/initrd.img-$newest_ver"
-    fi
-    
-    # Handle second newest kernel if it exists
-    if [ "$num_sorted" -gt 1 ]; then
-        local second_ver="${sorted_arr[1]}"
-        log_info "Second newest valid kernel version resolved: $second_ver"
-        
-        update_link "/boot/vmlinuz.old" "vmlinuz-$second_ver"
-        update_link "/boot/initrd.img.old" "initrd.img-$second_ver"
-        
-        # Update root / .old symlinks if they exist
-        if [ -L "/vmlinuz.old" ] || [ -f "/vmlinuz.old" ]; then
-            update_link "/vmlinuz.old" "boot/vmlinuz-$second_ver"
-        fi
-        if [ -L "/initrd.img.old" ] || [ -f "/initrd.img.old" ]; then
-            update_link "/initrd.img.old" "boot/initrd.img-$second_ver"
-        fi
-    else
-        log_info "Only one valid kernel version resolved. Removing old symlinks to avoid dangling references."
-        rm -f "/boot/vmlinuz.old"
-        rm -f "/boot/initrd.img.old"
-        if [ -L "/vmlinuz.old" ] || [ -f "/vmlinuz.old" ]; then
-            rm -f "/vmlinuz.old"
-        fi
-        if [ -L "/initrd.img.old" ] || [ -f "/initrd.img.old" ]; then
-            rm -f "/initrd.img.old"
-        fi
-    fi
-}
-
+BOOT_MIN_FREE_MB=150
+ROOT_MIN_FREE_MB=2560
 
 # ==============================================================================
 # SAFELY MANAGE PURGES (IF REQUESTED)
@@ -442,6 +212,12 @@ if [ "$PURGE_LIST" = true ] || [ "$PURGE_EXECUTE" = true ] || [ "$DETECT_MODE" =
     # Scan the system modules tree and packages to find redundant kernels.
     # Data flow: scans directories under /lib/modules and queries installed packages.
     # ==========================================================================
+    boot_path="/boot"
+    [[ -d "${boot_path}" ]] || boot_path="/"
+    log_info "Current filesystem metrics:"
+    log_info "  -> Root (/) : $(get_partition_summary "/")"
+    log_info "  -> Boot     : $(get_partition_summary "${boot_path}")"
+
     if [ "$DETECT_MODE" = true ]; then
         log_info "[DETECT] Scanning system for custom mainline and packaged distribution kernel instances..."
     else
@@ -588,7 +364,7 @@ if [ "$PURGE_LIST" = true ] || [ "$PURGE_EXECUTE" = true ] || [ "$DETECT_MODE" =
     fi
     
     if [ "$DETECT_MODE" = true ] && [ "$FOUND_ANY" = true ]; then
-        harden_grub_config
+        harden_grub_config "$DETECT_MODE"
         log_info "[DETECT] Would update system boot symlinks"
         log_info "[DETECT] Would rebuild system bootloader layout configuration maps (update-grub)"
     fi
@@ -610,14 +386,8 @@ if [ "$PURGE_LIST" = true ] || [ "$PURGE_EXECUTE" = true ] || [ "$DETECT_MODE" =
     # ==========================================================================
     if [ "$PURGE_EXECUTE" = true ]; then
         if [ ${#PACKAGES_TO_PURGE[@]} -gt 0 ]; then
-            # Wait for dpkg/apt lock if held by another process
-            lockfile="/var/lib/dpkg/lock-frontend"
-            if command -v fuser >/dev/null 2>&1 && fuser "$lockfile" >/dev/null 2>&1; then
-                log_info "Waiting for other package manager transactions to complete..."
-                while fuser "$lockfile" >/dev/null 2>&1; do
-                    sleep 1
-                done
-            fi
+            # Comprehensive lock & concurrency check with timeout and process diagnostics
+            inspect_and_wait_for_package_locks 120 "$DETECT_MODE"
  
             # Report estimated disk space to be reclaimed
             if [ "$FREED_MB" -gt 0 ]; then
@@ -630,13 +400,18 @@ if [ "$PURGE_LIST" = true ] || [ "$PURGE_EXECUTE" = true ] || [ "$DETECT_MODE" =
             DEBIAN_FRONTEND=noninteractive apt-get autoremove --purge -y
         fi
         
-        harden_grub_config
+        harden_grub_config "$DETECT_MODE"
         update_boot_symlinks
         log_info "Rebuilding system bootloader layout configuration maps..."
         update-grub 9>&-
         echo "=========================================================================="
         log_info "Selected custom and packaged kernel configurations successfully purged!"
         echo "=========================================================================="
+        boot_path="/boot"
+        [[ -d "${boot_path}" ]] || boot_path="/"
+        log_info "Post-purge filesystem metrics:"
+        log_info "  -> Root (/) : $(get_partition_summary "/")"
+        log_info "  -> Boot     : $(get_partition_summary "${boot_path}")"
     fi
     
     if [ "$DETECT_MODE" = false ]; then
@@ -656,28 +431,10 @@ else
     log_info "Initializing hardened kernel deployment pipeline..."
 fi
 
-# 1. Disk Overhead Check
-# Objective: Verify target file system has > 2.5GB free space for staging and headers.
-FREE_SPACE_KB=$(df -P / | awk 'NR==2 {print $4}')
-if [ "$FREE_SPACE_KB" -lt 2621440 ]; then
-    if [ "$DETECT_MODE" = true ]; then
-        log_warn "[DETECT] Insufficient disk space on root filesystem. Requires > 2.5GB free overhead space."
-    else
-        log_error "Insufficient disk space on root file system. Requires > 2.5GB free overhead space."
-        exit 1
-    fi
-fi
-
-# Ensure at least 150MB is free in /boot (critical for kernel image & initramfs generation)
-BOOT_FREE_KB=$(df -P /boot | awk 'NR==2 {print $4}')
-if [ "$BOOT_FREE_KB" -lt 153600 ]; then
-    if [ "$DETECT_MODE" = true ]; then
-        log_warn "[DETECT] Insufficient disk space on /boot filesystem. Requires > 150MB free space."
-    else
-        log_error "Insufficient disk space on /boot filesystem. Requires > 150MB free space."
-        exit 1
-    fi
-fi
+# 1. Package Manager Lock Inspection & Storage Capacity Verification
+# Objective: Prevent concurrent transaction collisions and verify filesystem headroom.
+inspect_and_wait_for_package_locks 120 "$DETECT_MODE"
+check_storage_capacity "${ROOT_MIN_FREE_MB}" "${BOOT_MIN_FREE_MB}" "${FORCE_INSTALL}" "${DETECT_MODE}" "$(basename "$0")" "$(basename "$0") --purge"
 
 if [ "$DETECT_MODE" = false ]; then
     # 2. Secure Staging Allocation
@@ -910,10 +667,15 @@ log_info "Compiling initial RAM disk boot environment..."
 update-initramfs -c -k "${MODULE_DIR_NAME}" || update-initramfs -u -k "${MODULE_DIR_NAME}"
 
 # 12. Bootloader Configuration Updates
-harden_grub_config
+harden_grub_config "$DETECT_MODE"
 update_boot_symlinks
 log_info "Updating GRUB boot options..."
 update-grub 9>&-
+
+boot_path="/boot"; [[ -d "${boot_path}" ]] || boot_path="/"
+log_info "Post-deployment filesystem storage metrics:"
+log_info "  -> Root (/) : $(get_partition_summary "/")"
+log_info "  -> Boot     : $(get_partition_summary "${boot_path}")"
 
 echo "=========================================================================="
 log_info "Kernel & Headers for ${MODULE_DIR_NAME} successfully deployed!"

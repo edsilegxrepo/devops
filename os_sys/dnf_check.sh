@@ -18,11 +18,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_SYSTEM="${SCRIPT_DIR}/lib/system.sh"
 [[ -f "${LIB_SYSTEM}" ]] || LIB_SYSTEM="/opt/scripts/lib/system.sh"
 if [[ ! -f "${LIB_SYSTEM}" ]]; then
-  echo "[-] Fatal Error: Shared system library not found at ${LIB_SYSTEM}" >&2
+  echo "[-] Fatal Error: Universal system foundation library not found at ${LIB_SYSTEM}" >&2
   exit 1
 fi
 # shellcheck source=/dev/null
 source "${LIB_SYSTEM}"
+validate_rhel_os
 
 # Common paths and relaxed dependency options
 DNF_RELAX_OPTS=(--skip-broken --nobest)
@@ -47,6 +48,7 @@ show_usage() {
 Usage: $(basename "$0") [OPTIONS] [DNF_COMMAND...]
 
 Maintenance Options:
+  --clean               Purge package/metadata cache, autoremove orphans, and vacuum SQLite DBs
   --verify-rpmdb        Inspect RPM database health, SQLite integrity, and transaction locks
   --rebuild-rpmdb       Safely rebuild RPM database with pre-rebuild backup snapshot
   --sqlite-check        Verify SQLite database integrity for DNF caches and history
@@ -205,7 +207,7 @@ rebuild_rpmdb() {
 
   # 1. Concurrency check: Ensure no active package managers are running
   local running_procs
-  running_procs="$(pgrep -a -x "dnf|dnf-3|dnf5|yum|rpm|rpmdb" 2>/dev/null || true)"
+  running_procs="$(get_active_pkg_managers)"
   if [[ -n "${running_procs}" ]]; then
     echo "[-] Error: Active package management process(es) detected:" >&2
     echo "${running_procs}" >&2
@@ -401,16 +403,17 @@ sqliteWalVacuum() {
   local databases=(
     "${DNF_CACHE}/packages.db"
     "${DNF_BASE}/history.sqlite"
+    "/var/lib/rpm/rpmdb.sqlite"
   )
 
   local errors=0
-  echo "[*] Checkpointing and vacuuming DNF SQLite databases..."
+  echo "[*] Checkpointing and vacuuming DNF & RPM SQLite databases..."
   for db in "${databases[@]}"; do
     sqlite_vacuum_db "${db}" || errors=$((errors + 1))
   done
 
   if [[ ${errors} -eq 0 ]]; then
-    echo "[+] All DNF SQLite databases vacuumed and checkpointed successfully."
+    echo "[+] All SQLite databases vacuumed and checkpointed successfully."
     return 0
   else
     echo "[-] Errors encountered vacuuming ${errors} database(s)." >&2
@@ -423,6 +426,43 @@ sqliteWalVacuum() {
 sqlite_wal_check() { sqliteWalCheck "$@"; }
 # shellcheck disable=SC2329
 sqliteWalClean() { sqliteWalCheck "$@"; }
+
+# ------------------------------------------------------------------------------
+# Function: clean_dnf_system
+# Purpose:  Comprehensive package and database cleanup: purges DNF metadata and
+#           package caches, autoremoves orphaned packages, and vacuums SQLite DBs.
+# Arguments:
+#   None.
+# Returns:
+#   0 on success; 1 on failure.
+# ------------------------------------------------------------------------------
+clean_dnf_system() {
+  echo "=============================================================================="
+  echo "[*] Comprehensive DNF & SQLite Package System Maintenance"
+  echo "=============================================================================="
+
+  local err=0
+
+  # 1. Purge DNF package and metadata cache
+  echo "[*] Purging DNF cache via '${PKG_MGR} clean all'..."
+  "${PKG_MGR}" clean all || err=$((err + 1))
+
+  # 2. Autoremove unneeded orphaned dependencies
+  echo "[*] Removing orphaned packages via '${PKG_MGR} autoremove -y'..."
+  "${PKG_MGR}" autoremove -y || err=$((err + 1))
+
+  # 3. Checkpoint WAL journals and vacuum DNF + RPM SQLite databases
+  sqliteWalVacuum || err=$((err + 1))
+
+  echo "=============================================================================="
+  if [[ ${err} -eq 0 ]]; then
+    echo "[+] DNF and SQLite system cleanup completed successfully."
+    return 0
+  else
+    echo "[-] DNF cleanup completed with ${err} error(s)." >&2
+    return 1
+  fi
+}
 
 # ------------------------------------------------------------------------------
 # Function: inspect_needs_restarting
@@ -544,6 +584,7 @@ verify_kernel_upgrade() {
 # ------------------------------------------------------------------------------
 # 4. Argument Processing & Dispatch
 # ------------------------------------------------------------------------------
+do_clean=0
 do_verify_rpmdb=0
 do_rebuild_rpmdb=0
 do_sqlite_check=0
@@ -559,6 +600,9 @@ dnf_args=()
 
 for arg in "$@"; do
   case "${arg}" in
+    --clean | --clean-all)
+      do_clean=1
+      ;;
     --verify-rpmdb | --rpmdb-verify)
       do_verify_rpmdb=1
       ;;
@@ -603,6 +647,14 @@ done
 # Execute standalone maintenance tasks if requested
 has_maintenance=0
 maint_status=0
+
+if [[ ${do_clean} -eq 1 ]]; then
+  has_maintenance=1
+  clean_dnf_system || maint_status=$?
+  if [[ ${maint_status} -ne 0 ]]; then
+    exit ${maint_status}
+  fi
+fi
 
 if [[ ${do_verify_rpmdb} -eq 1 ]]; then
   has_maintenance=1

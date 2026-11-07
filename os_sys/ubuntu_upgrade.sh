@@ -1,7 +1,7 @@
 #!/bin/bash
 # ----------------------------------------
 # /opt/scripts/ubuntu_upgrade.sh
-# v1.0.12xg 2026/10/26  XDG / MIS Center
+# v1.1.0xg  2026/11/06  XDG / MIS Center
 # ----------------------------------------
 
 # ==============================================================================
@@ -11,14 +11,18 @@
 # Designed for safe, non-interactive, and complete package state maintenance:
 #   1. Environment & Privilege Verification (ensuring root context and OS validation).
 #   2. Non-interactive frontend enforcement to block interactive package configuration prompts.
-#   3. Background Flatpak package updates run in parallel to minimize run time.
-#   4. APT Cache synchronization and OS package distribution upgrades.
-#   5. Safety configuration/repair of partially installed (unconfigured) packages.
-#   6. Cleanup of obsolete packages, configuration files, and unwanted services.
-#   7. Chain-loading the Mainline Kernel Deployment pipeline.
+#   3. Comprehensive APT/dpkg transaction lock inspection, locker PID auditing, and auto-remediation.
+#   4. Pre-flight storage capacity checks on / and /boot to prevent initramfs ENOSPC failures.
+#   5. Background Flatpak package updates run in parallel to minimize run time.
+#   6. APT Cache synchronization and OS package distribution upgrades.
+#   7. Safety configuration/repair of partially installed (unconfigured) packages.
+#   8. Cleanup of obsolete packages, configuration files, and unwanted services.
+#   9. Chain-loading the Mainline Kernel Deployment pipeline with post-upgrade storage metrics.
 #
 # CORE COMPONENTS & FUNCTIONAL MODULES:
 # ------------------------------------------------------------------------------
+#   - Shared Foundation Library: Sourced from lib/debian_sys.sh for centralized logging,
+#     root enforcement, OS checks, storage capacity guards, lock inspection, and auto-upgrades.
 #   - Privilege & Platform Guard: Validates that the runner is root and OS is supported.
 #   - Environment Source: Sourced settings.sh and sysenv.sh to import PATH and variables.
 #   - Parallel Job Spawner: Detects Flatpak and upgrades Flatpak runtimes in the background.
@@ -77,6 +81,8 @@ Automated System Upgrade & Hardening Utility (Debian/Ubuntu/Linux Mint)
 
 Options:
   -h, --help                    Show this help documentation and exit.
+  -f, --force                   Bypass pre-flight checks (e.g. /boot and / disk capacity warnings).
+  --max-root                    Run max_root.sh before upgrade to reclaim root partition headroom.
   --disable-autoupgrades        Permanently stop, disable, and mask automatic background
                                 APT upgrade services/timers (apt-daily, apt-daily-upgrade,
                                 unattended-upgrades) before executing system upgrades.
@@ -88,12 +94,22 @@ EOF
 
 DISABLE_AUTOUPGRADES=false
 ONLY_DISABLE_AUTOUPGRADES=false
+FORCE_FLAG=false
+DO_MAX_ROOT=false
 
 while [ $# -gt 0 ]; do
     case "$1" in
         -h|--help)
             show_help
             exit 0
+            ;;
+        -f|--force)
+            FORCE_FLAG=true
+            shift
+            ;;
+        --max-root)
+            DO_MAX_ROOT=true
+            shift
             ;;
         --disable-autoupgrades)
             DISABLE_AUTOUPGRADES=true
@@ -113,33 +129,30 @@ while [ $# -gt 0 ]; do
 done
 
 # ------------------------------------------------------------------------------
-# 1. ENVIRONMENT & PRIVILEGE VERIFICATION
+# 1. ENVIRONMENT & LIBRARY INITIALIZATION
 # ------------------------------------------------------------------------------
-# Objective: Enforce administrator context and platform restrictions before any state edits.
-# Data Flow: Checks EUID variable. Siphons OS tags from /etc/os-release.
-# ------------------------------------------------------------------------------
-if [ "$EUID" -ne 0 ]; then
-    echo "[-] Security Error: This script must be executed as root (sudo)." >&2
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
+LIB_SYSTEM="${SCRIPT_DIR}/lib/system.sh"
+[[ -f "${LIB_SYSTEM}" ]] || LIB_SYSTEM="/opt/scripts/lib/system.sh"
+if [[ ! -f "${LIB_SYSTEM}" ]]; then
+    echo "[-] Fatal Error: Universal system foundation library not found at ${LIB_SYSTEM}" >&2
     exit 1
 fi
+# shellcheck source=/dev/null
+source "${LIB_SYSTEM}"
+
+# Initialize logging architecture
+init_debian_logging "/var/log/ubuntu_upgrade.log"
+
+# Enforce administrator context and platform restrictions
+require_root
+validate_debian_os
 
 # Ensure all APT transactions are non-interactive to block blocking configuration screens
 export DEBIAN_FRONTEND=noninteractive
 
-LOG_FILE="/var/log/ubuntu_upgrade.log"
-touch "$LOG_FILE"
-
-# Setup logging architecture to support concurrent stdout & file log tracing
-log_info() {  echo -e "[+] $(date '+%Y-%m-%d %H:%M:%S') : $1" | tee -a "$LOG_FILE"; }
-log_warn() {  echo -e "[!] $(date '+%Y-%m-%d %H:%M:%S') : $1" | tee -a "$LOG_FILE"; }
-log_error() { echo -e "[-] $(date '+%Y-%m-%d %H:%M:%S') : $1" >&2 | tee -a "$LOG_FILE"; }
-
 # Enforce script-wide exclusive locking to prevent concurrent executions
-exec 8>/run/ubuntu_upgrade.lock
-if ! flock -n 8; then
-    log_error "Another instance of $(basename "$0") is currently running. Aborting."
-    exit 1
-fi
+acquire_script_lock "/run/ubuntu_upgrade.lock"
 
 # Setup process lifecycle trap to cleanly terminate background jobs upon interruption or exit
 cleanup_on_exit() {
@@ -153,40 +166,6 @@ cleanup_on_exit() {
     exit "$exit_code"
 }
 trap cleanup_on_exit EXIT INT TERM
-
-# Detect if executing within Windows Subsystem for Linux (WSL)
-is_wsl() {
-    [ -n "${WSL_DISTRO_NAME:-}" ] || \
-    [ -n "${WSL_INTEROP:-}" ] || \
-    [ -e /proc/sys/fs/binfmt_misc/WSLInterop ] || \
-    [ -e /proc/sys/fs/binfmt_misc/WSLInterop-late ] || \
-    grep -qi microsoft /proc/version 2>/dev/null
-}
-
-# Ensure running on a supported Ubuntu, Debian, or Linux Mint distribution
-if [ -f /etc/os-release ]; then
-    # shellcheck disable=SC1091
-    . /etc/os-release
-    case "${ID:-}" in
-        ubuntu|debian|linuxmint)
-            # Supported OS
-            ;;
-        *)
-            case "${ID_LIKE:-}" in
-                *ubuntu*|*debian*)
-                    # Supported derivative
-                    ;;
-                *)
-                    log_error "Operating System Error: Detected OS '${ID:-unknown}' (${PRETTY_NAME:-unknown}). This utility is designed exclusively for Ubuntu, Debian, or Linux Mint."
-                    exit 1
-                    ;;
-            esac
-            ;;
-    esac
-else
-    log_error "Operating System Error: /etc/os-release not found."
-    exit 1
-fi
 
 # ------------------------------------------------------------------------------
 # 2. SOURCE SYSTEM ENVIRONMENT SETTINGS
@@ -222,28 +201,13 @@ fi
 # Data Flow: Sanitizes hostname into SAFE_HOSTNAME. Stores options in APT_OPTS array.
 # ------------------------------------------------------------------------------
 # Sanitize hostname to prevent malicious word splitting or character injections
-SAFE_HOSTNAME=$( (hostname -s 2>/dev/null || uname -n || echo "localhost") | tr -dc 'a-zA-Z0-9_-')
-NODE_TAG="PRD|prd|wks|${SAFE_HOSTNAME}"
-APT_OPTS=(-qy -o DPkg::Lock::Timeout=120 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold -o APT::Get::Always-Include-Phased-Updates=true -o Acquire::http::No-Cache=true -o Acquire::http::Max-Age=0)
+NODE_TAG="PRD|prd|wks|$(get_safe_hostname)"
+APT_OPTS=("${DEFAULT_APT_OPTS[@]}" -o APT::Get::Always-Include-Phased-Updates=true)
 APT_REPO_BASE="/etc/apt"
 APT_AUTO_PROC="apt-news.service esm-cache.service motd-news.service motd-news.timer ubuntu-advantage.service"
 MOTD_UPDATE_BASE="/etc/update-motd.d"
-
-# Helper function to print unified formatted section headers using pure Bash string expansion
-print_header() {
-    local title=$1
-    local tag=${NODE_TAG}
-    local formatted_title="${title}->${tag}"
-    local total_len=75
-    local current_len=${#formatted_title}
-    local fill_len=$((total_len - current_len - 5))
-    if [ "$fill_len" -lt 1 ]; then fill_len=1; fi
-    
-    printf '_____%s' "${formatted_title}"
-    local fill
-    printf -v fill "%0${fill_len}d" 0
-    echo "${fill//0/_}"
-}
+BOOT_MIN_FREE_MB=100
+ROOT_MIN_FREE_MB=1024
 
 # ------------------------------------------------------------------------------
 # 4. TRIGGER BACKGROUND TASKS (PARALLELIZATION OPTIMIZATION)
@@ -262,102 +226,33 @@ if command -v flatpak >/dev/null 2>&1; then
 fi
 
 # ------------------------------------------------------------------------------
-# 4.5. LOCK CONTENTION INSPECTION & AUTOMATIC UPGRADE REMEDIATION
+# 4.5. PRE-FLIGHT LOCK & STORAGE SAFEGUARDS
 # ------------------------------------------------------------------------------
-# Objective: Inspect active APT lock holders, automatically remedy background
-#            auto-upgrades upon collision, and execute explicit --disable-autoupgrades requests.
-# ------------------------------------------------------------------------------
-inspect_and_remedy_lock_contention() {
-    local lock_frontend="/var/lib/dpkg/lock-frontend"
-    local lock_lists="/var/lib/apt/lists/lock"
-    local contention=false
-    local reason=""
-    local pids_info=""
-
-    for lf in "$lock_frontend" "$lock_lists"; do
-        if [ -f "$lf" ]; then
-            local detected_pids=""
-            if command -v fuser >/dev/null 2>&1; then
-                detected_pids=$(fuser "$lf" 2>/dev/null || true)
-            elif command -v lsof >/dev/null 2>&1; then
-                detected_pids=$(lsof -t "$lf" 2>/dev/null || true)
-            fi
-            if [ -n "$detected_pids" ]; then
-                for pid in $detected_pids; do
-                    if [ -d "/proc/$pid" ]; then
-                        local cmd
-                        cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || ps -p "$pid" -o comm= 2>/dev/null || true)
-                        pids_info="${pids_info} [PID ${pid}: ${cmd}]"
-                        if echo "$cmd" | grep -qiE "unattended-upgr|apt\.systemd\.daily|packagekit|apt-daily"; then
-                            contention=true
-                            reason="background auto-updater (${cmd})"
-                        fi
-                    fi
-                done
-            fi
-        fi
-    done
-
-    # Fallback check via process table if lock tools did not catch PIDs but an updater is running
-    if [ "$contention" = false ] && command -v pgrep >/dev/null 2>&1; then
-        local bg_pids
-        bg_pids=$(pgrep -f "unattended-upgr|apt\.systemd\.daily|packagekitd" 2>/dev/null || true)
-        if [ -n "$bg_pids" ]; then
-            contention=true
-            reason="active background auto-update service (PIDs: ${bg_pids})"
-        fi
-    fi
-
-    if [ "$contention" = true ]; then
-        log_warn "APT lock contention detected: Held by ${reason}."
-        log_warn "Automatically activating --disable-autoupgrades to prevent future lock collisions on this system."
-        DISABLE_AUTOUPGRADES=true
-    elif [ -n "$pids_info" ]; then
-        log_info "APT lock is currently held by non-autoupgrade process:${pids_info}. Waiting up to 120s for release..."
-    fi
-}
-
-disable_autoupgrades() {
-    print_header "DISABLE-AUTOUPGRADES"
-    log_info "Permanently disabling automatic background APT timers and services..."
-    if command -v systemctl >/dev/null 2>&1; then
-        local auto_services="apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service unattended-upgrades.service"
-        for s in ${auto_services}; do
-            systemctl stop "$s" >/dev/null 2>&1 || true
-            systemctl disable "$s" >/dev/null 2>&1 || true
-            systemctl mask "$s" >/dev/null 2>&1 || true
-        done
-    fi
-    if [ -d /etc/apt/apt.conf.d ]; then
-        log_info "Configuring /etc/apt/apt.conf.d to disable periodic APT actions..."
-        cat << 'EOF' > /etc/apt/apt.conf.d/20auto-upgrades
-APT::Periodic::Update-Package-Lists "0";
-APT::Periodic::Download-Upgradeable-Packages "0";
-APT::Periodic::AutocleanInterval "0";
-APT::Periodic::Unattended-Upgrade "0";
-EOF
-        if [ -f /etc/apt/apt.conf.d/10periodic ]; then
-            cat << 'EOF' > /etc/apt/apt.conf.d/10periodic
-APT::Periodic::Update-Package-Lists "0";
-APT::Periodic::Download-Upgradeable-Packages "0";
-APT::Periodic::AutocleanInterval "0";
-APT::Periodic::Unattended-Upgrade "0";
-EOF
-        fi
-    fi
-    log_info "Automatic background upgrades have been permanently disabled and masked."
-    if [ "$ONLY_DISABLE_AUTOUPGRADES" = true ]; then
-        log_info "Completed --disable-autoupgrades-only request. Exiting."
-        exit 0
-    fi
-}
-
-# Run lock inspection (auto-activates DISABLE_AUTOUPGRADES if held by background updater)
-inspect_and_remedy_lock_contention
+print_header "LOCK-INSPECTION"
+# Run 4-point lock inspection & concurrency checks (with automatic remediation hook for background updaters)
+inspect_and_wait_for_package_locks 120 false disable_autoupgrades
 
 if [ "$DISABLE_AUTOUPGRADES" = true ]; then
-    disable_autoupgrades
+    disable_autoupgrades "$ONLY_DISABLE_AUTOUPGRADES"
 fi
+
+print_header "DISK-CAPACITY-CHECK"
+root_free_mb="$(get_free_mb "/")"
+boot_path="/boot"
+[[ -d "${boot_path}" ]] || boot_path="/"
+boot_free_mb="$(get_free_mb "${boot_path}")"
+
+max_root_bin="${SCRIPT_DIR}/max_root.sh"
+[[ -f "${max_root_bin}" ]] || max_root_bin="/opt/scripts/max_root.sh"
+
+if [[ (${root_free_mb} -lt ${ROOT_MIN_FREE_MB} || ${boot_free_mb} -lt ${BOOT_MIN_FREE_MB} || "${DO_MAX_ROOT}" == "true") && -f "${max_root_bin}" ]]; then
+    log_warn "Storage capacity check or --max-root triggered pre-upgrade disk space optimization."
+    log_info "Executing ${max_root_bin} to maximize free headroom on root (/)..."
+    bash "${max_root_bin}"
+fi
+
+# Pre-flight filesystem capacity safeguards (/ and /boot)
+check_storage_capacity "${ROOT_MIN_FREE_MB}" "${BOOT_MIN_FREE_MB}" "${FORCE_FLAG}" false "$(basename "$0")" "${SYS_SCRIPTS}/ubuntu_kernel_updater.sh --purge"
 
 # ------------------------------------------------------------------------------
 # 5. APT PACKAGE LIST SYNCED
@@ -397,27 +292,10 @@ if command -v systemctl >/dev/null 2>&1; then
     done
 fi
 
-# Attempt to resolve / configure packages left in unconfigured states before cleanup
-log_info "Attempting to configure any unpacked packages..."
-dpkg --configure -a || true
-
-log_info "Autoremove and clean orphan packages"
-for a in autoremove autoclean; do
-    apt-get "${APT_OPTS[@]}" "$a"
-done
-
-# Safe checks for empty package lists before running purge commands
-# Prevents syntax failure when dpkg query yields empty lists
-# Using dpkg-query instead of dpkg -l to prevent terminal width truncation issues
-iu_pkgs=$(dpkg-query -f '${db:Status-Status} ${Package}\n' -W 2>/dev/null | awk '/^unpacked/ {print $2}')
-if [ -n "$iu_pkgs" ]; then
-    echo "$iu_pkgs" | xargs -r apt-get "${APT_OPTS[@]}" remove --purge
-fi
-
-rc_pkgs=$(dpkg-query -f '${db:Status-Status} ${Package}\n' -W 2>/dev/null | awk '/^config-files/ {print $2}')
-if [ -n "$rc_pkgs" ]; then
-    echo "$rc_pkgs" | xargs -r apt-get "${APT_OPTS[@]}" remove --purge
-fi
+# Repair unconfigured/unpacked packages, autoremove orphans, and purge config-files
+repair_unconfigured_packages false
+clean_apt_cache_and_orphans false
+purge_residual_configs false
 
 # Remove unwanted package (crashes xorg if 3d acceleration is not available)
 if dpkg-query -W -f='${Status}\n' gstreamer1.0-vaapi 2>/dev/null | grep -q "ok installed"; then
@@ -454,3 +332,13 @@ elif [ -f "${SCRIPT_DIR}/ubuntu_kernel_updater.sh" ]; then
 else
     log_warn "ubuntu_kernel_updater.sh not found at ${SYS_SCRIPTS}. Skipping mainline kernel update."
 fi
+
+# ------------------------------------------------------------------------------
+# 10. REBOOT AUDIT & POST-UPGRADE STORAGE SUMMARY
+# ------------------------------------------------------------------------------
+print_header "REBOOT-STATUS"
+check_system_reboot_status
+
+print_header "UPGRADE-COMPLETE"
+log_info "Upgrade tasks finished."
+print_storage_summary "${boot_path}"

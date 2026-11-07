@@ -15,6 +15,7 @@ The `ubuntu_kernel_updater.sh` script is a hardened system utility designed to a
 - **System Stability:** Implement atomic filesystem moves and dependency validation to guarantee that a partially downloaded or corrupted kernel installation never breaks the bootloader.
 - **Space Optimization:** Maintain a healthy `/boot` partition size by cleaning obsolete modules, headers, and binary images.
 - **Zero Lock-in:** Operate outside the native APT database for mainline deployments, ensuring that the official package manager database remains completely untouched and compatible.
+- **Modular DRY Architecture:** Sources shared system services from [`lib/debian_sys.sh`](lib/debian_sys.sh) for unified logging, root validation, OS checks, storage capacity safeguards, 4-point APT/dpkg transaction lock auditing, GRUB recovery hardening, and symlink maintenance.
 
 ---
 
@@ -22,14 +23,16 @@ The `ubuntu_kernel_updater.sh` script is a hardened system utility designed to a
 
 ### Core Design Principles
 - **Decoupled Mainline Deployment:** Mainline kernels downloaded from the PPA repository are manually extracted and deployed to system directories (`/boot`, `/lib/modules`, and `/usr/src`) instead of being registered via `dpkg -i`. This protects the system package manager database from unresolved dependencies.
+- **Shared Foundation Library ([`lib/debian_sys.sh`](lib/debian_sys.sh)):** Core infrastructure is modularized in `lib/debian_sys.sh`. Functions such as `require_root`, `validate_debian_os`, `resolve_version_sort_cmd`, `check_storage_capacity`, `inspect_and_wait_for_package_locks`, `harden_grub_config`, and `update_boot_symlinks` are shared across Debian DevOps utilities.
 - **Atomic File Operations:** When files are copied to the critical `/boot` directory, they are first copied with a `.tmp` suffix (e.g. `vmlinuz-xxx.tmp`) and then atomically renamed via `mv`. This prevents a partial copy from being parsed by the bootloader in the event of power loss or disk exhaustion.
 - **Atomic Symlink Management:** Updates system symlinks by creating a temporary link (`mktemp -u`) on the same filesystem and atomically renaming it (`mv -f`). This guarantees that a system crash or power failure never leaves a symlink in a half-written or corrupted state.
-- **GRUB Recovery Hardening:** Checks and hardens `/etc/default/grub` during installation and purge executions to ensure the bootloader menu style is visible (`menu`), has a valid timeout (`5` seconds), prevents indefinite menu hangs on failure recovery (`GRUB_RECORDFAIL_TIMEOUT=5`), and optimizes default kernel command-line parameters (`GRUB_CMDLINE_LINUX_DEFAULT`) by removing `quiet` (to display verbose boot diagnostics), ensuring `nomodeset` (for broad video display compatibility), and ensuring `panic=30` (to trigger auto-reboot on kernel panic). This ensures remote servers can always boot back to fallback kernels on crash.
+- **GRUB Recovery Hardening:** Checks and hardens `/etc/default/grub` during deployment, purge, and detect modes via `harden_grub_config`: ensures the bootloader menu style is visible (`menu`), has a valid timeout (`5` seconds), prevents indefinite menu hangs on failure recovery (`GRUB_RECORDFAIL_TIMEOUT=5`), and optimizes default kernel command-line parameters (`GRUB_CMDLINE_LINUX_DEFAULT`) by removing `quiet` (to display verbose boot diagnostics), ensuring `nomodeset` (for broad video display compatibility), and ensuring `panic=30` (to trigger auto-reboot on kernel panic). Creates timestamped backups (`/etc/default/grub.YYYYMMDD-HHMMSS`) on modification.
+- **Pre-Flight Storage Capacity Guards:** Enforces dual-volume storage validation via `check_storage_capacity`: verifies `/` has at least 2,560 MB (2.5 GB) of staging/header overhead and `/boot` has at least 150 MB free space before downloading or staging. Prevents `ENOSPC` errors during `update-initramfs`.
+- **4-Point APT Lock & Concurrency Management:** Uses `inspect_and_wait_for_package_locks` to audit `/var/lib/dpkg/lock-frontend`, `/var/lib/dpkg/lock`, `/var/cache/apt/archives/lock`, and `/var/lib/apt/lists/lock`. Dynamically identifies locker PIDs using `fuser`/`lsof` with `ps -fp` diagnostics and waits up to 120s for concurrent processes (`apt`, `unattended-upgrades`, `packagekitd`) to release.
 - **Visible System Diagnostics:** Executes RAM disk creation (`update-initramfs`) without stderr suppression (`2>/dev/null`) so that compilation warnings, missing device driver warnings, or firmware alerts are immediately visible to administrators.
 - **Script-Wide Mutual Exclusion (Locking):** Enforces a strict script-wide locking mechanism via `flock` on file descriptor 9 (`/run/kernel_updater.lock`). This prevents concurrent updates or purging instances from executing simultaneously, eliminating file-system write-collisions or race conditions.
 - **Conditional DKMS Autoinstallation:** Checks if DKMS is installed on the host and queries `dkms status`. If registered out-of-tree modules (e.g. ZFS, Nvidia) are detected, it automatically executes `dkms autoinstall` to compile modules for the new mainline kernel before compiling the initramfs.
-- **Defensive Sourcing and Array commands:** Commands (such as `linux-version sort` or its fallback `sort -V`) are stored as Bash arrays to ensure safe shell expansion, completely eliminating unquoted word-splitting issues.
-- **Lock-Aware Execution:** The script does not compete with system package managers; it dynamically queries `/var/lib/dpkg/lock-frontend` and yields execution until concurrent updates complete.
+- **Dry-Run System Auditing (`--detect`):** Provides a complete non-destructive audit mode that scans for redundant kernels, tests remote mainline availability, and prints all actions that would be performed without modifying disk states.
 
 ### Assumptions
 - **Architecture:** The target system must be running on `amd64` (x86_64) CPU architectures.
@@ -37,10 +40,10 @@ The `ubuntu_kernel_updater.sh` script is a hardened system utility designed to a
 - **Network Access:** Sourcing remote mainline payloads requires outbound HTTPS connections to `kernel.ubuntu.com`.
 
 ### Edge Cases Handled
-- **Missing Sourcing Utility:** If the standard `linux-version` tool is absent, the script falls back to GNU standard `sort -V` for version resolution.
-- **Lock Contention:** Prevents installation failures due to background `apt` or `unattended-upgrades` processes by waiting on the dpkg frontend lock.
+- **Missing Sourcing Utility:** If the standard `linux-version` tool is absent, `resolve_version_sort_cmd` automatically falls back to GNU standard `sort -V` for version resolution.
+- **Lock Contention:** Prevents installation failures due to background `apt` or `unattended-upgrades` processes by auditing all 4 lockfiles and process tables, waiting up to 120s.
 - **Shared Base Headers:** Shared base headers (e.g. `linux-headers-6.8.0-120`) are only deleted if no other flavored kernel (like `lowlatency`) is still installed on the system.
-- **Disk Exhaustion:** Verifies `/` contains at least 2.5 GB of free space before initiating downloads.
+- **Disk Exhaustion on / and /boot:** Verifies `/` contains at least 2,560 MB and `/boot` contains at least 150 MB before downloading or extracting files; reports partition status summaries at start and completion.
 - **Single Kernel Environments:** When only one kernel remains on the system, the script automatically removes the `.old` symlinks from both `/boot` and `/` to prevent dangling references.
 - **Pre-Reboot Re-installation Prevention:** Checks if the target kernel version is already present on the filesystem in `/boot`. If it exists but is not yet the active booted kernel (pending reboot), the script aborts safely rather than repeating download and compilation phases.
 - **Pre-Reboot Custom Kernel Protection:** During purging, the script automatically identifies the newest custom mainline kernel installed on disk (even if not booted yet) and protects it from being swept away as redundant.
@@ -53,53 +56,55 @@ The `ubuntu_kernel_updater.sh` script is a hardened system utility designed to a
 
 ```mermaid
 graph TD
-    A[Start] --> B{Root Verification EUID == 0}
-    B -->|No| C[Abort: Security Error]
-    B -->|Yes| D{OS Verification /etc/os-release}
+    A[Start] --> B[Source lib/debian_sys.sh & init_debian_logging]
+    B --> C{require_root EUID == 0}
+    C -->|No| C1[Abort: Security Error]
+    C -->|Yes| D{validate_debian_os}
     D -->|Unsupported| E[Abort: Unsupported OS]
-    D -->|Supported| F[Initialize log file]
-    F --> F1[Acquire flock /run/kernel_updater.lock]
+    D -->|Supported| F[Acquire flock /run/kernel_updater.lock]
+    F --> F1[resolve_version_sort_cmd]
     F1 --> G{Parse CLI Arguments}
     
     G -->|"--help / -h"| H[Show Help & Exit]
     
-    G -->|"--purge / --purge-list"| I[Execute Purge Logic]
-    I --> I1[Query installed packaged kernels via dpkg-query]
+    G -->|"--purge / --purge-list / --detect"| I[Execute Purge Logic]
+    I --> I0[Report partition status summary]
+    I0 --> I1[Query installed packaged kernels via dpkg-query]
     I1 --> I2[Sort versions and identify LATEST_PACKAGED_KERNEL]
     I2 --> I3[Filter out LATEST_PACKAGED_KERNEL & CURRENT_ACTIVE]
     I3 --> I3a[Identify and protect newest custom mainline kernel on disk]
     I3a --> I4[Scan /lib/modules/ for untracked custom mainline modules]
-    I4 --> I5{Purge execution mode?}
+    I4 --> I5{Execution Mode?}
     I5 -->|"--purge-list"| I6[Print eligible kernels & Exit]
-    I5 -->|"--purge"| I7[Check for dpkg Lock & Wait]
+    I5 -->|"--detect"| I6a[Log purge candidates & proceed to dry deployment check]
+    I5 -->|"--purge"| I7[inspect_and_wait_for_package_locks 120]
     I7 --> I8[Calculate and log reclaimed disk space]
     I8 --> I9[Directly rm custom files from boot/lib/usr]
-    I9 --> I10[Execute apt-get purge on old packages]
-    I10 --> I11[Execute apt-get autoremove]
-    I11 --> I12[Run harden_grub_config & update_boot_symlinks]
-    I12 --> I13[Run update-grub & Exit]
+    I9 --> I10[Execute apt-get purge on old packages & autoremove]
+    I10 --> I12[harden_grub_config & update_boot_symlinks]
+    I12 --> I13[update-grub & report post-purge metrics & Exit]
     
     G -->|"-f / --force / Default"| J[Execute Mainline Deployment Pipeline]
-    J --> J1[Check free disk space > 2.5GB]
-    J1 --> J2[Create staging directories & trap EXIT cleanup]
-    J2 --> J3[Detect latest stable mainline version via curl]
-    J3 --> J4{Already running target version?}
-    J4 -->|"Yes and not --force"| J5[Log & Exit]
-    J4 -->|"No or --force"| J5a{Already installed on disk?}
-    J5a -->|"Yes and not --force"| J5b[Log & Exit]
-    J5a -->|"No or --force"| J6[Download generic amd64 deb files]
-    J6 --> J7[Verify downloaded files integrity]
-    J7 --> J8[Unpack deb archives into staging area]
-    J8 --> J9[Integrity checks of boot/usr directories]
-    J9 --> J10[Deploy modules and headers to lib/usr]
-    J10 --> J11[Deploy boot files atomically to boot]
-    J11 --> J11a[Run depmod & rebuild hardware maps]
-    J11a --> J11b{DKMS modules registered?}
-    J11b -->|Yes| J11c[Run dkms autoinstall]
-    J11b -->|No| J12[Run update-initramfs]
-    J11c --> J12
-    J12 --> J13[Run harden_grub_config, update_boot_symlinks & update-grub]
-    J13 --> K[End / Success Exit]
+    J --> J0[inspect_and_wait_for_package_locks 120]
+    J0 --> J1[check_storage_capacity: / >= 2560MB & /boot >= 150MB]
+    J1 --> J2{Is --detect?}
+    J2 -->|Yes| J2a[Simulate deployment version check & Exit]
+    J2 -->|No| J3[Create staging sandbox & trap EXIT cleanup]
+    J3 --> J4[Detect latest stable mainline version via curl]
+    J4 --> J5{Already running target version?}
+    J5 -->|"Yes and not --force"| J6[Log & Exit]
+    J5 -->|"No or --force"| J7{Already installed on disk?}
+    J7 -->|"Yes and not --force"| J8[Log & Exit]
+    J7 -->|"No or --force"| J9[Download generic amd64 deb files]
+    J9 --> J10[Unpack deb archives into staging area]
+    J10 --> J11[Integrity checks of boot/usr directories]
+    J11 --> J12[Deploy modules to /lib and headers to /usr/src]
+    J12 --> J13[Deploy boot files atomically to /boot with .tmp]
+    J13 --> J14[depmod & dkms autoinstall if registered]
+    J14 --> J15[update-initramfs -c/-u]
+    J15 --> J16[harden_grub_config & update_boot_symlinks]
+    J16 --> J17[update-grub & report post-deployment metrics]
+    J17 --> K[End / Success Exit]
 ```
 
 ### Data Sequencing (Mainline Pipeline)
@@ -111,7 +116,10 @@ graph TD
 
 ## 4. Dependencies
 
-The script relies exclusively on standard utilities found on modern Ubuntu/Debian server environments.
+The script relies on standard utilities found on modern Ubuntu/Debian server environments along with the shared foundation library.
+
+### Shared Foundation Library
+- **[`lib/debian_sys.sh`](lib/debian_sys.sh):** Enterprise Debian/Ubuntu common library providing unified logging, root privilege enforcement, OS validation, version sort detection, storage capacity auditing, 4-point APT/dpkg transaction lock inspection, GRUB recovery hardening, and boot symlink updates. (Searches local `./lib/debian_sys.sh` with fallback to `/opt/scripts/lib/debian_sys.sh`).
 
 ### System Utilities
 - **`bash` (>= 4.0):** Execution shell.
@@ -119,10 +127,11 @@ The script relies exclusively on standard utilities found on modern Ubuntu/Debia
 - **`dpkg-deb`:** Tool used to unpack package archives without installing them via `dpkg`.
 - **`dpkg-query`:** Used to verify package ownership and sizes.
 - **`awk` / `sed` / `grep`:** Text processing and metadata matching.
-- **`df`:** File system space verification.
-- **`uname`:** Booted kernel version query.
-- **`fuser` (Optional, from `psmisc`):** Dpkg lock detection.
-- **`linux-version` (Optional, from `linux-base`):** Standard kernel version sorting.
+- **`df`:** Filesystem capacity verification for `/` and `/boot`.
+- **`uname`:** Booted kernel version query (`uname -r`).
+- **`fuser` / `lsof` (Optional, from `psmisc` / `lsof`):** Package manager lock holder PID auditing.
+- **`linux-version` (Optional, from `linux-base`):** Standard kernel version sorting (falls back to `sort -V`).
+- **`dkms` (Optional):** Dynamic Kernel Module Support auto-installer.
 - **`depmod` / `update-initramfs` / `update-grub`:** Bootloader and kernel mapping integration.
 
 ---
@@ -178,11 +187,11 @@ shellcheck /opt/scripts/ubuntu_kernel_updater.sh
 
 | Option | Long Option | Description | Type | Default |
 | :--- | :--- | :--- | :--- | :--- |
-| `-h` | `--help` | Renders the usage matrix. | Boolean | `false` |
-| `-f` | `--force` | Force download/installation of the mainline kernel. | Boolean | `false` |
-| N/A | `--purge-list` | Lists older custom/packaged kernels eligible for purging. | Boolean | `false` |
-| N/A | `--purge` | Purges older custom/packaged kernels non-interactively. | Boolean | `false` |
-| N/A | `--detect` | Dry-run mode: Scans system and lists all operations (purges and deployments) that would be done without executing them. | Boolean | `false` |
+| `-h` | `--help` | Renders the usage matrix and exits. | Boolean | `false` |
+| `-f` | `--force` | Force re-download and re-verification of the latest upstream kernel even if it matches the active runtime version, and bypass pre-flight storage capacity warnings on `/` and `/boot`. | Boolean | `false` |
+| N/A | `--purge-list` | Scans the system and securely displays older custom mainline kernels and older packaged distribution kernels eligible for removal. | Boolean | `false` |
+| N/A | `--purge` | Safely purges redundant older custom mainline kernels and older packaged distribution kernels while preserving the currently active kernel and the newest packaged distribution fallback. | Boolean | `false` |
+| N/A | `--detect` | Dry-run audit mode: Scans system and prints all actions (purges, lock inspections, storage audits, and deployment steps) that would be performed without executing writes or deletions. | Boolean | `false` |
 
 ---
 

@@ -67,8 +67,11 @@ Low-level system adjustments and service delegations.
 - `os_service_account.sh`: Provisions unprivileged OS service accounts (e.g., `gfaudit`) for compliance audit automation.
 - `ubuntu_upgrade.sh`: Orchestrates non-interactive system package updates, telemetry/ESM disabling, parallel Flatpak upgrades, and mainline kernel updates.
 - `ubuntu_kernel_updater.sh`: Detects, installs, and manages mainline upstream kernels bypassing APT dependency checks, and purges older kernels.
-- `cloudmgr/dnf_check.sh`: Production-hardened DNF wrapper with cross-version SQLite integrity checks, safe cache clearing, and post-transaction kernel sync.
-- `cloudmgr/kernel-default.sh`: Deterministic GRUB boot kernel manager and cleanup utility for Enterprise Linux.
+- `proxmox_update.sh`: Production-hardened Proxmox VE update orchestrator with pre-flight storage gating, early archive purging, strict dist-upgrade semantics, kernel lifecycle management, and bootloader synchronization.
+- `max_root.sh`: Cross-platform pre-upgrade storage maximization utility reclaiming disk space across systemd journals, logs, caches, and package manager databases.
+- `disktemp.sh`: Enterprise storage hardware temperature audit utility supporting NVMe, SATA, SAS, and USB drives across RHEL, Debian, and Proxmox with JSON telemetry export.
+- `dnf_check.sh`: Production-hardened DNF wrapper with cross-version SQLite integrity checks, safe cache clearing, and post-transaction kernel sync.
+- `kernel-default.sh`: Deterministic GRUB boot kernel manager and cleanup utility for Enterprise Linux.
 - `cloudmgr/vm-backup-gdrive.sh`: Virtual Machine snapshot and disaster recovery orchestrator managing live SQLite backups, system manifests, streaming zstd/AES-256 GPG encryption, Google Drive sync, and dual retention.
 - `cloudmgr/check-container-updates.sh`: Container lifecycle monitor and update automation tool for systemd Quadlets with registry dry-run inspection and email alerts.
 - `cloudmgr/check-pkg-updates.sh`: Non-intrusive upstream repository inspection tool correlating security errata, bugfixes, and HTML advisory notifications for Enterprise Linux.

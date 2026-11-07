@@ -12,7 +12,7 @@ Comprehensive operational and architecture guide for [`/opt/scripts/check-pkg-up
 * **Non-Intrusive Repository Inspection:** Perform dry-run package checks via `dnf check-update` and `dnf repoquery --upgrades` without downloading or modifying installed packages.
 * **Security Errata & Advisory Correlation:** Automatically cross-reference available package updates against `dnf updateinfo` to categorize updates into Critical, Important, Moderate, and Low security patches, bugfixes, and enhancements.
 * **Controlled Human-in-the-Loop Advisory:** Assemble branded HTML email reports detailing update counts, current vs. candidate versions, target repositories, and severity badges with recommended remediation commands.
-* **DRY Framework Integration:** Built upon [`/opt/scripts/lib/common.sh`](../lib/common.sh) and [`/opt/scripts/lib/system.sh`](../lib/system.sh), inheriting centralized logging, flock-based concurrency guards, configuration discovery, and Postfix MTA email delivery.
+* **DRY Framework Integration:** Built upon [`/opt/scripts/lib/common.sh`](../lib/common.sh) and [`/opt/scripts/lib/rhel_sys.sh`](../../lib/rhel_sys.sh), inheriting centralized logging, flock-based concurrency guards, configuration discovery, and Postfix MTA email delivery.
 * **Execution Logging & Retention:** Maintain persistent, date-stamped execution logs in `/var/log/jobs/pkg-updates-<DATESTAMP>.log` with an automated 14-day retention pruning policy.
 * **Native Systemd Scheduling:** Triggered daily at `06:00:00 UTC` via [`pkg-update-check.timer`](../../../etc/systemd/system/pkg-update-check.timer) with catch-up persistence and randomized jitter.
 
@@ -21,7 +21,7 @@ Comprehensive operational and architecture guide for [`/opt/scripts/check-pkg-up
 ## 2. Architecture and Design Choices, Assumptions, Edge Cases, Performance
 
 ### Architecture and Design Choices
-* **Strictly Advisory Operation:** Operates exclusively as a read-only detection and alerting system. Mutating transactions are delegated to [`/opt/scripts/dnf_check.sh`](../dnf_check.sh) to ensure SQLite database integrity and post-transaction bootloader kernel synchronization.
+* **Strictly Advisory Operation:** Operates exclusively as a read-only detection and alerting system. Mutating transactions are delegated to [`/opt/scripts/dnf_check.sh`](../../dnf_check.sh) to ensure SQLite database integrity and post-transaction bootloader kernel synchronization.
 * **DRY Modular Architecture:** Follows the identical scaffolding and shared templates established by [`check-container-updates.sh`](../check-container-updates.sh).
 * **Two-Stage Query Model:**
   1. `dnf check-update` fast exit-code verification (0 = no updates, 100 = updates available, 1 = fatal error).
