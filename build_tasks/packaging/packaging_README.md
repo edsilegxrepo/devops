@@ -73,7 +73,7 @@ This packaging framework resolves this challenge by providing a **single-workspa
    - Generic standalone Linux release tarball (`.tar.xz`)
    - Standalone Windows 64-bit release zipball (`.zip`)
 3. **Cross-Compilation Simplicity via Zig**:
-   Leverages Zig 0.17+ as a lightweight, self-contained static C/C++ cross-compiler and linker, eliminating the need for bulky cross-toolchains (`gcc-aarch64-linux-gnu`, `musl-gcc`, etc.).
+   Leverages Zig 0.17+ as a lightweight, self-contained static C/C++ cross-compiler and linker for Rust and for Go builds requiring CGO or C libraries, eliminating the need for bulky cross-toolchains (`gcc-aarch64-linux-gnu`, `musl-gcc`, etc.). Pure Go builds do not invoke or require Zig.
 4. **DRY (Don't Repeat Yourself) Modular Core**:
    Common RPM directives, architecture mappers, completion paths, toolchain validation, Debian packagers, and systemd service templates are extracted into reusable include files and scripts.
 5. **Production-Ready Systemd Daemon Suite**:
@@ -88,7 +88,7 @@ This packaging framework resolves this challenge by providing a **single-workspa
 * **Musl Libc over Glibc for Linux Binaries**:
   `glibc` is designed specifically for dynamic linking; statically linking `glibc` still relies on dynamic `libnss` loading for hostname/user resolution. `musl-libc` is engineered for static linking, creating truly portable, fully isolated binaries.
 * **Zig as Universal Static C/C++ Compiler**:
-  Zig embeds `musl` headers and compiler-rt for all major architectures. Invoking `zig cc -target <arch>-linux-musl` replaces complex cross-compilers with a single binary.
+  Zig embeds `musl` headers and compiler-rt for all major architectures. Invoking `zig cc -target <arch>-linux-musl` replaces complex cross-compilers with a single binary. In the Go packaging framework, Zig is strictly used when `CGO_ENABLED=1` and/or when compiling embedded C source amalgamations (like SQLite) or dependent C libraries. Pure Go applications (`CGO_ENABLED=0`) bypass Zig entirely.
 * **Native Debian Packager (`pkg-deb.sh`) vs Alien**:
   Converting RPMs with `alien` produces broken Debian control metadata and non-functional init scripts. [`pkg-deb.sh`](./SOURCES/pkg-deb.sh) natively constructs compliant Debian staging directories with authentic `DEBIAN/control`, `conffiles`, `md5sums`, and maintainer hooks (`postinst`, `prerm`).
 * **RPM `%include` Preprocessor Integration**:
@@ -97,7 +97,7 @@ This packaging framework resolves this challenge by providing a **single-workspa
 ### Assumptions & System Prerequisites
 
 * **Operating System**: Linux build host with standard RPM build tools (`rpm-build`, `rpmlint`, `tar`, `xz`, `file`, `binutils`).
-* **Zig Compiler**: Zig 0.17+ installed and accessible in `$PATH` (or symlinked to `/var/opt/zig` / `/u01/zig`).
+* **Zig Compiler**: Zig 0.17+ installed and accessible in `$PATH` (or symlinked to `/var/opt/zig` / `/u01/zig`). Required for all Rust static musl builds and for Go builds with `use_cgo 1` (or embedded C amalgamations / dependent C libraries). Pure Go builds (`use_cgo 0`) do not require Zig.
 * **Rust Toolchain**: Rust 1.80+ with the musl standard library (`rustup target add <arch>-unknown-linux-musl`) and optional Windows target (`x86_64-pc-windows-gnu`).
 * **Go Toolchain**: Go 1.22+ compiler in `$PATH`.
 * **Debian Tools**: `dpkg` / `dpkg-deb` installed for `--with deb` builds.
@@ -487,13 +487,30 @@ Pass build condition flags to `rpmbuild` using `--with <flag>` or `--without <fl
 
 ### Go Spec Configuration Toggles
 
-Located at lines 69–72 in [`pkg-go-template-xg.spec`](./SPECS/pkg-go-template-xg.spec):
+Located at lines 78–84 in [`pkg-go-template-xg.spec`](./SPECS/pkg-go-template-xg.spec):
 
 ```spec
 %global use_cgo            0   # 0 = Pure Go (default, Caddy-style), 1 = Static CGO (SFTPGo-style)
-%global use_sqlite         0   # 1 = Build embedded SQLite amalgamation via Zig
-%global use_bundled_c_lib  0   # 1 = Compile static autotools C library (libxcrypt) via Zig
+%global use_sqlite         0   # 1 = Build embedded SQLite amalgamation via Zig (requires use_cgo 1)
+%global use_bundled_c_lib  0   # 1 = Compile static autotools C library (libxcrypt) via Zig (requires use_cgo 1)
 ```
+
+> [!IMPORTANT]
+> **Explicit Rule: When is Zig Used in Go Builds?**
+> - **Pure Go (`use_cgo 0`)**: Zig is **NEVER** used, invoked, or required. Pure Go compiles directly via native `CGO_ENABLED=0 go build` with zero external C toolchain dependencies.
+> - **Static CGO (`use_cgo 1`)**: Zig is strictly engaged **only** when `CGO_ENABLED=1` is active (e.g. packages linking to hardware security modules like PKCS#11/HSM, or requiring C libraries) and/or when compiling embedded C source amalgamations (such as SQLite `sqlite3.c` → `libsqlite3.a`) or bundled autotools C libraries (`libxcrypt`).
+
+> [!WARNING]
+> **Pure Go (`use_cgo 0`) vs. `-buildmode=pie` on Linux:**
+> `go-toolchain.inc` defines `%{go_opts}` as `-buildmode=pie -trimpath -buildvcs=false` by default.
+> - **Dynamic Interpreter Pitfall**: Under `CGO_ENABLED=0` on Linux, Go's internal linker (`cmd/link`) cannot produce a self-relocating static PIE without an external C runtime startup (`rcrt1.o`). Passing `-buildmode=pie` forces the internal linker to create a **dynamically linked PIE** containing a `PT_INTERP` segment (`/lib64/ld-linux-x86-64.so.2`), which will fail the `%check` static ELF integrity validation.
+> - **Do NOT use `-linkmode=external` with `CGO_ENABLED=0`**: Attempting `-linkmode=external` without CGO causes Go to immediately exit with error: `-linkmode=external requires external (cgo) linking, but cgo is not enabled`.
+> - **The Pure Go Solution**: For pure Go packages (`use_cgo 0`), override `go_opts` in the spec file after including `go-toolchain.inc`:
+>   ```spec
+>   # Pure Go packages override go_opts to avoid dynamic PIE on Linux under CGO_ENABLED=0
+>   %global go_opts -trimpath -buildvcs=false
+>   ```
+> - **Windows PE Compatibility**: Unlike Linux, Windows targets natively support `-buildmode=pie` under `CGO_ENABLED=0` without CGO or external linkers (producing an ASLR-enabled Windows PE executable). Therefore, apply `-buildmode=pie` conditionally when `target_os` is `windows`.
 
 ### `zig-musl.sh` Subcommands
 
@@ -762,6 +779,8 @@ Let's package a Rust utility (e.g. `myripgrep`, version `14.1.0`):
 
 Let's package a pure Go HTTP service (e.g. `myweb`, version `1.5.0`):
 
+> **Toolchain Note**: Because this is a pure Go application (`use_cgo 0`), **Zig is NOT required, NOT checked, and NOT invoked**. The package builds 100% statically via native Go (`CGO_ENABLED=0`).
+
 1. **Copy the Go Template**:
    ```bash
    cp /usr/src/redhat/SPECS/pkg-go-template-xg.spec /usr/src/redhat/SPECS/myweb-xg.spec
@@ -793,7 +812,9 @@ Let's package a pure Go HTTP service (e.g. `myweb`, version `1.5.0`):
 
 ### Scenario C: Packaging a CGO Daemon with SQLite & Bundled C Libs
 
-When a Go package requires embedded SQLite and static C libraries (e.g. `libxcrypt`):
+When a Go package requires CGO (`use_cgo 1`), embedded SQLite amalgamations, or static C libraries (e.g. `libxcrypt`, PKCS#11/HSM):
+
+> **Toolchain Note**: This is the scenario where **Zig is strictly engaged** as the static musl C cross-compiler (`zig cc -target %{_arch}-linux-musl`), because CGO = 1 and embedded C libraries/amalgamations are compiled directly into the binary.
 
 1. **Enable CGO and Library Toggles in `SPECS/<name>-xg.spec`**:
    ```spec

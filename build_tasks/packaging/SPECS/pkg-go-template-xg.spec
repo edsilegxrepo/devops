@@ -10,10 +10,13 @@
 #   1. Copy this template to SPECS/<name>-xg.spec:
 #        cp SPECS/pkg-go-template-xg.spec SPECS/<name>-xg.spec
 #   2. Choose your compilation mode via the toggles below:
-#        use_cgo:            Set to 0 for pure Go (default, like Caddy)
-#                            Set to 1 if Go requires C libraries (like SFTPGo)
-#        use_sqlite:         Set to 1 to build embedded SQLite amalgamation via Zig
-#        use_bundled_c_lib:  Set to 1 to statically compile an autotools C lib (e.g. libxcrypt)
+#        use_cgo:            Set to 0 for pure Go (default, like Caddy, fzf, Hugo)
+#                            Set to 1 if Go requires C libraries (like SFTPGo, PKCS#11)
+#                            NOTE: Zig is ONLY used when use_cgo is set to 1.
+#                            Pure Go builds (use_cgo 0) compile directly with native Go
+#                            and do NOT invoke, require, or depend on Zig.
+#        use_sqlite:         Set to 1 to build embedded SQLite amalgamation via Zig (requires use_cgo 1)
+#        use_bundled_c_lib:  Set to 1 to statically compile an autotools C lib via Zig (e.g. libxcrypt, requires use_cgo 1)
 #   3. Replace all placeholder tags:
 #        <name>             Package name (lowercase, e.g. caddy, sftpgo, fzf)
 #        <version>          Upstream semantic version (e.g. 2.7.6)
@@ -46,9 +49,12 @@
 #
 # TECHNICAL ARCHITECTURE:
 #   - Pure Go Mode (use_cgo 0):
-#       * Builds 100% static binaries via CGO_ENABLED=0.
+#       * Builds 100% static binaries via CGO_ENABLED=0 using ONLY the native Go compiler.
+#       * Zig is NEVER used, invoked, or required in Pure Go mode.
 #       * Windows cross-compilation is built directly into Go (GOOS=windows).
 #   - CGO + Zig Musl Mode (use_cgo 1):
+#       * Zig is ONLY used when CGO_ENABLED=1 and/or if C amalgamations (e.g. SQLite)
+#         or dependent C libraries (e.g. PKCS#11/HSM, libxcrypt) are required.
 #       * Cross-compiles C/C++ dependencies using Zig 0.17+ as a static cross-compiler:
 #           Linux:   zig cc -target %%{_arch}-linux-musl with -extldflags '-static'
 #           Windows: zig cc -target %%{_arch}-windows-gnu
@@ -56,7 +62,8 @@
 #         (RHEL 8-9-10, Ubuntu 24.04/26.04) with zero runtime glibc/shared lib dependencies.
 #   - Bundled C Libraries (SQLite amalgamation & autotools C libraries):
 #       * Demonstrates compiling embedded SQLite amalgamation (sqlite3.c -> libsqlite3.a)
-#         and standalone autotools C libraries (e.g. libxcrypt) on-the-fly via Zig.
+#         and standalone autotools C libraries (e.g. libxcrypt) on-the-fly via Zig
+#         strictly when use_cgo 1 and use_sqlite 1 / use_bundled_c_lib 1 are active.
 #   - Binary Verification vs Testsuite:
 #       * %%check executes binary wellness validation by default (inspects static ELF
 #         structure, asserts absence of PT_INTERP dynamic linker segment, and validates
@@ -71,11 +78,14 @@
 # ==============================================================================
 # Compilation Mode Configuration Toggles
 # ==============================================================================
+# IMPORTANT: Zig is ONLY used when use_cgo is set to 1 (and/or if C amalgamations
+# like SQLite or dependent C libraries are used). When use_cgo is 0, the build is
+# pure Go (CGO_ENABLED=0) and Zig is completely bypassed and never invoked.
 %global use_cgo            0
 %global use_sqlite         0
 %global use_bundled_c_lib  0
 
-# If CGO is enabled, validate that Zig compiler is available in PATH
+# Zig is strictly required ONLY when CGO is enabled (use_cgo 1)
 %if %{use_cgo}
 %global has_zig %(command -v zig >/dev/null 2>&1 || [ -x /var/opt/zig/zig ] || [ -x /u01/zig/zig ] || [ -x /usr/local/bin/zig ] || [ -x /opt/zig/zig ] && echo 1 || echo 0)
 %if ! %{has_zig}
@@ -101,7 +111,7 @@
 # Package Metadata
 Name:           <name>
 Version:        <version>
-Release:        <release_num>.%{__osver}.%{__channel}
+Release:        <release_num>%(echo %{?dist} | sed 's|[0-9]||g').%{__channel}
 Summary:        %{pkg_summary}
 Group:          Applications/System
 License:        <license>
@@ -208,15 +218,22 @@ build_target() {
 %if ! %{use_cgo}
     # --------------------------------------------------------------------------
     # PATTERN A: Pure Go (CGO_ENABLED=0, zero external C dependencies)
+    # Zig is NOT used, NOT invoked, and NOT required for Pure Go mode.
     # --------------------------------------------------------------------------
-    echo "==> [${target_os}] Compiling pure Go binary (CGO_ENABLED=0)..."
-    CGO_ENABLED=0 GOOS="${target_os}" go build %{go_opts} \
+    echo "==> [${target_os}] Compiling pure Go binary (CGO_ENABLED=0, native Go only)..."
+    local opts="%{go_opts}"
+    # On Linux under CGO_ENABLED=0, strip -buildmode=pie to ensure static ELF (avoid dynamic PT_INTERP)
+    [ "$target_os" = "linux" ] && opts="$(echo "${opts}" | sed 's/-buildmode=pie//g')"
+    [ "$target_os" = "windows" ] && [[ "${opts}" != *"-buildmode=pie"* ]] && opts="${opts} -buildmode=pie"
+    CGO_ENABLED=0 GOOS="${target_os}" go build ${opts} \
         -ldflags "%{go_ldflags}" \
         -o "bin/%{name}${ext}" <cmd_path>
 
 %else
     # --------------------------------------------------------------------------
     # PATTERN B: Static CGO with Zig + Bundled C Libraries (SQLite / libxcrypt)
+    # Zig is strictly engaged here ONLY because CGO=1 and/or dependent C libraries
+    # or C amalgamations are being compiled into the binary.
     # --------------------------------------------------------------------------
     export CGO_ENABLED=1
     export GOOS="${target_os}"

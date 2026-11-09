@@ -87,7 +87,7 @@
 # Package Metadata
 Name:           <name>
 Version:        <version>
-Release:        <release_num>.%{__osver}.%{__channel}
+Release:        <release_num>%(echo %{?dist} | sed 's|[0-9]||g').%{__channel}
 Summary:        %{pkg_summary}
 Group:          Applications/System
 License:        <license>

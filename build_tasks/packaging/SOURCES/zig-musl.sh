@@ -162,7 +162,7 @@ if [ "$1" = "check-win" ]; then
 fi
 
 # ------------------------------------------------------------------------------
-# 4. Archiver Dispatch
+# 4. Archiver / Ranlib Dispatch
 # ------------------------------------------------------------------------------
 if [[ "$CMD" =~ (^|[-_])ar([.-]|$) ]] || [ "$1" = "ar" ]; then
   [ "$1" = "ar" ] && shift
@@ -176,6 +176,20 @@ if [[ "$CMD" =~ (^|[-_])ar([.-]|$) ]] || [ "$1" = "ar" ]; then
   else
     echo "ERROR: Neither zig nor ar found in PATH!" >&2
     exit 1
+  fi
+fi
+
+if [[ "$CMD" =~ (^|[-_])ranlib([.-]|$) ]] || [ "$1" = "ranlib" ]; then
+  [ "$1" = "ranlib" ] && shift
+  if [ -n "$ZIG_BIN" ]; then
+    exec "$ZIG_BIN" ranlib "$@"
+  elif [ -n "$RANLIB" ]; then
+    echo "NOTICE: zig not found; honoring RANLIB=${RANLIB}" >&2
+    exec "$RANLIB" "$@"
+  elif command -v ranlib > /dev/null 2>&1; then
+    exec ranlib "$@"
+  else
+    exit 0
   fi
 fi
 
@@ -237,6 +251,9 @@ while [ $# -gt 0 ]; do
         ARGS+=("$1")
         shift
       fi
+      ;;
+    -Wl,--unresolved-symbols*)
+      shift
       ;;
     *)
       ARGS+=("$1")
