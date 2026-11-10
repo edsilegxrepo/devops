@@ -2,12 +2,23 @@
 # ==============================================================================
 # craftapps_package.sh
 #
-# Check storytold GitHub releases for updates to craft applications.
-# When a new version is detected:
-#   1. Downloads the Linux (x86_64 tar.gz) and Windows (x86_64 zip) binaries.
-#   2. Repackages both archives directly into a combined zip: <app>-<ver>-<suffix>.zip
-#   3. Deletes the previous version from --source and replaces it with the new version.
-#   4. Removes any prior version from --target and stages the new zip in --target.
+# Check storytold GitHub releases for updates to craft applications (--action build)
+# or install/deploy application binaries from archives to a target directory (--action deploy).
+#
+# When packaging (--action build):
+#   1. Downloads Linux (x86_64 tar.gz/tar.xz) and Windows (x86_64 zip) binaries.
+#   2. Prunes packaging artifacts (LICENSE*, *LICENCE*, NOTICE*, ATTRIBUTION*, OFL-*.txt).
+#   3. Decompresses Linux archive, deletes artifacts, and recompresses to .tar.xz.
+#   4. Repackages both archives directly into a combined zip: <app>-<ver>-<suffix>.zip.
+#   5. Deletes the previous version from --source and replaces it with the new version.
+#   6. Removes any prior version from --target and stages the new zip in --target.
+#
+# When deploying (--action deploy):
+#   1. Resolves archives from local folder (--source) or remote URL.
+#   2. Auto-detects target OS (Windows vs Linux) and extracts the platform package.
+#   3. Deploys binaries directly (--flatten) or preserves archive subdirectories.
+#   4. Excludes companion CLI binaries if requested (--no-cli).
+#   5. Safely purges source archives upon successful deployment if requested (--purge-source).
 #
 # Designed for Cygwin, MSYS2 / Git Bash, and native Linux environments.
 # ==============================================================================
@@ -40,34 +51,50 @@
 #      Linux (.tar.gz) and Windows (.zip) release assets.
 #   6. Semantic Version Evaluator:
 #      GNU sort -V based version comparator supporting semantic versioning.
-#   7. Transactional Repackager & Atomic Stager:
+#   7. Transactional Repackager & Atomic Stager (--action build):
 #      Downloads to temp, verifies archive integrity (tar -tzf, unzip -tq),
-#      bundles archives into combined zip, verifies output, moves to source library,
-#      and atomically stages to target pending directory via .tmp rename.
+#      prunes packaging/licensing artifacts in-place, decompresses Linux tar.gz,
+#      prunes artifacts, recompresses with xz -9 to .tar.xz, bundles archives into
+#      combined zip, verifies output, moves to source library, and atomically stages
+#      to target pending directory via .tmp rename.
+#   8. Extraction & Installation Engine (--action deploy):
+#      Discovers packages from local folders or remote URLs, auto-detects host OS,
+#      extracts binaries, strips base folder, deploys flattened (executables only)
+#      or structured hierarchy, filters CLI tools (--no-cli), and purges source.
 #
 # DATA FLOW:
-#   [CLI / Env] ──► Parse Args & Auto-Detect GitHub Token ($GITHUB_TOKEN / gh)
+#   [CLI / Env] ──► Parse Args & Validate Mandatory --action <build|deploy>
 #        │
-#        ▼
-#   [Temp Detection] ──► Detect Temp Root ($TMPDIR / $TEMP / $TMP / /tmp)
+#   [Action Dispatch]:
+#        ├─► --action build:
+#        │     ├─► Detect Auth Token ($GITHUB_TOKEN / gh CLI) & Temp Root
+#        │     ├─► Create Isolated Workspace: craftapps_exec_XXXXXX
+#        │     └─► [For each App in PACKAGES]:
+#        │           ├─► Local Scan: Find current version in --source
+#        │           ├─► Remote Query: Fetch latest release JSON from GitHub API
+#        │           ├─► Compare Versions: If remote > local (or missing locally):
+#        │           │     ├─► Download Linux tar.gz & Windows zip to Temp
+#        │           │     ├─► Verify Download Integrity: tar -tzf & unzip -tq
+#        │           │     ├─► Prune Artifacts (LICENSE*, NOTICE*, ATTRIBUTION*, OFL-*)
+#        │           │     ├─► Decompress Linux tar.gz, prune artifacts, recompress to .tar.xz
+#        │           │     ├─► Package cleaned archives into Combined Zip: zip -q
+#        │           │     ├─► Verify Packaged Zip Integrity: unzip -tq
+#        │           │     ├─► Update Source: Delete older versions, mv package to --source
+#        │           │     ├─► Atomic Stage: Copy to --target as .tmp, chmod 644, mv -f
+#        │           │     └─► Immediate Cleanup: safe_rm_rf app temp subfolder
 #        │
-#        ▼
-#   [Workspace Init] ──► Create Isolated Workspace: craftapps_exec_XXXXXX
-#        │
-#   [For each App in PACKAGES]:
-#        ├─► Local Scan: Find current version in --source via regex glob
-#        ├─► Remote Query: Fetch latest release JSON from GitHub API
-#        ├─► Compare Versions: If remote > local (or missing locally):
-#        │     ├─► Create App Temp Dir: craftapps_exec_XXXXXX/<app>_XXXXXX/
-#        │     ├─► Download Linux tar.gz & Windows zip to Temp
-#        │     ├─► Verify Download Integrity: tar -tzf & unzip -tq
-#        │     ├─► Package into Combined Zip in Temp: zip -q
-#        │     ├─► Verify Packaged Zip Integrity: unzip -tq
-#        │     ├─► Update Source: Delete older versions, mv package to --source
-#        │     ├─► Atomic Stage: Copy to --target as .tmp, chmod 644, mv -f
-#        │     └─► Immediate Cleanup: safe_rm_rf app temp subfolder
-#        ▼
-#   [Execution Summary] ──► Output stats table, destroy root workspace, exit 0/1
+#        └─► --action deploy:
+#              ├─► Auto-detect Target OS (Windows vs Linux) & Temp Root
+#              ├─► Create Temp Workspace: craftapps_deploy_XXXXXX
+#              ├─► Locate Archive: Local folder (--source) or remote URL
+#              ├─► Extract OS Archive (Windows zip or Linux tar.xz/tar.gz)
+#              ├─► Strip Base Directory
+#              ├─► Deploy to --deploy-target:
+#              │     ├─► --flatten: executables only (*.exe / ELF scripts)
+#              │     └─► Structured: all files preserving directory hierarchy
+#              ├─► Exclude CLI binaries if --no-cli (*-cli.exe / *-cli)
+#              ├─► Purge Source Archive if --purge-source (local folders only)
+#              └─► Cleanup workspace on completion
 # ==============================================================================
 
 # Enable strict shell execution:
@@ -150,6 +177,12 @@ if [[ -z "$GITHUB_TOKEN" ]] && command -v gh >/dev/null 2>&1; then
 fi
 
 # Execution Control Flags:
+#   ACTION          : Mandatory action mode ('build' or 'deploy').
+#   DEPLOY_TARGET   : Path to deployment target installation directory.
+#   FLATTEN         : When true, deploys only executable binaries directly into target (no subdirs).
+#   NO_CLI          : When true, excludes companion CLI binaries from deployment.
+#   PURGE_SOURCE    : When true, deletes source archive(s) upon successful deployment.
+#   SOURCE_IS_URL   : Flags whether --source points to an HTTP/HTTPS URL.
 #   DRY_RUN         : When true, inspects repositories and prints actions without disk modifications.
 #   FORCE_REPACKAGE : When true, rebuilds and stages packages even if remote == local version.
 #   UPDATE_SOURCE   : When true, removes old releases from --source and writes the new package there.
@@ -158,6 +191,13 @@ fi
 #   VERBOSE         : Displays extended diagnostic messages, asset lists, and HTTP details.
 #   CONFIG_FILE     : Optional external package list to override or extend the internal table.
 #   LOG_FILE        : Optional destination file for teeing standard output and errors.
+ACTION=""
+DEPLOY_TARGET=""
+DEPLOY_TARGET_CYG=""
+FLATTEN=false
+NO_CLI=false
+PURGE_SOURCE=false
+SOURCE_IS_URL=false
 DRY_RUN=false
 FORCE_REPACKAGE=false
 UPDATE_SOURCE=true
@@ -375,9 +415,9 @@ safe_rm_f() {
 # temporary root directory across Cygwin, Windows, and POSIX environments.
 #
 # Evaluation Priority:
-#   1. $TMPDIR
+#   1. $TMP
 #   2. $TEMP
-#   3. $TMP
+#   3. $TMPDIR
 #   4. Fallback: /tmp
 #   5. Final fallback: . (current working directory)
 #
@@ -386,7 +426,7 @@ safe_rm_f() {
 detect_temp_root() {
     local detected=""
 
-    for candidate in "${TMPDIR:-}" "${TEMP:-}" "${TMP:-}"; do
+    for candidate in "${TMP:-}" "${TEMP:-}" "${TMPDIR:-}"; do
         if [[ -n "$candidate" ]]; then
             local cyg_path
             cyg_path=$(to_cygpath "$candidate")
@@ -397,7 +437,7 @@ detect_temp_root() {
         fi
     done
 
-    # Fallback to /tmp if neither TMPDIR, TEMP, nor TMP is valid/writable
+    # Fallback to /tmp if neither TMP, TEMP, nor TMPDIR is valid/writable
     if [[ -z "$detected" ]]; then
         if [[ -d "/tmp" && -w "/tmp" ]]; then
             detected="/tmp"
@@ -560,7 +600,7 @@ display_apps_table() {
     done
     echo "===================================================================================================="
     echo -e " Total: ${C_BOLD}${total}${C_RESET} packages configured."
-    echo " To process an individual package: $(basename "$0") --app <name> [--dry-run]"
+    echo " To process an individual package: $(basename "$0") --action build --app <name> [--dry-run]"
     echo "===================================================================================================="
 }
 
@@ -572,29 +612,41 @@ display_apps_table() {
 # execution options, and the list of configured software packages to stdout.
 show_help() {
     cat << EOF
-Usage: $(basename "$0") [OPTIONS]
+Usage: $(basename "$0") --action <build|deploy> [OPTIONS]
 
-Checks GitHub (https://github.com/storytold/) for new versions of craft packages.
-If a newer release exists:
-  - Downloads Linux x86_64 (.tar.gz) and Windows x86_64 (.zip)
-  - Packages both into a single combined zip
-  - Deletes the old version from --source and places the new zip into --source
-  - Removes prior versions from --target and copies the new zip into --target
+Checks Storytold GitHub releases, packages multi-platform bundles,
+or deploys application binaries directly to a target installation directory.
 
-Options:
-  --source <path>     Path to local software library (default: $DEFAULT_SOURCE)
-  --target <path>     Path to upload staging directory (default: $DEFAULT_TARGET)
-  --org <name>        GitHub organization name (default: $DEFAULT_ORG)
-  --token <token>     GitHub Personal Access Token (can also use GITHUB_TOKEN env var)
-  --app <name>        Process only a single specified app (e.g. --app soundcraft)
-  --list-apps         Display all configured applications by category in a formatted table
-  --config <file>     Load package list from an external configuration file
-  --log <file>        Save execution log output to specified file
-  --force             Force download and repackage even if local version is up-to-date
-  --no-update-source  Do not update or delete files in --source (only write to --target)
-  --dry-run           Check releases and show what would be done without modifying files
-  --verbose           Show detailed debug messages and raw asset lists
-  -h, --help          Show this help message and exit
+Actions (Mandatory):
+  --action build          Monitor GitHub, download assets, clean artifacts,
+                          convert Linux to .tar.xz, bundle, and stage packages.
+  --action deploy         Deploy application binaries from local archives or a URL
+                          directly to a target directory.
+
+Common Options:
+  --action <build|deploy> Action mode to execute (REQUIRED)
+  --name, --app <name>    Process only a single specified app (e.g. --name figcraft)
+  --source <path|url>     Source library or archive directory (or URL in deploy mode)
+                          Build default: $DEFAULT_SOURCE
+  --config <file>         Load package list from an external configuration file
+  --log <file>            Save execution log output to specified file
+  --list-apps             Display configured applications by category in a table
+  --verbose               Show detailed debug messages and asset lists
+  -h, --help              Show this help message and exit
+
+Build Action Options (--action build):
+  --target <path>         Path to upload staging directory (default: $DEFAULT_TARGET)
+  --org <name>            GitHub organization name (default: $DEFAULT_ORG)
+  --token <token>         GitHub Personal Access Token (can also use GITHUB_TOKEN env var)
+  --force                 Force download and repackage even if local version is up-to-date
+  --no-update-source      Do not update or delete files in --source (only write to --target)
+  --dry-run               Check releases and show what would be done without modifying files
+
+Deploy Action Options (--action deploy):
+  --deploy-target <path>  Target installation directory (REQUIRED for deploy)
+  --flatten               Deploy only executable binaries directly into target (no subdirs)
+  --no-cli                Do not deploy companion CLI binaries (e.g. *-cli.exe or *-cli)
+  --purge-source          Remove source archive(s) after successful deployment (folders only)
 
 Configured Packages (${#PACKAGES[@]}):
 EOF
@@ -773,7 +825,7 @@ extract_asset_urls() {
         [ .assets[]? |
           select(.name | test("linux"; "i")) |
           select(.name | test("x86_64|amd64|x64"; "i")) |
-          select(.name | test("\\.tar\\.gz$"; "i")) |
+          select(.name | test("[.]tar[.](gz|xz)$"; "i")) |
           select(.name | test("source|src|debug|symbols"; "i") | not)
         ] | first // empty | "\(.name)\t\(.browser_download_url)"
     ')
@@ -781,11 +833,475 @@ extract_asset_urls() {
         [ .assets[]? |
           select(.name | test("win"; "i")) |
           select(.name | test("x86_64|amd64|x64"; "i")) |
-          select(.name | test("\\.zip$"; "i")) |
+          select(.name | test("[.]zip$"; "i")) |
           select(.name | test("web|source|src|debug|symbols"; "i") | not)
         ] | first // empty | "\(.name)\t\(.browser_download_url)"
     ')
     printf '%s\n%s\n' "$linux_info" "$win_info"
+}
+
+# ------------------------------------------------------------------------------
+# Section 8b: Artifact Cleanup & Recompression Engine
+# ------------------------------------------------------------------------------
+# is_artifact_file <filename>
+# Checks if a filename matches artifact patterns to be removed:
+# LICENSE*, *LICENCE*, NOTICE*, ATTRIBUTION*, OFL-*.txt (case-insensitive)
+is_artifact_file() {
+    local fname="$1"
+    local lower="${fname,,}"
+    if [[ "$lower" == license* || "$lower" == *licence* || "$lower" == notice* || "$lower" == attribution* || "$lower" == ofl-*.txt || "$lower" == ofl.txt ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# clean_zip_artifacts <zip_path>
+# Removes matching artifact files directly from a zip archive without full re-pack.
+clean_zip_artifacts() {
+    local zip_path="$1"
+    [[ -f "$zip_path" ]] || return 1
+
+    local entries_to_remove=()
+    while IFS= read -r entry || [[ -n "$entry" ]]; do
+        [[ -z "$entry" ]] && continue
+        local base="${entry##*/}"
+        if is_artifact_file "$base"; then
+            entries_to_remove+=("$entry")
+        fi
+    done < <(unzip -Z1 "$zip_path" 2>/dev/null || true)
+
+    if [[ ${#entries_to_remove[@]} -gt 0 ]]; then
+        log_info "Removing ${#entries_to_remove[@]} artifact file(s) from $(basename "$zip_path")..."
+        if command -v zip >/dev/null 2>&1; then
+            zip -q -d "$zip_path" "${entries_to_remove[@]}" >/dev/null 2>&1 || true
+        elif command -v 7za >/dev/null 2>&1; then
+            7za d "$zip_path" "${entries_to_remove[@]}" >/dev/null 2>&1 || true
+        fi
+    else
+        log_info "No matching artifact files found in $(basename "$zip_path")."
+    fi
+}
+
+# clean_and_recompress_linux_archive <archive_path>
+# Decompresses Linux tar.gz or tar.xz, removes matching artifacts (e.g. in root
+# or share/doc/<app>), and recompresses using xz -9, producing <archive>.tar.xz.
+# Outputs the new archive filename to standard output.
+clean_and_recompress_linux_archive() {
+    local archive_path="$1"
+    [[ -f "$archive_path" ]] || return 1
+
+    local dir
+    dir=$(dirname "$archive_path")
+    local fname
+    fname=$(basename "$archive_path")
+
+    local tar_file=""
+    if [[ "$fname" =~ \.tar\.gz$ ]]; then
+        log_info "Decompressing gzip archive: $fname..." >&2
+        gzip -d -f "$archive_path"
+        tar_file="${dir}/${fname%.gz}"
+    elif [[ "$fname" =~ \.tar\.xz$ ]]; then
+        log_info "Decompressing xz archive: $fname..." >&2
+        xz -d -f "$archive_path"
+        tar_file="${dir}/${fname%.xz}"
+    elif [[ "$fname" =~ \.tar$ ]]; then
+        tar_file="$archive_path"
+    else
+        echo "$fname"
+        return 0
+    fi
+
+    if [[ ! -f "$tar_file" ]]; then
+        log_error "Failed to produce uncompressed tar file: $tar_file" >&2
+        return 1
+    fi
+
+    # Inspect tar members for artifacts
+    local tar_entries_to_remove=()
+    while IFS= read -r entry || [[ -n "$entry" ]]; do
+        [[ -z "$entry" ]] && continue
+        local base="${entry##*/}"
+        if is_artifact_file "$base"; then
+            tar_entries_to_remove+=("$entry")
+        fi
+    done < <(tar --force-local -tf "$tar_file" 2>/dev/null || true)
+
+    if [[ ${#tar_entries_to_remove[@]} -gt 0 ]]; then
+        log_info "Removing ${#tar_entries_to_remove[@]} artifact file(s) from $(basename "$tar_file")..." >&2
+        tar --force-local --delete -f "$tar_file" "${tar_entries_to_remove[@]}" 2>/dev/null || true
+    else
+        log_info "No matching artifact files found in $(basename "$tar_file")." >&2
+    fi
+
+    # Recompress with xz -9
+    log_info "Compressing tar to xz: $(basename "$tar_file").xz..." >&2
+    xz -9 -f "$tar_file"
+    local xz_file="${tar_file}.xz"
+
+    if [[ ! -f "$xz_file" ]]; then
+        log_error "Failed to recompress tar to xz: $xz_file" >&2
+        return 1
+    fi
+
+    echo "$(basename "$xz_file")"
+}
+
+# ------------------------------------------------------------------------------
+# Section 8c: Application Deployment Pipeline (--action deploy)
+# ------------------------------------------------------------------------------
+# run_deploy_pipeline
+# Executes the install and deploy workflow:
+#   1. Validates deploy target directory.
+#   2. Auto-detects target OS (Windows vs Linux).
+#   3. Discovers packages from local directory or remote URL.
+#   4. Extracts platform-specific archive from combined or standalone packages.
+#   5. Deploys binaries directly (--flatten) or preserves archive subdirectories.
+#   6. Excludes companion CLI binaries if requested (--no-cli).
+#   7. Purges source archives if requested and deployment succeeded (--purge-source).
+run_deploy_pipeline() {
+    log_step "Starting Craft Apps Deployment..."
+
+    # Ensure deployment target directory exists
+    DEPLOY_TARGET_CYG=$(to_cygpath "$DEPLOY_TARGET")
+    if [[ ! -d "$DEPLOY_TARGET_CYG" ]]; then
+        log_info "Creating deployment target directory: $(enforce_drive_path "$DEPLOY_TARGET_CYG")"
+        if ! mkdir -p "$DEPLOY_TARGET_CYG"; then
+            log_error "Failed to create deployment target directory: $DEPLOY_TARGET"
+            return 1
+        fi
+    fi
+
+    # Determine target operating system
+    local target_os="linux"
+    case "$PLATFORM" in
+        cygwin|msys2)
+            target_os="windows"
+            ;;
+        *)
+            target_os="linux"
+            ;;
+    esac
+    log_info "Target platform : $PLATFORM (OS: $target_os)"
+    log_info "Deploy target   : $(enforce_drive_path "$DEPLOY_TARGET_CYG")"
+    log_info "Flatten mode    : $FLATTEN"
+    log_info "Exclude CLI     : $NO_CLI"
+    log_info "Purge source    : $PURGE_SOURCE"
+
+    # Validate source directory early if local path
+    if [[ "$SOURCE_IS_URL" == false ]]; then
+        local source_test_cyg
+        source_test_cyg=$(to_cygpath "$SOURCE_PATH")
+        if [[ ! -d "$source_test_cyg" ]]; then
+            log_error "Source directory not found: $SOURCE_PATH ($source_test_cyg)"
+            return 1
+        fi
+        if [[ "$PURGE_SOURCE" == true && "$source_test_cyg" == "$DEPLOY_TARGET_CYG" ]]; then
+            log_error "--deploy-target cannot be identical to --source when --purge-source is active."
+            return 1
+        fi
+    fi
+
+    # Execution Workspace
+    EXEC_WORKSPACE=$(mktemp -d "${TEMP_ROOT_CYG}/craftapps_deploy_XXXXXX")
+    if [[ -z "$EXEC_WORKSPACE" || ! -d "$EXEC_WORKSPACE" ]]; then
+        log_error "Failed to create deployment execution workspace in $TEMP_ROOT_PATH"
+        return 1
+    fi
+    log_info "Deployment workspace initialized: $(enforce_drive_path "$EXEC_WORKSPACE")"
+
+    local total_checked=0
+    local deployed_count=0
+    local skipped_count=0
+    local error_count=0
+
+    # If source is URL, fetch directory index
+    local url_index_html=""
+    if [[ "$SOURCE_IS_URL" == true ]]; then
+        log_info "Fetching remote directory index from $SOURCE_PATH..."
+        url_index_html=$(curl -sSL --connect-timeout 10 --max-time 30 "$SOURCE_PATH" 2>/dev/null || true)
+        if [[ -z "$url_index_html" ]]; then
+            log_error "Failed to retrieve directory index from URL: $SOURCE_PATH"
+            return 1
+        fi
+    fi
+
+    for entry in "${PACKAGES[@]}"; do
+        [[ -z "$entry" || "$entry" =~ ^[[:space:]]*# ]] && continue
+        read -r rel_dir app_name suffix repo <<< "$entry"
+        suffix="${suffix:-win-lnx}"
+        repo="${repo:-$app_name}"
+
+        # Filter by specific application if --name / --app was requested
+        if [[ -n "$SPECIFIC_APP" && "$app_name" != "$SPECIFIC_APP" && "$repo" != "$SPECIFIC_APP" ]]; then
+            continue
+        fi
+
+        total_checked=$((total_checked + 1))
+        echo ""
+        log_step "Deploying [$app_name]..."
+
+        CURRENT_BUILD_DIR=$(mktemp -d "${EXEC_WORKSPACE}/${app_name}_XXXXXX")
+
+        local archive_file=""
+        local archive_to_purge=""
+
+        if [[ "$SOURCE_IS_URL" == true ]]; then
+            # Find matching zip in remote HTML index with delimiter boundary
+            local remote_filename
+            remote_filename=$(echo "$url_index_html" | grep -o -i -E "(^|[\"'/>< ])(${app_name}-[0-9][^\"'<> ]*\.zip)" | sed -E "s|^[\"'/>< ]||" | sort -V | tail -n1)
+            if [[ -z "$remote_filename" ]]; then
+                log_warn "No archive found at URL for $app_name."
+                skipped_count=$((skipped_count + 1))
+                safe_rm_rf "$CURRENT_BUILD_DIR"
+                CURRENT_BUILD_DIR=""
+                continue
+            fi
+
+            local download_url="${SOURCE_PATH%/}/${remote_filename}"
+            log_info "Downloading $remote_filename from $download_url..."
+            if ! curl -f -sSL --retry 3 --retry-delay 2 -o "${CURRENT_BUILD_DIR}/${remote_filename}" "$download_url"; then
+                log_error "Failed to download $download_url"
+                error_count=$((error_count + 1))
+                safe_rm_rf "$CURRENT_BUILD_DIR"
+                CURRENT_BUILD_DIR=""
+                continue
+            fi
+            archive_file="${CURRENT_BUILD_DIR}/${remote_filename}"
+        else
+            # Flat directory lookup in source folder
+            local source_cyg
+            source_cyg=$(to_cygpath "$SOURCE_PATH")
+            shopt -s nullglob
+            local candidate_files=("${source_cyg}/${app_name}-"*.zip)
+            shopt -u nullglob
+
+            # Fallback to category path if flat lookup had no matches
+            if [[ ${#candidate_files[@]} -eq 0 && -d "${source_cyg}/${rel_dir}" ]]; then
+                shopt -s nullglob
+                candidate_files=("${source_cyg}/${rel_dir}/${app_name}-"*.zip)
+                shopt -u nullglob
+            fi
+
+            if [[ ${#candidate_files[@]} -eq 0 ]]; then
+                log_warn "No archive found in source for $app_name."
+                skipped_count=$((skipped_count + 1))
+                safe_rm_rf "$CURRENT_BUILD_DIR"
+                CURRENT_BUILD_DIR=""
+                continue
+            fi
+
+            # Select latest version
+            local best_file=""
+            local best_ver="none"
+            for cf in "${candidate_files[@]}"; do
+                local bname
+                bname=$(basename "$cf")
+                if [[ "$bname" =~ ^${app_name}-([0-9]+(\.[0-9]+)*([a-zA-Z0-9._-]*))(\.zip|-) ]]; then
+                    local ver="${BASH_REMATCH[1]}"
+                    if [[ "$best_ver" == "none" ]] || is_version_newer "$ver" "$best_ver"; then
+                        best_ver="$ver"
+                        best_file="$cf"
+                    fi
+                elif [[ -z "$best_file" ]]; then
+                    best_file="$cf"
+                fi
+            done
+
+            archive_file="$best_file"
+            archive_to_purge="$best_file"
+            log_info "Located source archive: $(enforce_drive_path "$archive_file")"
+        fi
+
+        # Determine if archive_file is a combined zip or platform package
+        local platform_pkg=""
+        local inner_files=()
+        while IFS= read -r l || [[ -n "$l" ]]; do
+            [[ -n "$l" ]] && inner_files+=("$l")
+        done < <(unzip -Z1 "$archive_file" 2>/dev/null || true)
+
+        if [[ "$target_os" == "windows" ]]; then
+            local win_inner=""
+            for inf in "${inner_files[@]}"; do
+                local inf_lower="${inf,,}"
+                if [[ "$inf_lower" =~ (win|windows).*\.zip$ ]]; then
+                    win_inner="$inf"
+                    break
+                fi
+            done
+            if [[ -n "$win_inner" ]]; then
+                log_info "Extracting inner Windows archive: $win_inner..."
+                unzip -q -j "$archive_file" "$win_inner" -d "$CURRENT_BUILD_DIR"
+                platform_pkg="${CURRENT_BUILD_DIR}/$(basename "$win_inner")"
+            else
+                platform_pkg="$archive_file"
+            fi
+        else
+            local lnx_inner=""
+            for inf in "${inner_files[@]}"; do
+                local inf_lower="${inf,,}"
+                if [[ "$inf_lower" =~ (linux|lnx).*\.tar\.(xz|gz)$ ]]; then
+                    lnx_inner="$inf"
+                    break
+                fi
+            done
+            if [[ -n "$lnx_inner" ]]; then
+                log_info "Extracting inner Linux archive: $lnx_inner..."
+                unzip -q -j "$archive_file" "$lnx_inner" -d "$CURRENT_BUILD_DIR"
+                platform_pkg="${CURRENT_BUILD_DIR}/$(basename "$lnx_inner")"
+            else
+                platform_pkg="$archive_file"
+            fi
+        fi
+
+        if [[ -z "$platform_pkg" || ! -f "$platform_pkg" ]]; then
+            log_error "Could not resolve platform archive for $app_name ($target_os)"
+            error_count=$((error_count + 1))
+            safe_rm_rf "$CURRENT_BUILD_DIR"
+            CURRENT_BUILD_DIR=""
+            continue
+        fi
+
+        # Extract platform archive into staging directory
+        local extract_dir="${CURRENT_BUILD_DIR}/extracted"
+        mkdir -p "$extract_dir"
+
+        if [[ "$platform_pkg" =~ \.zip$ ]]; then
+            if ! unzip -q "$platform_pkg" -d "$extract_dir"; then
+                log_error "Failed to unpack zip: $(basename "$platform_pkg")"
+                error_count=$((error_count + 1))
+                safe_rm_rf "$CURRENT_BUILD_DIR"
+                CURRENT_BUILD_DIR=""
+                continue
+            fi
+        elif [[ "$platform_pkg" =~ \.tar\.xz$ ]]; then
+            if ! tar --force-local -xJf "$platform_pkg" -C "$extract_dir"; then
+                log_error "Failed to unpack tar.xz: $(basename "$platform_pkg")"
+                error_count=$((error_count + 1))
+                safe_rm_rf "$CURRENT_BUILD_DIR"
+                CURRENT_BUILD_DIR=""
+                continue
+            fi
+        elif [[ "$platform_pkg" =~ \.tar\.gz$ ]]; then
+            if ! tar --force-local -xzf "$platform_pkg" -C "$extract_dir"; then
+                log_error "Failed to unpack tar.gz: $(basename "$platform_pkg")"
+                error_count=$((error_count + 1))
+                safe_rm_rf "$CURRENT_BUILD_DIR"
+                CURRENT_BUILD_DIR=""
+                continue
+            fi
+        fi
+
+        # Detect single base directory to strip
+        local content_root="$extract_dir"
+        shopt -s nullglob
+        local top_items=("${extract_dir}"/*)
+        shopt -u nullglob
+        if [[ ${#top_items[@]} -eq 1 && -d "${top_items[0]}" ]]; then
+            content_root="${top_items[0]}"
+            log_info "Stripping base folder: $(basename "$content_root")"
+        fi
+
+        # Perform deployment
+        local deploy_success=false
+        if [[ "$FLATTEN" == true ]]; then
+            log_info "Deploying binaries in flattened mode..."
+            local deployed_bins=0
+            if [[ "$target_os" == "windows" ]]; then
+                while IFS= read -r -d '' exe_file; do
+                    local bname
+                    bname=$(basename "$exe_file")
+                    local bname_lower="${bname,,}"
+                    if [[ "$NO_CLI" == true && ( "$bname_lower" == *-cli.exe || "$bname_lower" == *-cli ) ]]; then
+                        log_info "Excluding CLI binary (--no-cli): $bname"
+                        continue
+                    fi
+                    cp -f "$exe_file" "${DEPLOY_TARGET_CYG}/${bname}"
+                    chmod 755 "${DEPLOY_TARGET_CYG}/${bname}" 2>/dev/null || true
+                    deployed_bins=$((deployed_bins + 1))
+                done < <(find "$content_root" -type f -iname "*.exe" -print0)
+            else
+                while IFS= read -r -d '' bin_file; do
+                    local bname
+                    bname=$(basename "$bin_file")
+                    local bname_lower="${bname,,}"
+                    # Exclude shared libraries in flatten mode
+                    if [[ "$bname_lower" =~ \.so(\.[0-9]+)*$ ]]; then
+                        continue
+                    fi
+                    if [[ "$NO_CLI" == true && ( "$bname_lower" == *-cli.exe || "$bname_lower" == *-cli ) ]]; then
+                        log_info "Excluding CLI binary (--no-cli): $bname"
+                        continue
+                    fi
+                    if [[ -x "$bin_file" ]] || file "$bin_file" 2>/dev/null | grep -qi "elf"; then
+                        cp -f "$bin_file" "${DEPLOY_TARGET_CYG}/${bname}"
+                        chmod 755 "${DEPLOY_TARGET_CYG}/${bname}" 2>/dev/null || true
+                        deployed_bins=$((deployed_bins + 1))
+                    fi
+                done < <(find "$content_root" -type f -print0)
+            fi
+
+            if [[ $deployed_bins -gt 0 ]]; then
+                deploy_success=true
+                log_ok "Deployed $deployed_bins binary file(s) for $app_name."
+            else
+                log_warn "No matching binary files found to deploy for $app_name."
+            fi
+        else
+            # Non-flattened deployment: copy all files preserving structure, excluding CLI if --no-cli
+            if [[ "$NO_CLI" == true ]]; then
+                log_info "Removing CLI binaries before deployment (--no-cli)..."
+                find "$content_root" -type f \( -iname "*-cli.exe" -o -name "*-cli" \) -exec rm -f {} + 2>/dev/null || true
+            fi
+            log_info "Deploying archive contents to $(enforce_drive_path "$DEPLOY_TARGET_CYG")..."
+            cp -rf "$content_root"/. "$DEPLOY_TARGET_CYG/"
+            chmod -R a+rX "$DEPLOY_TARGET_CYG" 2>/dev/null || true
+            deploy_success=true
+            log_ok "Deployed contents for $app_name."
+        fi
+
+        # Purge source if requested and deployment succeeded
+        if [[ "$deploy_success" == true ]]; then
+            deployed_count=$((deployed_count + 1))
+            if [[ "$PURGE_SOURCE" == true ]]; then
+                if [[ "$SOURCE_IS_URL" == true ]]; then
+                    log_info "--purge-source skipped: remote URL source cannot be purged."
+                elif [[ -n "$archive_to_purge" && -f "$archive_to_purge" ]]; then
+                    log_info "Purging source archive: $(enforce_drive_path "$archive_to_purge")"
+                    safe_rm_f "$archive_to_purge"
+                fi
+            fi
+        else
+            error_count=$((error_count + 1))
+        fi
+
+        # Clean app temp directory
+        safe_rm_rf "$CURRENT_BUILD_DIR"
+        CURRENT_BUILD_DIR=""
+    done
+
+    # Clean execution workspace
+    if [[ -n "$EXEC_WORKSPACE" ]]; then
+        safe_rm_rf "$EXEC_WORKSPACE"
+        EXEC_WORKSPACE=""
+    fi
+
+    echo ""
+    echo "=============================================================================="
+    echo " Deployment Summary"
+    echo "=============================================================================="
+    echo " Action                 : deploy"
+    echo " Target OS              : $target_os ($PLATFORM)"
+    echo " Deploy Target          : $(enforce_drive_path "$DEPLOY_TARGET_CYG")"
+    echo " Total packages checked : $total_checked"
+    echo " Deployed successfully  : $deployed_count"
+    echo " Skipped / Not found    : $skipped_count"
+    echo " Errors                 : $error_count"
+    echo "=============================================================================="
+
+    if [[ $error_count -gt 0 ]]; then
+        return 1
+    fi
+    return 0
 }
 
 # ------------------------------------------------------------------------------
@@ -794,13 +1310,39 @@ extract_asset_urls() {
 # Process command-line flags and parameters.
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --action)
+            ACTION="$2"
+            shift 2
+            ;;
         --source)
-            SOURCE_PATH=$(enforce_drive_path "$2")
+            if [[ "$2" =~ ^https?:// ]]; then
+                SOURCE_PATH="$2"
+                SOURCE_IS_URL=true
+            else
+                SOURCE_PATH=$(enforce_drive_path "$2")
+                SOURCE_IS_URL=false
+            fi
             shift 2
             ;;
         --target)
             TARGET_PATH=$(enforce_drive_path "$2")
             shift 2
+            ;;
+        --deploy-target)
+            DEPLOY_TARGET=$(enforce_drive_path "$2")
+            shift 2
+            ;;
+        --flatten)
+            FLATTEN=true
+            shift
+            ;;
+        --no-cli)
+            NO_CLI=true
+            shift
+            ;;
+        --purge-source)
+            PURGE_SOURCE=true
+            shift
             ;;
         --org)
             GITHUB_ORG="$2"
@@ -810,7 +1352,7 @@ while [[ $# -gt 0 ]]; do
             GITHUB_TOKEN="$2"
             shift 2
             ;;
-        --app)
+        --name|--app)
             SPECIFIC_APP="$2"
             shift 2
             ;;
@@ -883,11 +1425,42 @@ if [[ "$LIST_APPS" == true ]]; then
 fi
 
 # ------------------------------------------------------------------------------
+# Action Mode Validation (Mandatory: --action build or --action deploy)
+# ------------------------------------------------------------------------------
+if [[ -z "$ACTION" ]]; then
+    log_error "Missing mandatory option: --action <build|deploy>"
+    echo "Run '$(basename "$0") --help' for usage." >&2
+    exit 1
+fi
+
+case "$ACTION" in
+    build|deploy)
+        ;;
+    *)
+        log_error "Invalid action '$ACTION'. Must be 'build' or 'deploy'."
+        echo "Run '$(basename "$0") --help' for usage." >&2
+        exit 1
+        ;;
+esac
+
+# Validate deploy mode requirements
+if [[ "$ACTION" == "deploy" ]]; then
+    if [[ -z "$DEPLOY_TARGET" ]]; then
+        log_error "Option --deploy-target <path> is required when --action is deploy."
+        exit 1
+    fi
+    if [[ -z "$SOURCE_PATH" ]]; then
+        log_error "Option --source <path|url> is required when --action is deploy."
+        exit 1
+    fi
+fi
+
+# ------------------------------------------------------------------------------
 # Prerequisite Verification (Ensures required tools are present)
 # Checks for curl (HTTP), zip & unzip (archive packaging), jq (JSON parser),
-# and tar (Linux archive verification).
+# tar, gzip, and xz (Linux archive compression and verification).
 # ------------------------------------------------------------------------------
-for tool in curl zip unzip jq tar; do
+for tool in curl zip unzip jq tar gzip xz; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         case "$PLATFORM" in
             cygwin)
@@ -939,14 +1512,21 @@ fi
 # Section 10: Path Normalization, Temp Initialization & Workspace Setup
 # ------------------------------------------------------------------------------
 # Enforce canonical drive:/path/sub format for user display and logs
-SOURCE_PATH=$(enforce_drive_path "$SOURCE_PATH")
+if [[ "$SOURCE_IS_URL" == false ]]; then
+    SOURCE_PATH=$(enforce_drive_path "$SOURCE_PATH")
+    SOURCE_CYG=$(to_cygpath "$SOURCE_PATH")
+else
+    SOURCE_CYG="$SOURCE_PATH"
+fi
 TARGET_PATH=$(enforce_drive_path "$TARGET_PATH")
-
-# Resolve POSIX mount paths for filesystem calls
-SOURCE_CYG=$(to_cygpath "$SOURCE_PATH")
 TARGET_CYG=$(to_cygpath "$TARGET_PATH")
 
-# Automatically detect the root of the temp folder (TMPDIR -> TEMP -> TMP -> /tmp)
+if [[ -n "$DEPLOY_TARGET" ]]; then
+    DEPLOY_TARGET=$(enforce_drive_path "$DEPLOY_TARGET")
+    DEPLOY_TARGET_CYG=$(to_cygpath "$DEPLOY_TARGET")
+fi
+
+# Automatically detect the root of the temp folder (TMP -> TEMP -> TMPDIR -> /tmp)
 TEMP_ROOT_CYG=$(detect_temp_root)
 TEMP_ROOT_PATH=$(enforce_drive_path "$TEMP_ROOT_CYG")
 
@@ -958,30 +1538,45 @@ if [[ -n "$LOG_FILE" ]]; then
 fi
 
 echo "=============================================================================="
-echo " Storytold Craft Apps Packaging Utility"
+echo " Storytold Craft Apps Packaging & Deployment Utility"
 echo "=============================================================================="
+echo " Action         : $ACTION"
 echo " Platform       : $PLATFORM"
-echo " Source Library : $SOURCE_PATH"
-echo " Target Pending : $TARGET_PATH"
+if [[ "$ACTION" == "build" ]]; then
+    echo " Source Library : $SOURCE_PATH"
+    echo " Target Pending : $TARGET_PATH"
+    echo " Organization   : https://github.com/$GITHUB_ORG/"
+    if [[ -n "$GITHUB_TOKEN" ]]; then
+        echo " GitHub Auth    : Authenticated (API token active)"
+    else
+        echo " GitHub Auth    : Unauthenticated (60 req/hr rate limit)"
+    fi
+    echo " Dry Run        : $DRY_RUN"
+    echo " Force Repack   : $FORCE_REPACKAGE"
+    echo " Update Source  : $UPDATE_SOURCE"
+else
+    echo " Source Archives: $SOURCE_PATH"
+    echo " Deploy Target  : $DEPLOY_TARGET"
+    echo " Flatten        : $FLATTEN"
+    echo " Exclude CLI    : $NO_CLI"
+    echo " Purge Source   : $PURGE_SOURCE"
+fi
 echo " Temp Root Dir  : $TEMP_ROOT_PATH"
 if [[ -n "$LOG_FILE" ]]; then
-echo " Log File       : $LOG_FILE"
+    echo " Log File       : $LOG_FILE"
 fi
-echo " Organization   : https://github.com/$GITHUB_ORG/"
-if [[ -n "$GITHUB_TOKEN" ]]; then
-echo " GitHub Auth    : Authenticated (API token active)"
-else
-echo " GitHub Auth    : Unauthenticated (60 req/hr rate limit)"
-fi
-echo " Dry Run        : $DRY_RUN"
-echo " Force Repack   : $FORCE_REPACKAGE"
-echo " Update Source  : $UPDATE_SOURCE"
 if [[ -n "$SPECIFIC_APP" ]]; then
     echo " Filter App     : $SPECIFIC_APP"
 fi
 echo "=============================================================================="
 
-# Ensure directories exist and initialize unique execution workspace
+# If running deployment, execute deploy pipeline and terminate
+if [[ "$ACTION" == "deploy" ]]; then
+    run_deploy_pipeline
+    exit $?
+fi
+
+# Ensure directories exist and initialize unique execution workspace for build
 if [[ "$DRY_RUN" == false ]]; then
     mkdir -p "$TARGET_CYG"
     if [[ "$UPDATE_SOURCE" == true ]]; then
@@ -992,6 +1587,7 @@ if [[ "$DRY_RUN" == false ]]; then
     # Prune any stale craftapps temporary workspaces older than 1 day
     if [[ -d "$TEMP_ROOT_CYG" && "$TEMP_ROOT_CYG" != "/" && ! "$TEMP_ROOT_CYG" =~ ^(/cygdrive/|/mnt/|/)[a-zA-Z]$ ]]; then
         find "$TEMP_ROOT_CYG" -maxdepth 1 -type d -name "craftapps_exec_*" -mtime +1 -exec rm -rf {} + 2>/dev/null || true
+        find "$TEMP_ROOT_CYG" -maxdepth 1 -type d -name "craftapps_deploy_*" -mtime +1 -exec rm -rf {} + 2>/dev/null || true
     fi
 
     # Initialize a unique, isolated workspace for this execution
@@ -1116,6 +1712,8 @@ for entry in "${PACKAGES[@]}"; do
         echo "   - $linux_name ($linux_url)"
         echo "   - $win_name ($win_url)"
         log_ok "[DRY-RUN] Would verify archive integrity in tmp"
+        log_ok "[DRY-RUN] Would prune artifact files (LICENSE*, NOTICE*, etc.) from $win_name"
+        log_ok "[DRY-RUN] Would prune artifacts from $linux_name and recompress to .tar.xz"
         log_ok "[DRY-RUN] Would package both into $NEW_ZIP_NAME in tmp"
         log_ok "[DRY-RUN] Would verify package integrity in tmp"
         if [[ -n "$local_file" && "$UPDATE_SOURCE" == true ]]; then
@@ -1153,14 +1751,24 @@ for entry in "${PACKAGES[@]}"; do
         continue
     fi
 
-    # Step 5b: Verify Linux asset integrity in tmp (tar -tzf)
+    # Step 5b: Verify Linux asset integrity in tmp (tar -tzf or tar -tJf)
     log_info "Verifying Linux archive integrity in tmp..."
-    if ! tar -tzf "${CURRENT_BUILD_DIR}/${linux_name}" >/dev/null 2>&1; then
-        log_error "Corrupted or invalid Linux archive downloaded: $linux_name"
-        safe_rm_rf "$CURRENT_BUILD_DIR"
-        CURRENT_BUILD_DIR=""
-        ERROR_COUNT=$((ERROR_COUNT + 1))
-        continue
+    if [[ "$linux_name" =~ \.tar\.xz$ ]]; then
+        if ! tar --force-local -tJf "${CURRENT_BUILD_DIR}/${linux_name}" >/dev/null 2>&1; then
+            log_error "Corrupted or invalid Linux archive downloaded: $linux_name"
+            safe_rm_rf "$CURRENT_BUILD_DIR"
+            CURRENT_BUILD_DIR=""
+            ERROR_COUNT=$((ERROR_COUNT + 1))
+            continue
+        fi
+    else
+        if ! tar --force-local -tzf "${CURRENT_BUILD_DIR}/${linux_name}" >/dev/null 2>&1; then
+            log_error "Corrupted or invalid Linux archive downloaded: $linux_name"
+            safe_rm_rf "$CURRENT_BUILD_DIR"
+            CURRENT_BUILD_DIR=""
+            ERROR_COUNT=$((ERROR_COUNT + 1))
+            continue
+        fi
     fi
 
     # Step 5c: Download Windows asset to tmp
@@ -1183,8 +1791,32 @@ for entry in "${PACKAGES[@]}"; do
         continue
     fi
 
-    # Step 5e: Repackage combined zip in tmp
-    # Packages the Linux tar.gz and Windows zip together into <app>-<ver>-<suffix>.zip.
+    # Step 5e: Prune Packaging Artifacts & Recompress Linux tarball to xz
+    log_step "Cleaning artifact files and converting Linux archive to xz for $app_name..."
+
+    # Prune artifacts from Windows zip directly
+    clean_zip_artifacts "${CURRENT_BUILD_DIR}/${win_name}"
+    if ! unzip -tq "${CURRENT_BUILD_DIR}/${win_name}" >/dev/null 2>&1; then
+        log_error "Windows zip failed integrity check after artifact cleanup: $win_name"
+        safe_rm_rf "$CURRENT_BUILD_DIR"
+        CURRENT_BUILD_DIR=""
+        ERROR_COUNT=$((ERROR_COUNT + 1))
+        continue
+    fi
+
+    # Decompress Linux archive, delete matching artifacts, and recompress to .tar.xz
+    cleaned_linux_name=$(clean_and_recompress_linux_archive "${CURRENT_BUILD_DIR}/${linux_name}")
+    if [[ -z "$cleaned_linux_name" || ! -s "${CURRENT_BUILD_DIR}/${cleaned_linux_name}" ]] || ! tar --force-local -tJf "${CURRENT_BUILD_DIR}/${cleaned_linux_name}" >/dev/null 2>&1; then
+        log_error "Linux xz archive failed integrity check after recompression: $cleaned_linux_name"
+        safe_rm_rf "$CURRENT_BUILD_DIR"
+        CURRENT_BUILD_DIR=""
+        ERROR_COUNT=$((ERROR_COUNT + 1))
+        continue
+    fi
+    linux_name="$cleaned_linux_name"
+
+    # Step 5f: Repackage combined zip in tmp
+    # Packages the Linux tar.xz and Windows zip together into <app>-<ver>-<suffix>.zip.
     log_info "Packaging archives into $NEW_ZIP_NAME in tmp..."
     if ! (cd "$CURRENT_BUILD_DIR" && zip -q "$NEW_ZIP_NAME" "$linux_name" "$win_name"); then
         log_error "Failed to create repackaged zip in tmp: $NEW_ZIP_NAME"
@@ -1194,7 +1826,7 @@ for entry in "${PACKAGES[@]}"; do
         continue
     fi
 
-    # Step 5f: Verify repackaged zip integrity in tmp (unzip -tq & non-empty check)
+    # Step 5g: Verify repackaged zip integrity in tmp (unzip -tq & non-empty check)
     log_info "Verifying repackaged zip integrity in tmp..."
     if [[ ! -s "${CURRENT_BUILD_DIR}/${NEW_ZIP_NAME}" ]] || ! unzip -tq "${CURRENT_BUILD_DIR}/${NEW_ZIP_NAME}" >/dev/null 2>&1; then
         log_error "Repackaged zip failed integrity verification in tmp: ${NEW_ZIP_NAME}"

@@ -1,21 +1,26 @@
-# Storytold Craft Applications Packaging Utility (`craftapps_package.sh`)
+# Storytold Craft Applications Packaging & Deployment Utility (`craftapps_package.sh`)
 
-A cross-platform, transactional automation pipeline compatible with **Cygwin**, **MSYS2 / Git Bash**, **Windows Subsystem for Linux (WSL)**, and **Native Linux**. This utility continuously monitors GitHub releases for Storytold desktop applications, retrieves 64-bit Linux (`.tar.gz`) and Windows (`.zip`) binary assets, verifies archive integrity, repackages them into unified multi-platform archives, and atomically synchronizes both the local software library and the upload staging environment.
+A cross-platform, transactional release delivery and installation pipeline compatible with **Cygwin**, **MSYS2 / Git Bash**, **Windows Subsystem for Linux (WSL)**, and **Native Linux**. This utility continuously monitors GitHub releases for Storytold desktop applications, retrieves 64-bit Linux (`.tar.gz`/`.tar.xz`) and Windows (`.zip`) binary assets, strips packaging artifacts, recompresses Linux packages into `.tar.xz`, repackages them into unified multi-platform archives, and atomically synchronizes production libraries. Additionally, it provides an end-to-end installation and deployment engine to extract and install binaries into target environments.
 
 ---
 
 ## 1. Application Overview and Objectives
 
 ### 1.1 Executive Summary
-The **Storytold Craft Apps Packaging Utility** (`craftapps_package.sh`) serves as the central release delivery bridge for Storytold desktop products. Desktop users across Windows and Linux environments require synchronized, reliable access to portable binaries. Rather than maintaining disparate release pipelines, this utility automates discovery, validation, bundling, and distribution within a unified POSIX shell environment across Cygwin, MSYS2 / Git Bash, and native Linux systems.
+The **Storytold Craft Apps Packaging & Deployment Utility** (`craftapps_package.sh`) serves as the central release delivery bridge for Storytold desktop products. Desktop users and administrators across Windows and Linux environments require synchronized, reliable access to portable binaries. This utility automates the entire lifecycle:
+1. **Packaging (`--action build`)**: Discovers upstream GitHub releases, validates assets, prunes packaging and licensing artifacts, transcodes Linux archives to high-compression `.tar.xz`, and builds unified release packages.
+2. **Deployment (`--action deploy`)**: Discovers archives from local folders or remote URLs, auto-detects the host platform (Windows vs Linux), and deploys binaries directly into target installation paths (with optional directory flattening, CLI exclusion, and source archive purging).
 
 ### 1.2 Core Business & Technical Objectives
-- **Multi-Platform Archive Unification**: Bundle corresponding 64-bit Linux (`.tar.gz`) and Windows (`.zip`) release binaries into a single, standardized archive (`<app>-<version>-win-lnx.zip`) for distribution.
+- **Multi-Platform Archive Unification**: Bundle corresponding 64-bit Linux (`.tar.xz`) and Windows (`.zip`) release binaries into a single, standardized archive (`<app>-<version>-win-lnx.zip`) for distribution.
+- **Packaging Artifact De-Bloating**: Prune redundant license and attribution files (`LICENSE*`, `*LICENCE*`, `NOTICE*`, `ATTRIBUTION*`, `OFL-*.txt`) directly from archives in-place to minimize package bloat and unclutter runtime folders.
+- **Linux XZ Transcoding**: Decompress `.tar.gz` and recompress using `xz -9` to produce `.tar.xz` tarballs, ensuring optimal compression ratios.
 - **Zero-Corruption Guarantee (Transactional Staging)**: Protect destination directories against partial writes, download corruptions, or interrupted operations by performing all extraction, repackaging, and integrity checks within an isolated temporary workspace before touching production libraries.
+- **End-to-End Portable Deployment**: Rapidly install and deploy binaries into target directories with flexible formatting options (`--flatten` for executable binaries only, or structured extraction without the versioned archive root folder).
 - **Dual-Repository Synchronization**:
   1. **Primary Library (`--source`)**: Updates the persistent, organized software library (e.g. `n:/softlib/software/public/<rel_dir>/` on Windows or `/mnt/n/...` / `/opt/...` on Linux), purging obsolete builds and placing the validated archive.
   2. **Staging Area (`--target`)**: Atomically deploys the verified package into the upload distribution directory (e.g. `f:/stage/upload/pending/` or custom Linux path) via `.tmp` file renaming to ensure external upload daemons and file watchers never read incomplete archives.
-- **Dependency Elimination**: Designed as a self-contained, pure bash script utilizing only foundational system tools (`curl`, `zip`, `unzip`, `jq`, `tar`, and coreutils). Eliminates high-overhead runtimes such as Python or Node.js.
+- **Dependency Elimination**: Designed as a self-contained, pure bash script utilizing only foundational system tools (`curl`, `zip`, `unzip`, `jq`, `tar`, `gzip`, `xz`, and coreutils). Eliminates high-overhead runtimes such as Python or Node.js.
 - **Cross-Platform Path Harmonization**: Automatically identifies the host environment (`cygwin`, `msys2`, `wsl`, `linux`) and translates between user-facing canonical paths (`drive:/path/sub`), Cygwin mounts (`/cygdrive/x/...`), MSYS2 mounts (`/x/...`), WSL mounts (`/mnt/x/...`), and standard POSIX Linux paths.
 
 ---
@@ -27,56 +32,53 @@ The **Storytold Craft Apps Packaging Utility** (`craftapps_package.sh`) serves a
 ```mermaid
 flowchart TD
     subgraph Initialization ["1. Initialization & Discovery"]
-        CLI["CLI Options & Flags"] --> Parser["Argument Parser & Validator"]
-        Parser --> Auth["Token Discovery: GITHUB_TOKEN or gh CLI"]
-        Auth --> TempDetect["Temp Root Detection: TMPDIR / TEMP / TMP / /tmp"]
+        CLI["CLI Options & Flags"] --> Parser["Argument Parser & Action Gate"]
+        Parser --> ActionGate{"Action Mode?"}
+        ActionGate -- "--action build" --> Auth["Token Discovery: GITHUB_TOKEN or gh CLI"]
+        ActionGate -- "--action deploy" --> DeployPrep["Resolve Target Platform: Windows / Linux"]
+        ActionGate -- None / Invalid --> Abort["Exit 1 (Mandatory Action Required)"]
+        Auth --> TempDetect["Temp Root Detection: TMP / TEMP / TMPDIR / /tmp"]
         TempDetect --> TrapInit["Register Signal Traps: EXIT INT TERM HUP"]
         TrapInit --> WorkspaceInit["Allocate Workspace: craftapps_exec_XXXXXX"]
     end
 
-    subgraph Inspection ["2. Version & Release Evaluation"]
+    subgraph BuildPipeline ["2. Build & Packaging Pipeline (--action build)"]
         WorkspaceInit --> AppLoop["Iterate Configured Applications (14 Apps)"]
         AppLoop --> LocalCheck["Inspect Local Library: find_local_version()"]
         AppLoop --> RemoteCheck["Query GitHub API: fetch_github_release()"]
-        RemoteCheck --> FallbackCheck{"404 or Pre-Release?"}
-        FallbackCheck -- Yes --> FallbackURL["Query /releases?per_page=1"]
-        FallbackCheck -- No --> ParseVersion["Extract tag_name & Strip v Prefix"]
-        FallbackURL --> ParseVersion
-        LocalCheck --> Comparator["Semantic Version Compare: sort -V"]
-        ParseVersion --> Comparator
+        RemoteCheck --> Comparator["Semantic Version Compare: sort -V"]
+        LocalCheck --> Comparator
         Comparator --> Decision{"Remote > Local?"}
-    end
-
-    subgraph TransactionalPipeline ["3. Transactional Packaging Engine"]
         Decision -- No --> Skip["Log Up-To-Date & Continue"]
-        Decision -- Yes --> JQFilter["JQ Asset Extraction (Linux .tar.gz & Win .zip)"]
-        JQFilter --> SubWorkspace["Allocate App Workspace: app_XXXXXX"]
-        SubWorkspace --> DownloadLnx["curl Linux Asset with Retries"]
-        DownloadLnx --> VerifyLnx["tar -tzf Linux Archive Integrity"]
-        VerifyLnx --> DownloadWin["curl Windows Asset with Retries"]
-        DownloadWin --> VerifyWin["unzip -tq Windows Archive Integrity"]
-        VerifyWin --> Repackage["zip -q Combined Archive in Temp"]
-        Repackage --> VerifyBundle["unzip -tq Combined Archive Integrity"]
+        Decision -- Yes --> Download["Download Linux (.tar.gz) & Windows (.zip)"]
+        Download --> VerifyIn["Verify Download Integrity: tar -tzf & unzip -tq"]
+        VerifyIn --> CleanupArtifacts["Artifact Cleanup: Prune LICENSE*, NOTICE*, OFL-*"]
+        CleanupArtifacts --> RecompressXZ["Transcode Linux tar to .tar.xz (xz -9)"]
+        RecompressXZ --> Repackage["zip -q Combined Bundle: <app>-<ver>-win-lnx.zip"]
+        Repackage --> VerifyBundle["Verify Bundle Integrity: unzip -tq"]
+        VerifyBundle --> UpdateSource["Update Source Library & Atomic Stage to Target"]
     end
 
-    subgraph Deployment ["4. Atomic Synchronization & Cleanup"]
-        VerifyBundle --> UpdateSource{"Update Source? (--update-source)"}
-        UpdateSource -- Yes --> PurgeOldSrc["Purge Historical App Archives from --source"]
-        PurgeOldSrc --> MoveSource["mv Package from Temp to --source"]
-        MoveSource --> VerifySrc["Verify File Arrival & Size (> 0)"]
-        UpdateSource -- No --> TargetPrep["Direct Staging"]
-        VerifySrc --> TargetPrep
-        TargetPrep --> PurgeOldTgt["Purge Historical App Archives from --target"]
-        PurgeOldTgt --> CopyTargetTmp["cp Package to --target/<name>.tmp"]
-        CopyTargetTmp --> AtomicRename["mv -f <name>.tmp to <name>.zip"]
-        AtomicRename --> CleanAppTemp["safe_rm_rf App Build Workspace"]
+    subgraph DeployPipeline ["3. Deployment Pipeline (--action deploy)"]
+        DeployPrep --> DeployWorkspace["Allocate Workspace: craftapps_deploy_XXXXXX"]
+        DeployWorkspace --> SourceDiscover["Locate Archive: Local Folder or Remote URL"]
+        SourceDiscover --> ExtractPlatform["Extract OS Archive (*win*.zip or *linux*.tar.xz)"]
+        ExtractPlatform --> StripBase["Strip Top-Level Base Folder"]
+        StripBase --> ModeCheck{"Flatten Mode? (--flatten)"}
+        ModeCheck -- Yes --> DeployBins["Deploy Executables Only (*.exe / ELF)"]
+        ModeCheck -- No --> DeployStruct["Deploy All Files Preserving Subdirs"]
+        DeployBins --> FilterCLI{"Exclude CLI? (--no-cli)"}
+        DeployStruct --> FilterCLI
+        FilterCLI --> FinalDeploy["Write to --deploy-target"]
+        FinalDeploy --> PurgeCheck{"Purge Source? (--purge-source)"}
+        PurgeCheck -- Yes --> PurgeFile["Delete Source Archive from --source"]
+        PurgeCheck -- No --> CleanApp["safe_rm_rf App Build Workspace"]
+        PurgeFile --> CleanApp
     end
 
-    subgraph Finalization ["5. Finalization & Teardown"]
-        CleanAppTemp --> NextApp["Next Application"]
-        NextApp --> AppLoop
-        AppLoop -- Completed --> DestroyExec["safe_rm_rf craftapps_exec_XXXXXX"]
-        DestroyExec --> Summary["Print Execution Summary Table & Exit"]
+    subgraph Teardown ["4. Finalization & Teardown"]
+        UpdateSource --> Summary["Print Execution Summary & Destroy Workspace"]
+        CleanApp --> Summary
     end
 ```
 
@@ -113,18 +115,26 @@ flowchart TD
 ## 3. Data Flow and Control Logic
 
 ### 3.1 Operational Control Flow
-1. **Argument Parsing & Validation**: Reads CLI parameters, loads external configuration if specified (`--config`), and handles exclusive dispatchers (`--help`, `--list-apps`).
-2. **Tool Prerequisite Verification**: Checks presence of `curl`, `zip`, `unzip`, and `jq` via `command -v`.
-3. **Workspace Allocation**: Resolves temp root (`$TMPDIR` -> `$TEMP` -> `$TMP` -> `/tmp`), prunes stale workspaces older than 24 hours, and creates `craftapps_exec_XXXXXX`.
-4. **Sequential Application Loop**:
-   - **Local Discovery**: Scans `--source/<rel_dir>/` for existing archives using regex matching.
-   - **Remote Discovery**: Queries GitHub Releases API; handles rate limits and pre-releases.
-   - **Comparison**: Evaluates whether remote version is strictly newer via `is_version_newer()` (`sort -V`).
-   - **Asset Filter**: Extracts download URLs using `jq` with negative filters against debug symbols and source packages.
-   - **Packaging**: Downloads archives into temp, verifies file integrity, repackages into combined zip, and verifies bundle integrity.
-   - **Source Deployment**: Deletes obsolete versions from `--source`, moves the new archive into place, verifies non-empty size, and applies `chmod 644`.
-   - **Target Staging**: Deletes obsolete versions from `--target`, copies the new archive to `<name>.tmp`, applies `chmod 644`, and atomically renames to final `<name>.zip`.
-   - **Immediate Cleanup**: Erases the application-specific temp build directory.
+1. **Argument Parsing & Action Validation**: Evaluates CLI parameters and ensures the mandatory `--action <build|deploy>` flag is present (halting with an error if absent).
+2. **Tool Prerequisite Verification**: Checks for foundational tools: `curl`, `zip`, `unzip`, `jq`, `tar`, `gzip`, and `xz`.
+3. **Workspace Allocation**: Resolves temp root via candidate hierarchy (`$TMP` -> `$TEMP` -> `$TMPDIR` -> `/tmp`), prunes stale workspaces older than 24 hours, and allocates an isolated workspace (`craftapps_exec_XXXXXX` or `craftapps_deploy_XXXXXX`).
+4. **Execution Dispatch**:
+   - **`--action build`**:
+     - Evaluates local version in `--source` vs. remote GitHub release tag via `sort -V`.
+     - Downloads Linux (`.tar.gz`/`.tar.xz`) and Windows (`.zip`) binary assets into temporary build directory.
+     - Verifies archive integrity (`tar --force-local -tzf`, `unzip -tq`).
+     - **Artifact Cleanup**: Prunes `LICENSE*`, `*LICENCE*`, `NOTICE*`, `ATTRIBUTION*`, and `OFL-*.txt` directly from the Windows zip (`zip -d`).
+     - **Linux XZ Transcoding**: Decompresses `.tar.gz`, prunes matching artifacts via `tar --delete`, and recompresses using `xz -9` to produce `.tar.xz`.
+     - Packages cleaned `.tar.xz` and `.zip` into combined bundle (`<app>-<ver>-win-lnx.zip`).
+     - Verifies bundle integrity (`unzip -tq`).
+     - Atomically updates `--source` and stages to `--target`.
+   - **`--action deploy`**:
+     - Resolves source archive from local directory (flat lookup) or remote URL.
+     - Auto-detects host OS (Windows vs Linux) and extracts the platform package.
+     - Strips top-level base directory.
+     - Deploys executables only (`--flatten`) or preserves all files and subdirectories.
+     - Excludes companion CLI binaries if requested (`--no-cli`).
+     - Purges source archives upon successful deployment if enabled (`--purge-source`).
 5. **Teardown & Metrics**: Destroys root execution workspace and prints summary metrics table.
 
 ### 3.2 Sequence Diagram
@@ -139,8 +149,8 @@ sequenceDiagram
     participant FS_Src as Source Library (n:/softlib)
     participant FS_Tgt as Target Pending (f:/stage)
 
-    User->>Script: Run ./craftapps_package.sh [OPTIONS]
-    Script->>Script: Parse Args, Detect Auth Token & Temp Root
+    User->>Script: Run ./craftapps_package.sh --action build [OPTIONS]
+    Script->>Script: Parse Args, Validate Action, Detect Auth Token & Temp Root
     Script->>FS_Temp: mktemp -d craftapps_exec_XXXXXX
     
     loop For each App in PACKAGES
@@ -163,13 +173,20 @@ sequenceDiagram
             Script->>FS_Temp: mktemp -d app_XXXXXX
             Script->>GH: curl download linux.tar.gz
             GH-->>FS_Temp: Write linux.tar.gz
-            Script->>FS_Temp: tar -tzf linux.tar.gz (Verify)
+            Script->>FS_Temp: tar --force-local -tzf linux.tar.gz (Verify)
             
             Script->>GH: curl download win.zip
             GH-->>FS_Temp: Write win.zip
             Script->>FS_Temp: unzip -tq win.zip (Verify)
+
+            Note over Script,FS_Temp: Artifact Cleanup & XZ Transcoding
+            Script->>FS_Temp: zip -d win.zip (Prune LICENSE*, NOTICE*, OFL-*)
+            Script->>FS_Temp: gzip -d linux.tar.gz -> linux.tar
+            Script->>FS_Temp: tar --delete linux.tar (Prune artifacts)
+            Script->>FS_Temp: xz -9 linux.tar -> linux.tar.xz
+            Script->>FS_Temp: tar -tJf linux.tar.xz & unzip -tq win.zip (Verify)
             
-            Script->>FS_Temp: zip -q bundle.zip linux.tar.gz win.zip
+            Script->>FS_Temp: zip -q bundle.zip linux.tar.xz win.zip
             Script->>FS_Temp: unzip -tq bundle.zip (Verify)
             
             opt UPDATE_SOURCE == true
@@ -217,11 +234,13 @@ The script requires a standard POSIX shell environment on **Cygwin**, **MSYS2 / 
 | Tool | Minimum Version | Category | Purpose |
 | :--- | :--- | :--- | :--- |
 | **`bash`** | 4.3+ | Shell Runtime | Execution environment, arrays, regex matching, parameter expansion |
-| **`curl`** | 7.60+ | Network Client | GitHub API queries, secure TLS asset downloads, redirect handling |
+| **`curl`** | 7.60+ | Network Client | GitHub API queries, secure TLS asset downloads, directory scraping |
 | **`jq`** | 1.5+ | JSON Processor | Parsing GitHub API release payloads, asset extraction filters |
-| **`zip`** | 3.0+ | Archiver | Repackaging combined multi-platform archive bundles |
-| **`unzip`** | 6.0+ | Archiver | Integrity testing of Windows zip assets and output bundles (`-tq`) |
-| **`tar`** | 1.28+ | Archiver | Integrity testing of Linux tarball assets (`-tzf`) |
+| **`zip`** | 3.0+ | Archiver | In-place artifact removal (`zip -d`) and repackaging bundles |
+| **`unzip`** | 6.0+ | Archiver | Integrity testing (`-tq`) and platform archive extraction |
+| **`tar`** | 1.28+ | Archiver | Archive verification (`-tzf`/`-tJf`), extraction, and pruning (`--delete`) |
+| **`gzip`** | 1.9+ | Compression | Decompressing downloaded Linux `.tar.gz` assets |
+| **`xz`** | 5.2+ | Compression | Recompressing Linux archives to `.tar.xz` with maximum ratio (`-9`) |
 | **`coreutils`** | 8.25+ | OS Utilities | `sort -V` (versioning), `mktemp`, `mkdir`, `cp`, `mv`, `chmod`, `find` |
 | **`gh`** | *(Optional)* | GitHub CLI | Optional token discovery for automated rate limit elevation |
 
@@ -234,12 +253,14 @@ flowchart TD
     subgraph CoreUtilities ["POSIX Core Tools (Cygwin / MSYS2 / Linux)"]
         Bash["bash (>=4.3)"]
         CoreUtils["coreutils (sort -V, mktemp, mv, cp)"]
-        Tar["tar (tar -tzf)"]
     end
     
     subgraph ArchiveTools ["Compression Utilities"]
         Zip["zip (3.0+)"]
         Unzip["unzip (6.0+)"]
+        Tar["tar (tar -tzf / -tJf)"]
+        Gzip["gzip (1.9+)"]
+        Xz["xz (5.2+)"]
     end
     
     subgraph NetworkJSON ["Network & JSON Engines"]
@@ -254,6 +275,8 @@ flowchart TD
     Script --> Bash
     Script --> CoreUtils
     Script --> Tar
+    Script --> Gzip
+    Script --> Xz
     Script --> Zip
     Script --> Unzip
     Script --> Curl
@@ -366,11 +389,16 @@ flowchart TD
 
 | Option Flag | Argument Type | Default Value | Description |
 | :--- | :--- | :--- | :--- |
-| `--source <path>` | String (Path) | `n:/softlib/software/public` | Root path to local software library repository. |
-| `--target <path>` | String (Path) | `f:/stage/upload/pending` | Path to the target pending upload directory. |
-| `--org <name>` | String | `storytold` | Upstream GitHub organization or user account name. |
+| `--action <build\|deploy>` | String | *(Mandatory)* | Execution action: `build` (monitor GitHub, clean artifacts, package, stage) or `deploy` (extract and deploy binaries). |
+| `--name <name>`, `--app <name>` | String | *(None - All)* | Restricts execution to a single specified application name or repo. |
+| `--source <path\|url>` | String (Path or URL) | `n:/softlib/software/public` | Software library repository (build mode) or archive folder / URL (deploy mode). |
+| `--target <path>` | String (Path) | `f:/stage/upload/pending` | Path to the target pending upload directory (`--action build`). |
+| `--deploy-target <path>` | String (Path) | *(None - Required)* | Destination directory for deployed binaries (`--action deploy`). |
+| `--flatten` | Boolean (Flag) | `false` | Deploy only executable binaries directly into `--deploy-target` without subdirectories. |
+| `--no-cli` | Boolean (Flag) | `false` | Exclude companion CLI binaries (e.g. `*-cli.exe`, `*-cli`) from deployment. |
+| `--purge-source` | Boolean (Flag) | `false` | Remove source archive(s) from `--source` after successful deployment (local folders only). |
+| `--org <name>` | String | `storytold` | Upstream GitHub organization or user account name (`--action build`). |
 | `--token <token>` | String | *(Auto-detected)* | GitHub Personal Access Token (can also use `GITHUB_TOKEN` env var). |
-| `--app <name>` | String | *(None - All)* | Restricts execution to a single specified application name or repo. |
 | `--list-apps` | Boolean (Flag) | `false` | **Exclusive command**: Displays configured application catalog table by category and exits immediately (`0`). |
 | `--config <file>` | String (Path) | *(None)* | Loads external package configuration table from a file. |
 | `--log <file>` | String (Path) | *(None)* | Appends full execution output (stdout and stderr) to specified log file. |
@@ -386,13 +414,13 @@ flowchart TD
 
 ### 10.1 Production Deployment Checklist
 1. **Verify or install prerequisites**:
-   - **Cygwin**: Select `curl`, `zip`, `unzip`, `jq`, `tar` in Cygwin setup.
-   - **MSYS2 / Git Bash**: Run `pacman -S curl zip unzip jq tar`
-   - **Debian / Ubuntu Linux**: Run `sudo apt-get install curl zip unzip jq tar`
-   - **Fedora / RHEL Linux**: Run `sudo dnf install curl zip unzip jq tar`
-   - **Arch Linux**: Run `sudo pacman -S curl zip unzip jq tar`
+   - **Cygwin**: Select `curl`, `zip`, `unzip`, `jq`, `tar`, `gzip`, `xz` in Cygwin setup.
+   - **MSYS2 / Git Bash**: Run `pacman -S curl zip unzip jq tar gzip xz`
+   - **Debian / Ubuntu Linux**: Run `sudo apt-get install curl zip unzip jq tar gzip xz-utils`
+   - **Fedora / RHEL Linux**: Run `sudo dnf install curl zip unzip jq tar gzip xz`
+   - **Arch Linux**: Run `sudo pacman -S curl zip unzip jq tar gzip xz`
    ```bash
-   which curl zip unzip jq tar
+   which curl zip unzip jq tar gzip xz
    ```
 2. **Verify target and source directories are accessible and writable**:
    - On Windows (Cygwin): `test -w /cygdrive/n/softlib/software/public && test -w /cygdrive/f/stage/upload/pending`
@@ -437,32 +465,34 @@ $ ./craftapps_package.sh --list-apps
  Development > UX     devel/ux                figcraft         win-lnx    storytold/figcraft
 ====================================================================================================
  Total: 14 packages configured.
- To process an individual package: craftapps_package.sh --app <name> [--dry-run]
+ To process an individual package: craftapps_package.sh --action build --app <name> [--dry-run]
 ====================================================================================================
 ```
 
 ---
 
-#### Example 2: Dry Run Single Application Check (`--app <name> --dry-run`)
+#### Example 2: Dry Run Single Application Build (`--action build --app <name> --dry-run`)
 Simulates checking and packaging without modifying filesystem contents:
 
 ```bash
-$ ./craftapps_package.sh --app soundcraft --dry-run
+$ ./craftapps_package.sh --action build --app soundcraft --dry-run
 ```
 
 **Output:**
 ```text
 ==============================================================================
- Storytold Craft Apps Packaging Utility
+ Storytold Craft Apps Packaging & Deployment Utility
 ==============================================================================
+ Action         : build
+ Platform       : msys2
  Source Library : n:/softlib/software/public
  Target Pending : f:/stage/upload/pending
- Temp Root Dir  : f:/TEMP
  Organization   : https://github.com/storytold/
  GitHub Auth    : Authenticated (API token active)
  Dry Run        : true
  Force Repack   : false
  Update Source  : true
+ Temp Root Dir  : f:/TEMP
  Filter App     : soundcraft
 ==============================================================================
 
@@ -475,6 +505,8 @@ $ ./craftapps_package.sh --app soundcraft --dry-run
    - soundcraft-1.3.0-linux-x86_64.tar.gz (https://github.com/storytold/soundcraft/releases/download/v1.3.0/soundcraft-1.3.0-linux-x86_64.tar.gz)
    - soundcraft-1.3.0-windows-x86_64.zip (https://github.com/storytold/soundcraft/releases/download/v1.3.0/soundcraft-1.3.0-windows-x86_64.zip)
 [OK] [DRY-RUN] Would verify archive integrity in tmp
+[OK] [DRY-RUN] Would prune artifact files (LICENSE*, NOTICE*, etc.) from soundcraft-1.3.0-windows-x86_64.zip
+[OK] [DRY-RUN] Would prune artifacts from soundcraft-1.3.0-linux-x86_64.tar.gz and recompress to .tar.xz
 [OK] [DRY-RUN] Would package both into soundcraft-1.3.0-win-lnx.zip in tmp
 [OK] [DRY-RUN] Would verify package integrity in tmp
 [OK] [DRY-RUN] Would delete old version from source library: n:/softlib/software/public/apps/audio/soundcraft-1.2.0-win-lnx.zip
@@ -494,26 +526,28 @@ $ ./craftapps_package.sh --app soundcraft --dry-run
 
 ---
 
-#### Example 3: Full Production Run (Live Update)
-Executes an end-to-end scan, downloading and repackaging any newly detected software:
+#### Example 3: Full Production Build Run (`--action build`)
+Executes an end-to-end scan across all configured applications, downloading binary assets, pruning licensing/packaging artifacts, transcoding Linux archives to high-compression `.tar.xz`, and repackaging them:
 
 ```bash
-$ ./craftapps_package.sh
+$ ./craftapps_package.sh --action build
 ```
 
 **Output:**
 ```text
 ==============================================================================
- Storytold Craft Apps Packaging Utility
+ Storytold Craft Apps Packaging & Deployment Utility
 ==============================================================================
+ Action         : build
+ Platform       : msys2
  Source Library : n:/softlib/software/public
  Target Pending : f:/stage/upload/pending
- Temp Root Dir  : f:/TEMP
  Organization   : https://github.com/storytold/
  GitHub Auth    : Authenticated (API token active)
  Dry Run        : false
  Force Repack   : false
  Update Source  : true
+ Temp Root Dir  : f:/TEMP
 ==============================================================================
 [INFO] Unique execution workspace initialized: f:/TEMP/craftapps_exec_s8Jn2M
 
@@ -531,6 +565,12 @@ $ ./craftapps_package.sh
 [INFO] Verifying Linux archive integrity in tmp...
 [INFO] Downloading Windows asset to tmp: pdfcraft-1.0.0-win-x86_64.zip...
 [INFO] Verifying Windows archive integrity in tmp...
+==> Cleaning artifact files and converting Linux archive to xz for pdfcraft...
+[INFO] Pruned 4 artifact file(s) from pdfcraft-1.0.0-win-x86_64.zip
+[INFO] Decompressing Linux gzip tarball: pdfcraft-1.0.0-linux-x86_64.tar.gz
+[INFO] Pruned 3 artifact file(s) from Linux tarball
+[INFO] Recompressing Linux tarball with xz -9...
+[OK] Recompressed to pdfcraft-1.0.0-linux-x86_64.tar.xz
 [INFO] Packaging archives into pdfcraft-1.0.0-win-lnx.zip in tmp...
 [INFO] Verifying repackaged zip integrity in tmp...
 [INFO] Removing old source version: n:/softlib/software/public/apps/text/pdf/editor/pdfcraft-0.9.4-win-lnx.zip
@@ -539,7 +579,7 @@ $ ./craftapps_package.sh
 [INFO] Cleaned package temporary workspace for pdfcraft.
 [OK] Successfully updated, moved to source, and staged in target: pdfcraft-1.0.0-win-lnx.zip
 
-... [remaining apps processed] ...
+... [remaining apps checked] ...
 
 [OK] Unique execution workspace destroyed: f:/TEMP/craftapps_exec_s8Jn2M
 
@@ -555,11 +595,219 @@ $ ./craftapps_package.sh
 
 ---
 
-#### Example 4: Early Validation Failure on Invalid Application Name
+#### Example 4: Application Deployment Pipeline (`--action deploy`)
+Deploys application binaries from local archives or remote URLs into a target installation directory.
+
+##### Example 4a: Flattened Deployment with CLI Exclusion (`--flatten --no-cli`)
+Deploys only executable binaries directly into `--deploy-target` without subdirectories, filtering out companion CLI binaries:
+
+```bash
+$ ./craftapps_package.sh --action deploy --source n:/softlib/software/public --name figcraft --deploy-target f:/stage/tools/bin --flatten --no-cli
+```
+
+**Output:**
+```text
+==============================================================================
+ Storytold Craft Apps Packaging & Deployment Utility
+==============================================================================
+ Action         : deploy
+ Platform       : msys2
+ Source Archives: n:/softlib/software/public
+ Deploy Target  : f:/stage/tools/bin
+ Flatten        : true
+ Exclude CLI    : true
+ Purge Source   : false
+ Temp Root Dir  : f:/TEMP
+ Filter App     : figcraft
+==============================================================================
+[INFO] Unique deployment workspace initialized: f:/TEMP/craftapps_deploy_aB3x9Q
+
+==> Deploying [figcraft]...
+[INFO] Resolving archive from local source directory: n:/softlib/software/public
+[INFO] Found archive: n:/softlib/software/public/devel/ux/figcraft-0.17.0-win-lnx.zip
+[INFO] Unpacking combined archive: figcraft-0.17.0-win-lnx.zip...
+[INFO] Extracting inner Windows archive: figcraft-0.17.0-windows-x64-portable.zip...
+[INFO] Stripping base folder: figcraft-0.17.0-windows-x64-portable
+[INFO] Deploying binaries in flattened mode...
+[INFO] Excluding CLI binary (--no-cli): figcraft-cli.exe
+[OK] Deployed 1 binary file(s) for figcraft.
+[OK] Unique deployment workspace destroyed.
+
+==============================================================================
+ Deployment Summary
+==============================================================================
+ Action                 : deploy
+ Target OS              : windows (msys2)
+ Deploy Target          : f:/stage/tools/bin
+ Total packages checked : 1
+ Deployed successfully  : 1
+ Skipped / Not found    : 0
+ Errors                 : 0
+==============================================================================
+```
+
+##### Example 4b: Structured Deployment Preserving Subdirectories
+Extracts all files preserving internal directory structure directly into `--deploy-target`, stripping only the top-level base folder:
+
+```bash
+$ ./craftapps_package.sh --action deploy --source n:/softlib/software/public --name figcraft --deploy-target f:/stage/tools/figcraft --no-cli
+```
+
+**Output:**
+```text
+==============================================================================
+ Storytold Craft Apps Packaging & Deployment Utility
+==============================================================================
+ Action         : deploy
+ Platform       : msys2
+ Source Archives: n:/softlib/software/public
+ Deploy Target  : f:/stage/tools/figcraft
+ Flatten        : false
+ Exclude CLI    : true
+ Purge Source   : false
+ Temp Root Dir  : f:/TEMP
+ Filter App     : figcraft
+==============================================================================
+[INFO] Unique deployment workspace initialized: f:/TEMP/craftapps_deploy_f8k1wZ
+
+==> Deploying [figcraft]...
+[INFO] Resolving archive from local source directory: n:/softlib/software/public
+[INFO] Found archive: n:/softlib/software/public/devel/ux/figcraft-0.17.0-win-lnx.zip
+[INFO] Unpacking combined archive: figcraft-0.17.0-win-lnx.zip...
+[INFO] Extracting inner Windows archive: figcraft-0.17.0-windows-x64-portable.zip...
+[INFO] Stripping base folder: figcraft-0.17.0-windows-x64-portable
+[INFO] Removing CLI binaries before deployment (--no-cli)...
+[INFO] Deploying archive contents to f:/stage/tools/figcraft...
+[OK] Deployed contents for figcraft.
+[OK] Unique deployment workspace destroyed.
+
+==============================================================================
+ Deployment Summary
+==============================================================================
+ Action                 : deploy
+ Target OS              : windows (msys2)
+ Deploy Target          : f:/stage/tools/figcraft
+ Total packages checked : 1
+ Deployed successfully  : 1
+ Skipped / Not found    : 0
+ Errors                 : 0
+==============================================================================
+```
+
+##### Example 4c: Deployment with Source Archive Purging (`--purge-source`)
+Installs application and removes the source archive from `--source` upon successful deployment:
+
+```bash
+$ ./craftapps_package.sh --action deploy --source /tmp/craft --name figcraft --deploy-target /opt/craft --purge-source
+```
+
+**Output:**
+```text
+==============================================================================
+ Storytold Craft Apps Packaging & Deployment Utility
+==============================================================================
+ Action         : deploy
+ Platform       : linux
+ Source Archives: /tmp/craft
+ Deploy Target  : /opt/craft
+ Flatten        : false
+ Exclude CLI    : false
+ Purge Source   : true
+ Temp Root Dir  : /tmp
+ Filter App     : figcraft
+==============================================================================
+[INFO] Unique deployment workspace initialized: /tmp/craftapps_deploy_p9D1aC
+
+==> Deploying [figcraft]...
+[INFO] Resolving archive from local source directory: /tmp/craft
+[INFO] Found archive: /tmp/craft/figcraft-0.17.0-linux-x86_64.tar.xz
+[INFO] Stripping base folder: figcraft-0.17.0-linux-x86_64
+[INFO] Deploying archive contents to /opt/craft...
+[OK] Deployed contents for figcraft.
+[INFO] Purging source archive: /tmp/craft/figcraft-0.17.0-linux-x86_64.tar.xz
+[OK] Unique deployment workspace destroyed.
+
+==============================================================================
+ Deployment Summary
+==============================================================================
+ Action                 : deploy
+ Target OS              : linux (linux)
+ Deploy Target          : /opt/craft
+ Total packages checked : 1
+ Deployed successfully  : 1
+ Skipped / Not found    : 0
+ Errors                 : 0
+==============================================================================
+```
+
+##### Example 4d: Deployment from Remote HTTP/HTTPS URL
+Fetches packages from a remote directory listing, unpacks in an isolated temporary workspace, and installs binaries:
+
+```bash
+$ ./craftapps_package.sh --action deploy --source https://packages.example.com/craft/ --name figcraft --deploy-target /opt/craft
+```
+
+**Output:**
+```text
+==============================================================================
+ Storytold Craft Apps Packaging & Deployment Utility
+==============================================================================
+ Action         : deploy
+ Platform       : linux
+ Source Archives: https://packages.example.com/craft/
+ Deploy Target  : /opt/craft
+ Flatten        : false
+ Exclude CLI    : false
+ Purge Source   : false
+ Temp Root Dir  : /tmp
+ Filter App     : figcraft
+==============================================================================
+[INFO] Unique deployment workspace initialized: /tmp/craftapps_deploy_m4X7tL
+
+==> Deploying [figcraft]...
+[INFO] Scraping remote URL directory index: https://packages.example.com/craft/
+[INFO] Found remote archive: https://packages.example.com/craft/figcraft-0.17.0-linux-x86_64.tar.xz
+[INFO] Downloading remote archive to temporary workspace...
+[INFO] Stripping base folder: figcraft-0.17.0-linux-x86_64
+[INFO] Deploying archive contents to /opt/craft...
+[OK] Deployed contents for figcraft.
+[OK] Unique deployment workspace destroyed.
+
+==============================================================================
+ Deployment Summary
+==============================================================================
+ Action                 : deploy
+ Target OS              : linux (linux)
+ Deploy Target          : /opt/craft
+ Total packages checked : 1
+ Deployed successfully  : 1
+ Skipped / Not found    : 0
+ Errors                 : 0
+==============================================================================
+```
+
+---
+
+#### Example 5: Mandatory Action Gate Validation Failure
+Demonstrating fast failure when `--action` is omitted:
+
+```bash
+$ ./craftapps_package.sh
+```
+
+**Output (Exit Code 1):**
+```text
+[ERROR] Missing mandatory option: --action <build|deploy>
+Run 'craftapps_package.sh --help' for usage.
+```
+
+---
+
+#### Example 6: Early Validation Failure on Invalid Application Name
 Demonstrating fast failure when an invalid or misspelled application name is passed:
 
 ```bash
-$ ./craftapps_package.sh --app unknownapp
+$ ./craftapps_package.sh --action build --app unknownapp
 ```
 
 **Output (Exit Code 1):**
@@ -585,25 +833,25 @@ Available applications (14):
 
 ---
 
-#### Example 5: Custom Configuration File & Dedicated Logging
+#### Example 7: Custom Configuration File & Dedicated Logging
 Running with an external custom configuration file while streaming output to a dedicated log file:
 
 ```bash
-$ ./craftapps_package.sh --config f:/stage/custom_apps.txt --log f:/stage/logs/packaging_$(date +%Y%m%d).log
+$ ./craftapps_package.sh --action build --config f:/stage/custom_apps.txt --log f:/stage/logs/packaging_$(date +%Y%m%d).log
 ```
 
 ---
 
-### 10.3 Automated Deployment via Windows Task Scheduler or Cron
+### 10.3 Automated Execution via Windows Task Scheduler or Cron
 To run this utility automatically on a periodic schedule (e.g., daily at 02:00):
 
 **Using Cygwin Cron (`crontab -e`)**:
 ```cron
-0 2 * * * /bin/bash /cygdrive/f/stage/upload/pending/craftapps_package.sh --log /cygdrive/f/stage/upload/pending/packaging.log
+0 2 * * * /bin/bash /cygdrive/f/stage/upload/pending/craftapps_package.sh --action build --log /cygdrive/f/stage/upload/pending/packaging.log
 ```
 
 **Using Windows Task Scheduler**:
 - **Program/script**: `C:\cygwin64\bin\bash.exe`
-- **Add arguments**: `--login -c "/cygdrive/f/stage/upload/pending/craftapps_package.sh --log /cygdrive/f/stage/upload/pending/packaging.log"`
+- **Add arguments**: `--login -c "/cygdrive/f/stage/upload/pending/craftapps_package.sh --action build --log /cygdrive/f/stage/upload/pending/packaging.log"`
 - **Start in**: `C:\cygwin64\bin`
 
