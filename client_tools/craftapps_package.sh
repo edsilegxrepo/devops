@@ -103,37 +103,20 @@
 set -eo pipefail
 
 # ------------------------------------------------------------------------------
-# Section 1: Default Settings, Platform Detection & Execution State
+# Source Shared Foundation Library
 # ------------------------------------------------------------------------------
-# Platform Detection (Cygwin, MSYS2 / Git Bash, Native Linux, WSL):
-PLATFORM="unknown"
-case "$(uname -s 2>/dev/null || echo "$OSTYPE")" in
-    CYGWIN*)
-        PLATFORM="cygwin"
-        ;;
-    MSYS*|MINGW*)
-        PLATFORM="msys2"
-        ;;
-    Linux*)
-        if grep -qi microsoft /proc/version 2>/dev/null; then
-            PLATFORM="wsl"
-        else
-            PLATFORM="linux"
-        fi
-        ;;
-    Darwin*)
-        PLATFORM="macos"
-        ;;
-    *)
-        if [[ "$OSTYPE" == "cygwin" ]]; then
-            PLATFORM="cygwin"
-        elif [[ "$OSTYPE" == "msys" ]]; then
-            PLATFORM="msys2"
-        else
-            PLATFORM="linux"
-        fi
-        ;;
-esac
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_LIB="${SCRIPT_DIR}/client_package_common.sh"
+if [[ ! -f "$COMMON_LIB" ]]; then
+    echo "[ERROR] Missing required shared library: $COMMON_LIB" >&2
+    exit 1
+fi
+# shellcheck source=client_package_common.sh
+source "$COMMON_LIB"
+
+# ------------------------------------------------------------------------------
+# Section 1: Default Settings & Execution State
+# ------------------------------------------------------------------------------
 
 # Standard repository roots and defaults:
 #   DEFAULT_SOURCE : Primary public repository library containing existing releases.
@@ -222,266 +205,9 @@ TEMP_ROOT_CYG=""
 TEMP_ROOT_PATH=""
 
 # ------------------------------------------------------------------------------
-# Section 2: Path Normalization & Mount Translation
+# (Sections 2, 3, 4: Path Normalization, Defensive RM & Workspace Lifecycle
+#  are provided by client_package_common.sh)
 # ------------------------------------------------------------------------------
-# enforce_drive_path <path>
-# Normalizes any file or directory path into the canonical format:
-#   - Windows (Cygwin/MSYS2): <drive>:/<subpath> (e.g. "c:/stage/upload", "n:/softlib")
-#   - Linux: Standard POSIX format (/path/sub) unless a Windows drive path is passed.
-#
-# Arguments:
-#   $1 - Raw path string (Windows backslash, POSIX /cygdrive or /c/, mixed, or relative)
-# Outputs:
-#   Normalized path string written to standard output.
-# Key Behaviors:
-#   - Empty input produces an empty string.
-#   - Uses `cygpath -m` when available (Cygwin, MSYS2) for full mount resolution.
-#   - Fallback converts backslashes to forward slashes.
-#   - Resolves /cygdrive/<drive>/... (Cygwin), /<drive>/... (MSYS2), and /mnt/<drive>/... (WSL).
-#   - Guarantees lowercase drive letters (e.g., "c:/" instead of "C:/").
-#   - Strips trailing slashes while preserving root drive slashes (e.g. "c:/").
-enforce_drive_path() {
-    local p="$1"
-    [[ -z "$p" ]] && { echo ""; return 0; }
-    if command -v cygpath >/dev/null 2>&1; then
-        p=$(cygpath -m "$p")
-    else
-        p="${p//\\//}"
-        if [[ "$p" =~ ^/cygdrive/([a-zA-Z])/(.*) ]]; then
-            local drive="${BASH_REMATCH[1],,}"
-            p="${drive}:/${BASH_REMATCH[2]}"
-        elif [[ "$PLATFORM" == "msys2" ]] && [[ "$p" =~ ^/([a-zA-Z])/(.*) ]]; then
-            local drive="${BASH_REMATCH[1],,}"
-            p="${drive}:/${BASH_REMATCH[2]}"
-        elif [[ "$PLATFORM" == "wsl" ]] && [[ "$p" =~ ^/mnt/([a-zA-Z])/(.*) ]]; then
-            local drive="${BASH_REMATCH[1],,}"
-            p="${drive}:/${BASH_REMATCH[2]}"
-        fi
-    fi
-    # Normalize drive letter to lowercase and strip trailing slashes
-    if [[ "$p" =~ ^([a-zA-Z]):/(.*) ]]; then
-        local drive="${BASH_REMATCH[1],,}"
-        local rest="${BASH_REMATCH[2]}"
-        rest="${rest%/}"
-        if [[ -n "$rest" ]]; then
-            echo "${drive}:/${rest}"
-        else
-            echo "${drive}:/"
-        fi
-    else
-        echo "${p%/}"
-    fi
-}
-
-# to_posix_path <path> / to_cygpath <path>
-# Converts an arbitrary path (Windows drive-letter or mixed format) to the native
-# POSIX mount format for the host environment:
-#   - Cygwin : /cygdrive/<drive>/...
-#   - MSYS2  : /<drive>/...
-#   - WSL    : /mnt/<drive>/...
-#   - Linux  : Native POSIX path
-#
-# Arguments:
-#   $1 - Path string in Windows drive, backslash, or relative format.
-# Outputs:
-#   POSIX mount path string written to standard output.
-# Key Behaviors:
-#   - Core utilities (rm, mv, cp, test, mkdir, find, mktemp) and bash globbing
-#     require POSIX mount paths to locate filesystem items properly.
-#   - Delegates to `cygpath -u` when running in Cygwin or MSYS2.
-#   - Provides pure bash regex fallback if running under Git-Bash or standard Linux.
-to_posix_path() {
-    local p="$1"
-    [[ -z "$p" ]] && { echo ""; return 0; }
-    if command -v cygpath >/dev/null 2>&1; then
-        cygpath -u "$p"
-    else
-        # Fallback if running on MSYS2/Git-Bash without cygpath, WSL, or native Linux
-        p="${p//\\//}"
-        if [[ "$p" =~ ^([a-zA-Z]):/(.*) ]]; then
-            local drive="${BASH_REMATCH[1],,}"
-            local rest="${BASH_REMATCH[2]}"
-            if [[ "$PLATFORM" == "msys2" ]]; then
-                echo "/${drive}/${rest}"
-            elif [[ "$PLATFORM" == "wsl" ]] || [[ -d "/mnt/${drive}" ]]; then
-                echo "/mnt/${drive}/${rest}"
-            elif [[ -d "/cygdrive/${drive}" ]]; then
-                echo "/cygdrive/${drive}/${rest}"
-            else
-                # Default POSIX mapping
-                echo "/${drive}/${rest}"
-            fi
-        else
-            echo "$p"
-        fi
-    fi
-}
-
-# Retain to_cygpath as backward-compatible wrapper
-to_cygpath() {
-    to_posix_path "$@"
-}
-
-# ------------------------------------------------------------------------------
-# Section 3: Defensive Removal Wrappers (Guards against empty/root/invalid paths)
-# ------------------------------------------------------------------------------
-# safe_rm_rf <target_directory>
-# Provides strict blast-radius containment for recursive directory deletions.
-# Prevents catastrophic accidental filesystem deletion if variables evaluate
-# to empty, whitespace, root, drive root, or critical operating system paths.
-#
-# Arguments:
-#   $1 - Directory path to delete recursively.
-# Safety Checks:
-#   1. Rejects empty, unset, or whitespace-only targets silently (returns 0).
-#   2. Normalizes target to POSIX format via to_cygpath and strips trailing slashes.
-#   3. Explicitly rejects dangerous system paths: "", "/", ".", "..", "/tmp", "/var/tmp", "/cygdrive", "/mnt".
-#   4. Rejects drive roots across all environments:
-#      - Cygwin : /cygdrive/[a-zA-Z]
-#      - MSYS2  : /[a-zA-Z]
-#      - WSL    : /mnt/[a-zA-Z]
-#   5. Rejects system root trees: /bin, /usr, /usr/bin, /etc, /lib, /lib64, /sbin, /home, /root, /boot, /dev, /proc, /sys, /opt, /srv.
-#   6. Confirms directory or symlink existence before executing `rm -rf`.
-safe_rm_rf() {
-    local target="$1"
-
-    # Reject empty, unset, or whitespace-only target
-    [[ -z "${target// /}" ]] && return 0
-
-    local norm
-    norm=$(to_cygpath "$target")
-
-    # Strip trailing slashes
-    while [[ "$norm" != "/" && "$norm" =~ /$ ]]; do
-        norm="${norm%/}"
-    done
-
-    # Refuse removal of dangerous system or root paths
-    case "$norm" in
-        ""|"/"|"."|".."|"/tmp"|"/var/tmp"|"/cygdrive"|"/mnt")
-            echo "[WARN] Refusing unsafe directory deletion: '$norm'" >&2
-            return 1
-            ;;
-        /cygdrive/[a-zA-Z]|/mnt/[a-zA-Z]|/[a-zA-Z])
-            echo "[WARN] Refusing unsafe drive root deletion: '$norm'" >&2
-            return 1
-            ;;
-        /bin|/usr|/usr/bin|/etc|/lib|/lib64|/sbin|/home|/root|/boot|/dev|/proc|/sys|/opt|/srv)
-            echo "[WARN] Refusing unsafe system directory deletion: '$norm'" >&2
-            return 1
-            ;;
-    esac
-
-    if [[ -d "$norm" || -L "$norm" ]]; then
-        rm -rf "$norm" 2>/dev/null || true
-    fi
-}
-
-# safe_rm_f <target_file>
-# Provides defensive single-file removal with bounds checking.
-#
-# Arguments:
-#   $1 - File path to remove.
-# Safety Checks:
-#   1. Rejects empty, unset, or whitespace-only targets silently (returns 0).
-#   2. Normalizes target to POSIX format via to_cygpath.
-#   3. Rejects dangerous root or drive paths across Cygwin, MSYS2, WSL, and Linux.
-#   4. Verifies regular file or symlink existence before invoking `rm -f`.
-safe_rm_f() {
-    local target="$1"
-
-    # Reject empty, unset, or whitespace-only target
-    [[ -z "${target// /}" ]] && return 0
-
-    local norm
-    norm=$(to_cygpath "$target")
-
-    case "$norm" in
-        ""|"/"|"."|".."|"/cygdrive"|"/mnt"|/cygdrive/[a-zA-Z]|/mnt/[a-zA-Z]|/[a-zA-Z])
-            return 1
-            ;;
-    esac
-
-    if [[ -f "$norm" || -L "$norm" ]]; then
-        rm -f "$norm" 2>/dev/null || true
-    fi
-}
-
-# ------------------------------------------------------------------------------
-# Section 4: Temp Root Directory Auto-Detection & Trap Cleanup Handler
-# ------------------------------------------------------------------------------
-# detect_temp_root
-# Inspects system environment variables to identify an accessible, writable
-# temporary root directory across Cygwin, Windows, and POSIX environments.
-#
-# Evaluation Priority:
-#   1. $TMP
-#   2. $TEMP
-#   3. $TMPDIR
-#   4. Fallback: /tmp
-#   5. Final fallback: . (current working directory)
-#
-# Outputs:
-#   Writes the resolved POSIX path of the temporary directory to stdout.
-detect_temp_root() {
-    local detected=""
-
-    for candidate in "${TMP:-}" "${TEMP:-}" "${TMPDIR:-}"; do
-        if [[ -n "$candidate" ]]; then
-            local cyg_path
-            cyg_path=$(to_cygpath "$candidate")
-            if [[ -d "$cyg_path" && -w "$cyg_path" ]]; then
-                detected="$cyg_path"
-                break
-            fi
-        fi
-    done
-
-    # Fallback to /tmp if neither TMP, TEMP, nor TMPDIR is valid/writable
-    if [[ -z "$detected" ]]; then
-        if [[ -d "/tmp" && -w "/tmp" ]]; then
-            detected="/tmp"
-        else
-            detected="."
-        fi
-    fi
-
-    echo "$detected"
-}
-
-# cleanup_workspace
-# Global exit and signal trap handler. Guarantees that neither incomplete temporary
-# build directories nor partial target upload staging files remain on disk when
-# the script exits, whether by normal completion, error, or external interruption.
-#
-# Trapped Signals:
-#   - EXIT : Normal script termination or early exit due to `set -e`.
-#   - INT  : Interrupt signal (e.g. user presses Ctrl+C).
-#   - TERM : Termination signal (e.g. process killed by OS or supervisor).
-#   - HUP  : Hangup signal (e.g. terminal or SSH connection closed).
-#
-# Actions:
-#   1. Deletes the active application build directory ($CURRENT_BUILD_DIR) if set.
-#   2. Deletes the active target staging file ($CURRENT_TARGET_TMP) if set.
-#   3. Deletes the per-run unique workspace directory ($EXEC_WORKSPACE) if set.
-cleanup_workspace() {
-    # 1. Clean current package temporary build directory if active
-    if [[ -n "$CURRENT_BUILD_DIR" ]]; then
-        safe_rm_rf "$CURRENT_BUILD_DIR"
-        CURRENT_BUILD_DIR=""
-    fi
-    # 2. Clean in-flight target staging file if active
-    if [[ -n "$CURRENT_TARGET_TMP" ]]; then
-        safe_rm_f "$CURRENT_TARGET_TMP"
-        CURRENT_TARGET_TMP=""
-    fi
-    # 3. Destroy unique execution workspace at exit or abort
-    if [[ -n "$EXEC_WORKSPACE" ]]; then
-        safe_rm_rf "$EXEC_WORKSPACE"
-        EXEC_WORKSPACE=""
-    fi
-}
-trap cleanup_workspace EXIT INT TERM HUP
 
 # ------------------------------------------------------------------------------
 # Section 5: Package Configuration Table
@@ -515,38 +241,7 @@ PACKAGES=(
 # ------------------------------------------------------------------------------
 # Section 6: Terminal Formatting, Category Mapping & Catalogs
 # ------------------------------------------------------------------------------
-# ANSI Color Palettes:
-# Configures terminal escape codes when connected to an interactive TTY ($stdout is a terminal).
-# If stdout is redirected to a file or piped, color sequences are disabled.
-if [[ -t 1 ]]; then
-    C_RESET="\033[0m"
-    C_RED="\033[1;31m"
-    C_GREEN="\033[1;32m"
-    C_YELLOW="\033[1;33m"
-    C_BLUE="\033[1;34m"
-    C_CYAN="\033[1;36m"
-    C_BOLD="\033[1m"
-else
-    C_RESET=""
-    C_RED=""
-    C_GREEN=""
-    C_YELLOW=""
-    C_BLUE=""
-    C_CYAN=""
-    C_BOLD=""
-fi
-
-# Standardized Console Logging Functions:
-#   log_info  : General operational notices with cyan [INFO] tag.
-#   log_ok    : Confirmation of successful actions with green [OK] tag.
-#   log_warn  : Non-fatal issues or skipped items with yellow [WARN] tag (emitted to stderr).
-#   log_error : Critical errors or verification failures with red [ERROR] tag (emitted to stderr).
-#   log_step  : High-level stage transition banner with bold blue ==> marker.
-log_info()    { echo -e "${C_CYAN}[INFO]${C_RESET} $*"; }
-log_ok()      { echo -e "${C_GREEN}[OK]${C_RESET} $*"; }
-log_warn()    { echo -e "${C_YELLOW}[WARN]${C_RESET} $*" >&2; }
-log_error()   { echo -e "${C_RED}[ERROR]${C_RESET} $*" >&2; }
-log_step()    { echo -e "${C_BLUE}==>${C_RESET} ${C_BOLD}$*${C_RESET}"; }
+# (Terminal Formatting & Logging functions provided by client_package_common.sh)
 
 # ------------------------------------------------------------------------------
 # Category Label Helper & Application Table Formatter
@@ -662,30 +357,7 @@ EOF
 # ------------------------------------------------------------------------------
 # Section 7: Version Evaluation & Local Discovery
 # ------------------------------------------------------------------------------
-# is_version_newer <candidate_version> <reference_version>
-# Compares two version strings using GNU semantic version comparison (sort -V).
-#
-# Arguments:
-#   $1 - Candidate version string (e.g. remote release version "1.4.2")
-#   $2 - Reference version string (e.g. local library version "1.4.0" or "none")
-# Returns:
-#   0 (true)  - Candidate version is strictly newer than reference version.
-#   1 (false) - Candidate version is equal, older, or candidate is empty.
-# Notes:
-#   - Empty candidate returns 1 (false).
-#   - Empty or "none" reference returns 0 (true), triggering a fresh package build.
-#   - Exact string equality returns 1 (false) to avoid unnecessary processing.
-is_version_newer() {
-    local v1="$1"
-    local v2="$2"
-    [[ -n "$v1" ]] || return 1
-    [[ -z "$v2" || "$v2" == "none" ]] && return 0
-    [[ "$v1" == "$v2" ]] && return 1
-
-    local highest
-    highest=$(printf "%s\n%s\n" "$v1" "$v2" | sort -V | tail -n1)
-    [[ "$highest" == "$v1" ]]
-}
+# (is_version_newer is provided by client_package_common.sh)
 
 # ------------------------------------------------------------------------------
 # Find Local Package Version in Source Directory
@@ -843,44 +515,7 @@ extract_asset_urls() {
 # ------------------------------------------------------------------------------
 # Section 8b: Artifact Cleanup & Recompression Engine
 # ------------------------------------------------------------------------------
-# is_artifact_file <filename>
-# Checks if a filename matches artifact patterns to be removed:
-# LICENSE*, *LICENCE*, NOTICE*, ATTRIBUTION*, OFL-*.txt (case-insensitive)
-is_artifact_file() {
-    local fname="$1"
-    local lower="${fname,,}"
-    if [[ "$lower" == license* || "$lower" == *licence* || "$lower" == notice* || "$lower" == attribution* || "$lower" == ofl-*.txt || "$lower" == ofl.txt ]]; then
-        return 0
-    fi
-    return 1
-}
-
-# clean_zip_artifacts <zip_path>
-# Removes matching artifact files directly from a zip archive without full re-pack.
-clean_zip_artifacts() {
-    local zip_path="$1"
-    [[ -f "$zip_path" ]] || return 1
-
-    local entries_to_remove=()
-    while IFS= read -r entry || [[ -n "$entry" ]]; do
-        [[ -z "$entry" ]] && continue
-        local base="${entry##*/}"
-        if is_artifact_file "$base"; then
-            entries_to_remove+=("$entry")
-        fi
-    done < <(unzip -Z1 "$zip_path" 2>/dev/null || true)
-
-    if [[ ${#entries_to_remove[@]} -gt 0 ]]; then
-        log_info "Removing ${#entries_to_remove[@]} artifact file(s) from $(basename "$zip_path")..."
-        if command -v zip >/dev/null 2>&1; then
-            zip -q -d "$zip_path" "${entries_to_remove[@]}" >/dev/null 2>&1 || true
-        elif command -v 7za >/dev/null 2>&1; then
-            7za d "$zip_path" "${entries_to_remove[@]}" >/dev/null 2>&1 || true
-        fi
-    else
-        log_info "No matching artifact files found in $(basename "$zip_path")."
-    fi
-}
+# (is_artifact_file and clean_zip_artifacts are provided by client_package_common.sh)
 
 # clean_and_recompress_linux_archive <archive_path>
 # Decompresses Linux tar.gz or tar.xz, removes matching artifacts (e.g. in root
@@ -972,15 +607,8 @@ run_deploy_pipeline() {
     fi
 
     # Determine target operating system
-    local target_os="linux"
-    case "$PLATFORM" in
-        cygwin|msys2)
-            target_os="windows"
-            ;;
-        *)
-            target_os="linux"
-            ;;
-    esac
+    local target_os
+    target_os=$(get_target_os)
     log_info "Target platform : $PLATFORM (OS: $target_os)"
     log_info "Deploy target   : $(enforce_drive_path "$DEPLOY_TARGET_CYG")"
     log_info "Flatten mode    : $FLATTEN"
@@ -1165,30 +793,12 @@ run_deploy_pipeline() {
         local extract_dir="${CURRENT_BUILD_DIR}/extracted"
         mkdir -p "$extract_dir"
 
-        if [[ "$platform_pkg" =~ \.zip$ ]]; then
-            if ! unzip -q "$platform_pkg" -d "$extract_dir"; then
-                log_error "Failed to unpack zip: $(basename "$platform_pkg")"
-                error_count=$((error_count + 1))
-                safe_rm_rf "$CURRENT_BUILD_DIR"
-                CURRENT_BUILD_DIR=""
-                continue
-            fi
-        elif [[ "$platform_pkg" =~ \.tar\.xz$ ]]; then
-            if ! tar --force-local -xJf "$platform_pkg" -C "$extract_dir"; then
-                log_error "Failed to unpack tar.xz: $(basename "$platform_pkg")"
-                error_count=$((error_count + 1))
-                safe_rm_rf "$CURRENT_BUILD_DIR"
-                CURRENT_BUILD_DIR=""
-                continue
-            fi
-        elif [[ "$platform_pkg" =~ \.tar\.gz$ ]]; then
-            if ! tar --force-local -xzf "$platform_pkg" -C "$extract_dir"; then
-                log_error "Failed to unpack tar.gz: $(basename "$platform_pkg")"
-                error_count=$((error_count + 1))
-                safe_rm_rf "$CURRENT_BUILD_DIR"
-                CURRENT_BUILD_DIR=""
-                continue
-            fi
+        if ! extract_archive "$platform_pkg" "$extract_dir"; then
+            log_error "Failed to unpack platform archive: $(basename "$platform_pkg")"
+            error_count=$((error_count + 1))
+            safe_rm_rf "$CURRENT_BUILD_DIR"
+            CURRENT_BUILD_DIR=""
+            continue
         fi
 
         # Detect single base directory to strip
@@ -1716,12 +1326,11 @@ for entry in "${PACKAGES[@]}"; do
         log_ok "[DRY-RUN] Would prune artifacts from $linux_name and recompress to .tar.xz"
         log_ok "[DRY-RUN] Would package both into $NEW_ZIP_NAME in tmp"
         log_ok "[DRY-RUN] Would verify package integrity in tmp"
-        if [[ -n "$local_file" && "$UPDATE_SOURCE" == true ]]; then
-            log_ok "[DRY-RUN] Would delete old version from source library: $local_file"
-            log_ok "[DRY-RUN] Would move $NEW_ZIP_NAME from tmp to source: ${SOURCE_PATH}/${rel_dir}/${NEW_ZIP_NAME}"
+        local_target_dir=""
+        if [[ "$UPDATE_SOURCE" == true ]]; then
+            local_target_dir="${SOURCE_CYG}/${rel_dir}"
         fi
-        log_ok "[DRY-RUN] Would remove prior versions from target: ${TARGET_PATH}/${app_name}-*.zip"
-        log_ok "[DRY-RUN] Would copy $NEW_ZIP_NAME from source to target: ${TARGET_PATH}/${NEW_ZIP_NAME}"
+        atomic_stage_package "" "$NEW_ZIP_NAME" "$app_name" "$suffix" "$local_target_dir" "$TARGET_CYG" true
         UPDATED_COUNT=$((UPDATED_COUNT + 1))
         continue
     fi
@@ -1743,8 +1352,7 @@ for entry in "${PACKAGES[@]}"; do
 
     # Step 5a: Download Linux asset to tmp
     log_info "Downloading Linux asset to tmp: $linux_name..."
-    if ! curl -f -sSL --retry 3 --retry-delay 2 -o "${CURRENT_BUILD_DIR}/${linux_name}" "$linux_url"; then
-        log_error "Failed to download Linux asset: $linux_url"
+    if ! download_asset "$linux_url" "${CURRENT_BUILD_DIR}/${linux_name}"; then
         safe_rm_rf "$CURRENT_BUILD_DIR"
         CURRENT_BUILD_DIR=""
         ERROR_COUNT=$((ERROR_COUNT + 1))
@@ -1753,28 +1361,23 @@ for entry in "${PACKAGES[@]}"; do
 
     # Step 5b: Verify Linux asset integrity in tmp (tar -tzf or tar -tJf)
     log_info "Verifying Linux archive integrity in tmp..."
+    lnx_ok=false
     if [[ "$linux_name" =~ \.tar\.xz$ ]]; then
-        if ! tar --force-local -tJf "${CURRENT_BUILD_DIR}/${linux_name}" >/dev/null 2>&1; then
-            log_error "Corrupted or invalid Linux archive downloaded: $linux_name"
-            safe_rm_rf "$CURRENT_BUILD_DIR"
-            CURRENT_BUILD_DIR=""
-            ERROR_COUNT=$((ERROR_COUNT + 1))
-            continue
-        fi
+        verify_tar_xz_integrity "${CURRENT_BUILD_DIR}/${linux_name}" && lnx_ok=true
     else
-        if ! tar --force-local -tzf "${CURRENT_BUILD_DIR}/${linux_name}" >/dev/null 2>&1; then
-            log_error "Corrupted or invalid Linux archive downloaded: $linux_name"
-            safe_rm_rf "$CURRENT_BUILD_DIR"
-            CURRENT_BUILD_DIR=""
-            ERROR_COUNT=$((ERROR_COUNT + 1))
-            continue
-        fi
+        tar --force-local -tzf "${CURRENT_BUILD_DIR}/${linux_name}" >/dev/null 2>&1 && lnx_ok=true
+    fi
+    if [[ "$lnx_ok" == false ]]; then
+        log_error "Corrupted or invalid Linux archive downloaded: $linux_name"
+        safe_rm_rf "$CURRENT_BUILD_DIR"
+        CURRENT_BUILD_DIR=""
+        ERROR_COUNT=$((ERROR_COUNT + 1))
+        continue
     fi
 
     # Step 5c: Download Windows asset to tmp
     log_info "Downloading Windows asset to tmp: $win_name..."
-    if ! curl -f -sSL --retry 3 --retry-delay 2 -o "${CURRENT_BUILD_DIR}/${win_name}" "$win_url"; then
-        log_error "Failed to download Windows asset: $win_url"
+    if ! download_asset "$win_url" "${CURRENT_BUILD_DIR}/${win_name}"; then
         safe_rm_rf "$CURRENT_BUILD_DIR"
         CURRENT_BUILD_DIR=""
         ERROR_COUNT=$((ERROR_COUNT + 1))
@@ -1783,7 +1386,7 @@ for entry in "${PACKAGES[@]}"; do
 
     # Step 5d: Verify Windows asset integrity in tmp (unzip -tq)
     log_info "Verifying Windows archive integrity in tmp..."
-    if ! unzip -tq "${CURRENT_BUILD_DIR}/${win_name}" >/dev/null 2>&1; then
+    if ! verify_zip_integrity "${CURRENT_BUILD_DIR}/${win_name}"; then
         log_error "Corrupted or invalid Windows zip archive downloaded: $win_name"
         safe_rm_rf "$CURRENT_BUILD_DIR"
         CURRENT_BUILD_DIR=""
@@ -1796,7 +1399,7 @@ for entry in "${PACKAGES[@]}"; do
 
     # Prune artifacts from Windows zip directly
     clean_zip_artifacts "${CURRENT_BUILD_DIR}/${win_name}"
-    if ! unzip -tq "${CURRENT_BUILD_DIR}/${win_name}" >/dev/null 2>&1; then
+    if ! verify_zip_integrity "${CURRENT_BUILD_DIR}/${win_name}"; then
         log_error "Windows zip failed integrity check after artifact cleanup: $win_name"
         safe_rm_rf "$CURRENT_BUILD_DIR"
         CURRENT_BUILD_DIR=""
@@ -1806,7 +1409,7 @@ for entry in "${PACKAGES[@]}"; do
 
     # Decompress Linux archive, delete matching artifacts, and recompress to .tar.xz
     cleaned_linux_name=$(clean_and_recompress_linux_archive "${CURRENT_BUILD_DIR}/${linux_name}")
-    if [[ -z "$cleaned_linux_name" || ! -s "${CURRENT_BUILD_DIR}/${cleaned_linux_name}" ]] || ! tar --force-local -tJf "${CURRENT_BUILD_DIR}/${cleaned_linux_name}" >/dev/null 2>&1; then
+    if [[ -z "$cleaned_linux_name" || ! -s "${CURRENT_BUILD_DIR}/${cleaned_linux_name}" ]] || ! verify_tar_xz_integrity "${CURRENT_BUILD_DIR}/${cleaned_linux_name}"; then
         log_error "Linux xz archive failed integrity check after recompression: $cleaned_linux_name"
         safe_rm_rf "$CURRENT_BUILD_DIR"
         CURRENT_BUILD_DIR=""
@@ -1828,7 +1431,7 @@ for entry in "${PACKAGES[@]}"; do
 
     # Step 5g: Verify repackaged zip integrity in tmp (unzip -tq & non-empty check)
     log_info "Verifying repackaged zip integrity in tmp..."
-    if [[ ! -s "${CURRENT_BUILD_DIR}/${NEW_ZIP_NAME}" ]] || ! unzip -tq "${CURRENT_BUILD_DIR}/${NEW_ZIP_NAME}" >/dev/null 2>&1; then
+    if [[ ! -s "${CURRENT_BUILD_DIR}/${NEW_ZIP_NAME}" ]] || ! verify_zip_integrity "${CURRENT_BUILD_DIR}/${NEW_ZIP_NAME}"; then
         log_error "Repackaged zip failed integrity verification in tmp: ${NEW_ZIP_NAME}"
         safe_rm_rf "$CURRENT_BUILD_DIR"
         CURRENT_BUILD_DIR=""
@@ -1836,111 +1439,13 @@ for entry in "${PACKAGES[@]}"; do
         continue
     fi
 
-    # Step 6: Move to the Source Library (if enabled)
-    # Deletes any older versions of the app in --source, moves the new archive
-    # from temp into the library, and verifies arrival.
-    SOURCE_PACKAGE_LOCATION=""
+    # Step 6 & 7: Transactional Staging to Source Library & Target Directory
+    local_target_dir=""
     if [[ "$UPDATE_SOURCE" == true ]]; then
         local_target_dir="${SOURCE_CYG}/${rel_dir}"
-        if ! mkdir -p "$local_target_dir"; then
-            log_error "Failed to create source library directory: $local_target_dir"
-            safe_rm_rf "$CURRENT_BUILD_DIR"
-            CURRENT_BUILD_DIR=""
-            ERROR_COUNT=$((ERROR_COUNT + 1))
-            continue
-        fi
-
-        # Remove all prior versions of this app from source
-        if [[ -n "$local_target_dir" && -d "$local_target_dir" && -n "$app_name" ]]; then
-            shopt -s nullglob
-            old_source_files=("${local_target_dir}/${app_name}-"*.zip)
-            shopt -u nullglob
-            for osf in "${old_source_files[@]}"; do
-                if [[ -f "$osf" && "$(basename "$osf")" != "$NEW_ZIP_NAME" ]]; then
-                    log_info "Removing old source version: $(enforce_drive_path "$osf")"
-                    safe_rm_f "$osf"
-                fi
-            done
-        fi
-
-        # Move the newly packaged zip from tmp to source
-        log_info "Moving $NEW_ZIP_NAME from tmp to source: ${SOURCE_PATH}/${rel_dir}/${NEW_ZIP_NAME}..."
-        if ! mv -f "${CURRENT_BUILD_DIR}/${NEW_ZIP_NAME}" "${local_target_dir}/${NEW_ZIP_NAME}"; then
-            log_error "Failed to move $NEW_ZIP_NAME to source library directory."
-            safe_rm_rf "$CURRENT_BUILD_DIR"
-            CURRENT_BUILD_DIR=""
-            ERROR_COUNT=$((ERROR_COUNT + 1))
-            continue
-        fi
-
-        # Verify the file arrived safely in source and is non-empty
-        if [[ ! -s "${local_target_dir}/${NEW_ZIP_NAME}" ]]; then
-            log_error "Verification failed after moving to source: ${local_target_dir}/${NEW_ZIP_NAME}"
-            safe_rm_rf "$CURRENT_BUILD_DIR"
-            CURRENT_BUILD_DIR=""
-            ERROR_COUNT=$((ERROR_COUNT + 1))
-            continue
-        fi
-
-        chmod 644 "${local_target_dir}/${NEW_ZIP_NAME}" 2>/dev/null || true
-        SOURCE_PACKAGE_LOCATION="${local_target_dir}/${NEW_ZIP_NAME}"
-    else
-        SOURCE_PACKAGE_LOCATION="${CURRENT_BUILD_DIR}/${NEW_ZIP_NAME}"
     fi
 
-    # Step 7: Copy to Target (Pending Upload) Directory
-    # Uses atomic .tmp staging so background uploaders or watchers never read
-    # partially copied files.
-    if ! mkdir -p "$TARGET_CYG"; then
-        log_error "Failed to create target pending directory: $TARGET_CYG"
-        safe_rm_rf "$CURRENT_BUILD_DIR"
-        CURRENT_BUILD_DIR=""
-        ERROR_COUNT=$((ERROR_COUNT + 1))
-        continue
-    fi
-
-    # Remove any older/prior version of this app from target
-    if [[ -n "$TARGET_CYG" && -d "$TARGET_CYG" && -n "$app_name" ]]; then
-        shopt -s nullglob
-        old_target_files=("${TARGET_CYG}/${app_name}-"*.zip)
-        shopt -u nullglob
-        for otf in "${old_target_files[@]}"; do
-            if [[ -f "$otf" && "$(basename "$otf")" != "$NEW_ZIP_NAME" ]]; then
-                log_info "Removing older version from target: $(enforce_drive_path "$otf")"
-                safe_rm_f "$otf"
-            fi
-        done
-    fi
-
-    # Copy new zip to target atomically to protect upload watchers
-    CURRENT_TARGET_TMP="${TARGET_CYG}/${NEW_ZIP_NAME}.tmp"
-    log_info "Copying $NEW_ZIP_NAME from source to target: ${TARGET_PATH}/${NEW_ZIP_NAME}..."
-    if ! cp "$SOURCE_PACKAGE_LOCATION" "$CURRENT_TARGET_TMP"; then
-        log_error "Failed to copy $NEW_ZIP_NAME to target staging directory."
-        safe_rm_f "$CURRENT_TARGET_TMP"
-        CURRENT_TARGET_TMP=""
-        safe_rm_rf "$CURRENT_BUILD_DIR"
-        CURRENT_BUILD_DIR=""
-        ERROR_COUNT=$((ERROR_COUNT + 1))
-        continue
-    fi
-
-    chmod 644 "$CURRENT_TARGET_TMP" 2>/dev/null || true
-
-    if ! mv -f "$CURRENT_TARGET_TMP" "${TARGET_CYG}/${NEW_ZIP_NAME}"; then
-        log_error "Failed to finalize atomic staging in target: ${NEW_ZIP_NAME}"
-        safe_rm_f "$CURRENT_TARGET_TMP"
-        CURRENT_TARGET_TMP=""
-        safe_rm_rf "$CURRENT_BUILD_DIR"
-        CURRENT_BUILD_DIR=""
-        ERROR_COUNT=$((ERROR_COUNT + 1))
-        continue
-    fi
-    CURRENT_TARGET_TMP=""
-
-    # Verify target file is present and non-empty
-    if [[ ! -s "${TARGET_CYG}/${NEW_ZIP_NAME}" ]]; then
-        log_error "Verification failed for target staged file: ${TARGET_CYG}/${NEW_ZIP_NAME}"
+    if ! atomic_stage_package "${CURRENT_BUILD_DIR}/${NEW_ZIP_NAME}" "$NEW_ZIP_NAME" "$app_name" "$suffix" "$local_target_dir" "$TARGET_CYG" "$DRY_RUN"; then
         safe_rm_rf "$CURRENT_BUILD_DIR"
         CURRENT_BUILD_DIR=""
         ERROR_COUNT=$((ERROR_COUNT + 1))

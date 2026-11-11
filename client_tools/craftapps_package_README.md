@@ -20,7 +20,7 @@ The **Storytold Craft Apps Packaging & Deployment Utility** (`craftapps_package.
 - **Dual-Repository Synchronization**:
   1. **Primary Library (`--source`)**: Updates the persistent, organized software library (e.g. `n:/softlib/software/public/<rel_dir>/` on Windows or `/mnt/n/...` / `/opt/...` on Linux), purging obsolete builds and placing the validated archive.
   2. **Staging Area (`--target`)**: Atomically deploys the verified package into the upload distribution directory (e.g. `f:/stage/upload/pending/` or custom Linux path) via `.tmp` file renaming to ensure external upload daemons and file watchers never read incomplete archives.
-- **Dependency Elimination**: Designed as a self-contained, pure bash script utilizing only foundational system tools (`curl`, `zip`, `unzip`, `jq`, `tar`, `gzip`, `xz`, and coreutils). Eliminates high-overhead runtimes such as Python or Node.js.
+- **Shared Foundation & Low Overhead**: Leverages the shared client packaging library [`client_package_common.sh`](file:///e:/data/devel/build/code/private/devops/client_tools/client_package_common.sh) and foundational POSIX shell tools (`curl`, `zip`, `unzip`, `jq`, `tar`, `gzip`, `xz`, and coreutils), eliminating heavyweight runtimes such as Python or Node.js.
 - **Cross-Platform Path Harmonization**: Automatically identifies the host environment (`cygwin`, `msys2`, `wsl`, `linux`) and translates between user-facing canonical paths (`drive:/path/sub`), Cygwin mounts (`/cygdrive/x/...`), MSYS2 mounts (`/x/...`), WSL mounts (`/mnt/x/...`), and standard POSIX Linux paths.
 
 ---
@@ -50,19 +50,19 @@ flowchart TD
         LocalCheck --> Comparator
         Comparator --> Decision{"Remote > Local?"}
         Decision -- No --> Skip["Log Up-To-Date & Continue"]
-        Decision -- Yes --> Download["Download Linux (.tar.gz) & Windows (.zip)"]
-        Download --> VerifyIn["Verify Download Integrity: tar -tzf & unzip -tq"]
-        VerifyIn --> CleanupArtifacts["Artifact Cleanup: Prune LICENSE*, NOTICE*, OFL-*"]
+        Decision -- Yes --> Download["Download Assets: download_asset()"]
+        Download --> VerifyIn["Verify Download Integrity: verify_tar_xz / verify_zip"]
+        VerifyIn --> CleanupArtifacts["Artifact Cleanup: clean_zip_artifacts / clean tar"]
         CleanupArtifacts --> RecompressXZ["Transcode Linux tar to .tar.xz (xz -9)"]
         RecompressXZ --> Repackage["zip -q Combined Bundle: <app>-<ver>-win-lnx.zip"]
-        Repackage --> VerifyBundle["Verify Bundle Integrity: unzip -tq"]
-        VerifyBundle --> UpdateSource["Update Source Library & Atomic Stage to Target"]
+        Repackage --> VerifyBundle["Verify Bundle Integrity: verify_zip_integrity"]
+        VerifyBundle --> UpdateSource["Transactional Staging: atomic_stage_package()"]
     end
 
     subgraph DeployPipeline ["3. Deployment Pipeline (--action deploy)"]
         DeployPrep --> DeployWorkspace["Allocate Workspace: craftapps_deploy_XXXXXX"]
         DeployWorkspace --> SourceDiscover["Locate Archive: Local Folder or Remote URL"]
-        SourceDiscover --> ExtractPlatform["Extract OS Archive (*win*.zip or *linux*.tar.xz)"]
+        SourceDiscover --> ExtractPlatform["Extract Archive: extract_archive()"]
         ExtractPlatform --> StripBase["Strip Top-Level Base Folder"]
         StripBase --> ModeCheck{"Flatten Mode? (--flatten)"}
         ModeCheck -- Yes --> DeployBins["Deploy Executables Only (*.exe / ELF)"]
@@ -84,18 +84,16 @@ flowchart TD
 
 ### 2.2 Key Architectural Decisions
 
-1. **Cross-Platform Host Detection & Path Engine**:
-   - `PLATFORM`: Auto-detects `cygwin`, `msys2` (including Git Bash), `wsl`, or `linux`.
-   - `enforce_drive_path()`: Normalizes paths to `drive:/path/sub` on Windows systems, preserving native POSIX paths on Linux.
-   - `to_posix_path()` / `to_cygpath()`: Automatically resolves mount points according to the host platform: `/cygdrive/<drive>/...` on Cygwin, `/<drive>/...` on MSYS2, `/mnt/<drive>/...` on WSL, and native absolute paths on Linux.
-2. **Transactional Staging (Download -> Verify -> Repackage -> Verify -> Move -> Atomic Rename)**:
-   - Eliminates partial file exposure. External background watchers or automated upload engines monitoring `f:/stage/upload/pending` never see in-flight or corrupt archives because files are staged as `.tmp` and finalized via atomic filesystem renames (`mv -f`).
-3. **Defensive Blast-Radius Containment Across Platforms**:
-   - Deletion of files and directories in shell scripts presents extreme risk if variables resolve to empty strings or root paths. All deletions are proxied through `safe_rm_rf()` and `safe_rm_f()`, which reject empty targets, whitespace, `/`, `.`, `..`, `/tmp`, `/var/tmp`, `/cygdrive`, `/mnt`, drive roots across all environments (`/cygdrive/[a-zA-Z]`, `/[a-zA-Z]`, `/mnt/[a-zA-Z]`), and system directory trees (`/bin`, `/usr`, `/etc`, `/boot`, `/dev`, `/proc`, `/sys`, `/opt`, `/srv`).
-4. **Resilient GitHub Release Discovery**:
+1. **Delegated Common Packaging Foundation**:
+   - Core packaging primitives — host platform detection (`PLATFORM`), dual-layer path translation (`enforce_drive_path`, `to_posix_path`), defensive deletion containment (`safe_rm_rf`, `safe_rm_f`), signal lifecycle traps (`cleanup_workspace`), and transactional `.tmp` release staging (`atomic_stage_package`) — are delegated to [`client_package_common.sh`](file:///e:/data/devel/build/code/private/devops/client_tools/client_package_common.sh). Full architectural details and API specifications are centralized in [`client_package_common_README.md`](file:///e:/data/devel/build/code/private/devops/client_tools/client_package_common_README.md).
+2. **Dual-Action Pipeline (`--action build` vs `--action deploy`)**:
+   - Seamlessly pairs automated release packaging and multi-platform aggregation with direct host installation and extraction into target environments.
+3. **Resilient GitHub Release Discovery**:
    - Initial application releases or interim builds are frequently published as pre-releases on GitHub. Querying `/releases/latest` for such repositories returns an HTTP 404 response. The script catches 404s and automatically queries `/releases?per_page=1`, extracting the most recent published release object using `jq`.
-5. **Credential Auto-Discovery**:
+4. **Credential Auto-Discovery**:
    - Automatically probes the authenticated GitHub CLI (`gh auth token`) if `$GITHUB_TOKEN` is not explicitly set in the environment or passed via `--token`. This seamlessly elevates the API rate limit from 60 requests/hour to 5,000 requests/hour.
+5. **Flexible Deployment Layouts**:
+   - Supports binary-only flattening (`--flatten`), companion CLI filtering (`--no-cli`), and post-install source cleanup (`--purge-source`) for streamlined system installation.
 
 ### 2.3 Assumptions
 - Upstream releases tag software versions using standard semantic formats (e.g., `v1.2.3` or `1.2.3`).
@@ -121,16 +119,16 @@ flowchart TD
 4. **Execution Dispatch**:
    - **`--action build`**:
      - Evaluates local version in `--source` vs. remote GitHub release tag via `sort -V`.
-     - Downloads Linux (`.tar.gz`/`.tar.xz`) and Windows (`.zip`) binary assets into temporary build directory.
-     - Verifies archive integrity (`tar --force-local -tzf`, `unzip -tq`).
-     - **Artifact Cleanup**: Prunes `LICENSE*`, `*LICENCE*`, `NOTICE*`, `ATTRIBUTION*`, and `OFL-*.txt` directly from the Windows zip (`zip -d`).
+     - Downloads Linux (`.tar.gz`/`.tar.xz`) and Windows (`.zip`) binary assets using `download_asset()`.
+     - Verifies archive integrity (`verify_tar_xz_integrity`, `verify_zip_integrity`).
+     - **Artifact Cleanup**: Prunes `LICENSE*`, `*LICENCE*`, `NOTICE*`, `ATTRIBUTION*`, and `OFL-*.txt` directly from the Windows zip (`clean_zip_artifacts()`).
      - **Linux XZ Transcoding**: Decompresses `.tar.gz`, prunes matching artifacts via `tar --delete`, and recompresses using `xz -9` to produce `.tar.xz`.
      - Packages cleaned `.tar.xz` and `.zip` into combined bundle (`<app>-<ver>-win-lnx.zip`).
-     - Verifies bundle integrity (`unzip -tq`).
-     - Atomically updates `--source` and stages to `--target`.
+     - Verifies bundle integrity (`verify_zip_integrity`).
+     - Atomically updates `--source` and stages to `--target` via `atomic_stage_package()`.
    - **`--action deploy`**:
      - Resolves source archive from local directory (flat lookup) or remote URL.
-     - Auto-detects host OS (Windows vs Linux) and extracts the platform package.
+     - Auto-detects host OS (`get_target_os`) and extracts platform archive via `extract_archive()`.
      - Strips top-level base directory.
      - Deploys executables only (`--flatten`) or preserves all files and subdirectories.
      - Excludes companion CLI binaries if requested (`--no-cli`).
@@ -171,34 +169,33 @@ sequenceDiagram
             Script->>Script: Skip application
         else New Version Available
             Script->>FS_Temp: mktemp -d app_XXXXXX
-            Script->>GH: curl download linux.tar.gz
+            Script->>GH: download_asset(linux_url)
             GH-->>FS_Temp: Write linux.tar.gz
-            Script->>FS_Temp: tar --force-local -tzf linux.tar.gz (Verify)
+            Script->>FS_Temp: verify_tar_xz_integrity / tar -tzf (Verify)
             
-            Script->>GH: curl download win.zip
+            Script->>GH: download_asset(win_url)
             GH-->>FS_Temp: Write win.zip
-            Script->>FS_Temp: unzip -tq win.zip (Verify)
+            Script->>FS_Temp: verify_zip_integrity (Verify)
 
             Note over Script,FS_Temp: Artifact Cleanup & XZ Transcoding
-            Script->>FS_Temp: zip -d win.zip (Prune LICENSE*, NOTICE*, OFL-*)
+            Script->>FS_Temp: clean_zip_artifacts win.zip (Prune artifacts)
             Script->>FS_Temp: gzip -d linux.tar.gz -> linux.tar
             Script->>FS_Temp: tar --delete linux.tar (Prune artifacts)
             Script->>FS_Temp: xz -9 linux.tar -> linux.tar.xz
-            Script->>FS_Temp: tar -tJf linux.tar.xz & unzip -tq win.zip (Verify)
+            Script->>FS_Temp: verify_tar_xz_integrity & verify_zip_integrity
             
             Script->>FS_Temp: zip -q bundle.zip linux.tar.xz win.zip
-            Script->>FS_Temp: unzip -tq bundle.zip (Verify)
+            Script->>FS_Temp: verify_zip_integrity bundle.zip
             
+            Note over Script,FS_Src,FS_Tgt: atomic_stage_package (Transactional Staging)
+            Script->>FS_Src: purge_obsolete_packages (Safe unquoted purge)
+            Script->>FS_Tgt: purge_obsolete_packages (Safe unquoted purge)
             opt UPDATE_SOURCE == true
-                Script->>FS_Src: safe_rm_f old_versions.zip
-                Script->>FS_Src: mv bundle.zip -> source_path/
-                Script->>FS_Src: test -s && chmod 644
+                Script->>FS_Src: cp bundle.zip -> source_path/ (chmod 644)
             end
-            
-            Script->>FS_Tgt: safe_rm_f old_target_versions.zip
             Script->>FS_Tgt: cp bundle.zip -> target_path/bundle.zip.tmp
             Script->>FS_Tgt: chmod 644 bundle.zip.tmp
-            Script->>FS_Tgt: mv -f bundle.zip.tmp -> bundle.zip (Atomic)
+            Script->>FS_Tgt: mv -f bundle.zip.tmp -> bundle.zip (Atomic rename)
             Script->>FS_Tgt: test -s bundle.zip
             
             Script->>FS_Temp: safe_rm_rf app_XXXXXX (Immediate Cleanup)
@@ -228,60 +225,30 @@ The script utilizes a **strictly sequential batch loop**. This design choice is 
 
 ## 5. Dependencies and Requirements
 
-### 5.1 System & Software Requirements
-The script requires a standard POSIX shell environment on **Cygwin**, **MSYS2 / Git Bash**, **WSL**, or **native Linux** with the following utilities:
+### 5.1 Foundation & Application Prerequisites
+Packaging and deployment operations rely on the shared foundation library [`client_package_common.sh`](file:///e:/data/devel/build/code/private/devops/client_tools/client_package_common.sh). All standard POSIX tools (`bash`, `curl`, `coreutils`, `tar`, `gzip`, `xz`, `zip`, `unzip`) and platform compatibility matrices are documented in [`client_package_common_README.md#6-prerequisites-and-platform-compatibility`](file:///e:/data/devel/build/code/private/devops/client_tools/client_package_common_README.md#6-prerequisites-and-platform-compatibility).
 
-| Tool | Minimum Version | Category | Purpose |
+In addition to the foundation library tools, `craftapps_package.sh` requires:
+
+| Tool / Module | Minimum Version | Category | Purpose |
 | :--- | :--- | :--- | :--- |
-| **`bash`** | 4.3+ | Shell Runtime | Execution environment, arrays, regex matching, parameter expansion |
-| **`curl`** | 7.60+ | Network Client | GitHub API queries, secure TLS asset downloads, directory scraping |
-| **`jq`** | 1.5+ | JSON Processor | Parsing GitHub API release payloads, asset extraction filters |
-| **`zip`** | 3.0+ | Archiver | In-place artifact removal (`zip -d`) and repackaging bundles |
-| **`unzip`** | 6.0+ | Archiver | Integrity testing (`-tq`) and platform archive extraction |
-| **`tar`** | 1.28+ | Archiver | Archive verification (`-tzf`/`-tJf`), extraction, and pruning (`--delete`) |
-| **`gzip`** | 1.9+ | Compression | Decompressing downloaded Linux `.tar.gz` assets |
-| **`xz`** | 5.2+ | Compression | Recompressing Linux archives to `.tar.xz` with maximum ratio (`-9`) |
-| **`coreutils`** | 8.25+ | OS Utilities | `sort -V` (versioning), `mktemp`, `mkdir`, `cp`, `mv`, `chmod`, `find` |
-| **`gh`** | *(Optional)* | GitHub CLI | Optional token discovery for automated rate limit elevation |
+| **`jq`** | 1.5+ | Mandatory Utility | Parsing GitHub API release payloads and asset filter expressions |
+| **`gh`** | 2.0+ | Optional Provider | Automated GitHub CLI token discovery via system keyring |
 
-### 5.2 Dependency Structure
+### 5.2 Dependency Architecture
 
 ```mermaid
 flowchart TD
     Script["craftapps_package.sh"]
-    
-    subgraph CoreUtilities ["POSIX Core Tools (Cygwin / MSYS2 / Linux)"]
-        Bash["bash (>=4.3)"]
-        CoreUtils["coreutils (sort -V, mktemp, mv, cp)"]
-    end
-    
-    subgraph ArchiveTools ["Compression Utilities"]
-        Zip["zip (3.0+)"]
-        Unzip["unzip (6.0+)"]
-        Tar["tar (tar -tzf / -tJf)"]
-        Gzip["gzip (1.9+)"]
-        Xz["xz (5.2+)"]
-    end
-    
-    subgraph NetworkJSON ["Network & JSON Engines"]
-        Curl["curl (TLS 1.2/1.3, HTTP/2)"]
-        Jq["jq (1.5+)"]
-    end
-    
-    subgraph OptionalAuth ["Optional Credential Provider"]
-        GH["gh (GitHub CLI)"]
-    end
+    CommonLib["client_package_common.sh (Shared Library)"]
+    CommonDoc["client_package_common_README.md"]
+    Jq["jq (1.5+) - JSON Parser"]
+    GH["gh (GitHub CLI) - Optional Token Provider"]
 
-    Script --> Bash
-    Script --> CoreUtils
-    Script --> Tar
-    Script --> Gzip
-    Script --> Xz
-    Script --> Zip
-    Script --> Unzip
-    Script --> Curl
-    Script --> Jq
-    Script -.-> GH
+    Script -->|sources| CommonLib
+    CommonLib -.->|documented in| CommonDoc
+    Script -->|invokes| Jq
+    Script -.->|queries keyring| GH
 ```
 
 ---
@@ -361,8 +328,8 @@ flowchart TD
 | **Encryption in Transit** | **Compliant** | All API calls and asset downloads are forced over HTTPS (`https://api.github.com` and `https://github.com`) using `curl -sSL`. TLS 1.2 and TLS 1.3 are strictly enforced; SSL verification is never disabled. |
 | **Secret Management** | **Compliant** | Secrets are never written to disk, logged to standard output, or stored in temporary files. The diagnostic banner masks credentials, displaying only `Authenticated (API token active)`. If `gh` CLI is used, tokens remain secured in the OS credential manager. |
 | **RBAC / Least Privilege** | **Compliant** | Upstream: Only read permissions for public release assets are required.<br>Downstream: The script operates within the least-privilege context of the invoking user and requires no Administrator or root privileges. |
-| **File Permissions** | **Compliant** | All newly created packages moved to `--source` and staged in `--target` explicitly receive POSIX file mode `644` (`chmod 644`), ensuring standardized read access while preventing arbitrary executable permissions on static archives. |
-| **Filesystem Blast Radius** | **Compliant** | Strict validation in `safe_rm_rf()` prevents path traversal or accidental erasure of root partitions (`/`, drive roots `/cygdrive/c`, `/tmp`, system roots). |
+| **File Permissions** | **Compliant** | Handled by `atomic_stage_package()` in [`client_package_common.sh`](file:///e:/data/devel/build/code/private/devops/client_tools/client_package_common.sh), strictly enforcing POSIX mode `644` (`chmod 644`) across library and staging destinations. |
+| **Filesystem Blast Radius** | **Compliant** | Handled by `safe_rm_rf()` in [`client_package_common.sh`](file:///e:/data/devel/build/code/private/devops/client_tools/client_package_common.sh) with system root and drive mount blacklists (see [Security Architecture in `client_package_common_README.md`](file:///e:/data/devel/build/code/private/devops/client_tools/client_package_common_README.md#4-security-architecture--blast-radius-protection)). |
 | **Vulnerable Libraries** | **Compliant** | Zero third-party scripting libraries or external modules (no npm, pip, gem packages). Employs trusted OS-level binaries maintained and patched directly by Cygwin package maintainers. |
 
 ---
@@ -509,10 +476,9 @@ $ ./craftapps_package.sh --action build --app soundcraft --dry-run
 [OK] [DRY-RUN] Would prune artifacts from soundcraft-1.3.0-linux-x86_64.tar.gz and recompress to .tar.xz
 [OK] [DRY-RUN] Would package both into soundcraft-1.3.0-win-lnx.zip in tmp
 [OK] [DRY-RUN] Would verify package integrity in tmp
-[OK] [DRY-RUN] Would delete old version from source library: n:/softlib/software/public/apps/audio/soundcraft-1.2.0-win-lnx.zip
-[OK] [DRY-RUN] Would move soundcraft-1.3.0-win-lnx.zip from tmp to source: n:/softlib/software/public/apps/audio/soundcraft-1.3.0-win-lnx.zip
-[OK] [DRY-RUN] Would remove prior versions from target: f:/stage/upload/pending/soundcraft-*.zip
-[OK] [DRY-RUN] Would copy soundcraft-1.3.0-win-lnx.zip from source to target: f:/stage/upload/pending/soundcraft-1.3.0-win-lnx.zip
+[OK] [DRY-RUN] Would remove obsolete source version: soundcraft-1.2.0-win-lnx.zip
+[OK] [DRY-RUN] Would move soundcraft-1.3.0-win-lnx.zip to source: /n/softlib/software/public/apps/audio/soundcraft-1.3.0-win-lnx.zip
+[OK] [DRY-RUN] Would stage soundcraft-1.3.0-win-lnx.zip in target: /f/stage/upload/pending/soundcraft-1.3.0-win-lnx.zip
 
 ==============================================================================
  Execution Summary
@@ -573,9 +539,10 @@ $ ./craftapps_package.sh --action build
 [OK] Recompressed to pdfcraft-1.0.0-linux-x86_64.tar.xz
 [INFO] Packaging archives into pdfcraft-1.0.0-win-lnx.zip in tmp...
 [INFO] Verifying repackaged zip integrity in tmp...
-[INFO] Removing old source version: n:/softlib/software/public/apps/text/pdf/editor/pdfcraft-0.9.4-win-lnx.zip
-[INFO] Moving pdfcraft-1.0.0-win-lnx.zip from tmp to source: n:/softlib/software/public/apps/text/pdf/editor/pdfcraft-1.0.0-win-lnx.zip...
-[INFO] Copying pdfcraft-1.0.0-win-lnx.zip from source to target: f:/stage/upload/pending/pdfcraft-1.0.0-win-lnx.zip...
+[INFO] Removing obsolete source version: pdfcraft-0.9.4-win-lnx.zip
+[INFO] Moving pdfcraft-1.0.0-win-lnx.zip to source library...
+[INFO] Atomically staging pdfcraft-1.0.0-win-lnx.zip in target pending...
+[OK] Successfully staged in target: pdfcraft-1.0.0-win-lnx.zip
 [INFO] Cleaned package temporary workspace for pdfcraft.
 [OK] Successfully updated, moved to source, and staged in target: pdfcraft-1.0.0-win-lnx.zip
 
@@ -623,9 +590,7 @@ $ ./craftapps_package.sh --action deploy --source n:/softlib/software/public --n
 [INFO] Unique deployment workspace initialized: f:/TEMP/craftapps_deploy_aB3x9Q
 
 ==> Deploying [figcraft]...
-[INFO] Resolving archive from local source directory: n:/softlib/software/public
-[INFO] Found archive: n:/softlib/software/public/devel/ux/figcraft-0.17.0-win-lnx.zip
-[INFO] Unpacking combined archive: figcraft-0.17.0-win-lnx.zip...
+[INFO] Located source archive: n:/softlib/software/public/devel/ux/figcraft-0.17.0-win-lnx.zip
 [INFO] Extracting inner Windows archive: figcraft-0.17.0-windows-x64-portable.zip...
 [INFO] Stripping base folder: figcraft-0.17.0-windows-x64-portable
 [INFO] Deploying binaries in flattened mode...
@@ -671,9 +636,7 @@ $ ./craftapps_package.sh --action deploy --source n:/softlib/software/public --n
 [INFO] Unique deployment workspace initialized: f:/TEMP/craftapps_deploy_f8k1wZ
 
 ==> Deploying [figcraft]...
-[INFO] Resolving archive from local source directory: n:/softlib/software/public
-[INFO] Found archive: n:/softlib/software/public/devel/ux/figcraft-0.17.0-win-lnx.zip
-[INFO] Unpacking combined archive: figcraft-0.17.0-win-lnx.zip...
+[INFO] Located source archive: n:/softlib/software/public/devel/ux/figcraft-0.17.0-win-lnx.zip
 [INFO] Extracting inner Windows archive: figcraft-0.17.0-windows-x64-portable.zip...
 [INFO] Stripping base folder: figcraft-0.17.0-windows-x64-portable
 [INFO] Removing CLI binaries before deployment (--no-cli)...
@@ -719,8 +682,7 @@ $ ./craftapps_package.sh --action deploy --source /tmp/craft --name figcraft --d
 [INFO] Unique deployment workspace initialized: /tmp/craftapps_deploy_p9D1aC
 
 ==> Deploying [figcraft]...
-[INFO] Resolving archive from local source directory: /tmp/craft
-[INFO] Found archive: /tmp/craft/figcraft-0.17.0-linux-x86_64.tar.xz
+[INFO] Located source archive: /tmp/craft/figcraft-0.17.0-linux-x86_64.tar.xz
 [INFO] Stripping base folder: figcraft-0.17.0-linux-x86_64
 [INFO] Deploying archive contents to /opt/craft...
 [OK] Deployed contents for figcraft.
@@ -765,9 +727,8 @@ $ ./craftapps_package.sh --action deploy --source https://packages.example.com/c
 [INFO] Unique deployment workspace initialized: /tmp/craftapps_deploy_m4X7tL
 
 ==> Deploying [figcraft]...
-[INFO] Scraping remote URL directory index: https://packages.example.com/craft/
-[INFO] Found remote archive: https://packages.example.com/craft/figcraft-0.17.0-linux-x86_64.tar.xz
-[INFO] Downloading remote archive to temporary workspace...
+[INFO] Fetching remote directory index from https://packages.example.com/craft/...
+[INFO] Downloading figcraft-0.17.0-linux-x86_64.tar.xz from https://packages.example.com/craft/figcraft-0.17.0-linux-x86_64.tar.xz...
 [INFO] Stripping base folder: figcraft-0.17.0-linux-x86_64
 [INFO] Deploying archive contents to /opt/craft...
 [OK] Deployed contents for figcraft.
