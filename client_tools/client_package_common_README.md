@@ -19,7 +19,7 @@ Consumer scripts operate in heterogeneous runtime environments ranging from Wind
 - **Cross-Platform Path Normalization**: Seamlessly bridge Windows drive letters (`c:/dir`) and POSIX mount hierarchies (`/cygdrive/c/...`, `/c/...`, `/mnt/c/...`) across Cygwin, MSYS2, WSL, and Linux without external runtime dependencies.
 - **Defensive Filesystem Safeguards**: Enforce strict path blacklists on deletion routines (`safe_rm_rf`, `safe_rm_f`) to guarantee that system roots (`/`, `/usr`, `/etc`), drive roots (`/cygdrive/c`, `/c`), and staging parents cannot be accidentally wiped.
 - **Zero-Corruption Transactional Staging**: Provide atomic multi-phase distribution (`atomic_stage_package`) using intermediate `.tmp` files and `chmod 644` file permissions to ensure that interrupted transfers or partial writes never corrupt destination software libraries.
-- **Archive De-Bloating & High-Ratio Transcoding**: Strip duplicate license files, prune multi-megabyte unused Electron locale packages down to `en-US.pak`, transcode upstream `.tar.gz` to high-compression `.tar.xz` (`xz -9`), and enforce standardized root/root ownership (`--owner=0 --group=0 --numeric-owner`).
+- **Archive De-Bloating & High-Ratio Transcoding**: Strip duplicate license files, prune multi-megabyte unused Electron locale packages down to `en-US.pak`, transcode upstream `.tar.gz` to high-compression `.tar.xz` (`xz -9 -T0`), and enforce standardized root/root ownership (`--owner=0 --group=0 --numeric-owner`).
 - **Resilient Signal Trapping & Workspace Management**: Automatically register signal handlers (`EXIT`, `INT`, `TERM`, `HUP`) to destroy active workspace directories and in-flight temporary files on abnormal termination or script exit.
 
 ---
@@ -54,7 +54,7 @@ flowchart TD
         DownloadHelper["download_asset\n(curl + sha512sum / sha256sum verification)"]
         ArchiveExtractor["extract_archive\n(zip, tar.gz, tar.xz, tar)"]
         Debloater["Debloating Utilities\n(prune_root_licenses, prune_electron_locales, clean_zip_artifacts)"]
-        Recompressor["recompress_folder_to_tar_xz\n(xz -9, owner=0:group=0)"]
+        Recompressor["recompress_folder_to_tar_xz\n(xz -9 -T0, owner=0:group=0)"]
         Verifiers["Integrity Checkers\n(verify_zip_integrity, verify_tar_xz_integrity)"]
     end
 
@@ -395,7 +395,7 @@ download_asset "https://example.com/app.exe" "/tmp/app.exe" "abcdef12345..." "sh
 #### `recompress_folder_to_tar_xz <parent_dir> <folder_to_pack> <dest_tar_xz>`
 - **Description**: Packs and compresses a directory tree into a high-compression `.tar.xz` archive.
 - **Standardized Ownership**: Pipes through `tar --force-local --owner=0 --group=0 --numeric-owner` to standardize archive metadata across diverse builder environments.
-- **Maximum Compression**: Pipes tar stream directly to `xz -9 > "$dest_tar_xz"`.
+- **Maximum Compression**: Pipes tar stream directly to `xz -9 -T0 > "$dest_tar_xz"`.
 - **Post-Compression Verification**: Automatically tests archive integrity via `tar --force-local -tJf`. Deletes corrupted output if verification fails.
 - **Parameters**:
   - `$1`: Parent working directory.
@@ -554,7 +554,7 @@ The library is engineered to run in minimal shell environments without requiring
 | **`curl`** | Asset download and HTTP queries | **Essential** |
 | **`sort`** (GNU) | Semantic version comparison (`sort -V`) | **Essential** |
 | **`tar`** | Archive extraction and high-ratio repackaging | **Essential** |
-| **`xz`** | High-compression `.tar.xz` transcoding (`-9`) | **Essential** (Linux tarballs) |
+| **`xz`** | High-compression multi-threaded `.tar.xz` transcoding (`-9 -T0`) | **Essential** (Linux tarballs) |
 | **`zip`** | Windows `.zip` archive creation and pruning (`-d`) | **Essential** (Windows packages) |
 | **`unzip`** | Zip extraction and integrity testing (`-tq`) | **Essential** |
 | **`sha512sum` / `sha256sum`** | Cryptographic payload verification | **Recommended** |

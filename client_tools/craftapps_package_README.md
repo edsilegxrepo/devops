@@ -54,7 +54,7 @@ flowchart TD
         Decision -- Yes --> Download["Download Assets: download_asset()"]
         Download --> VerifyIn["Verify Download Integrity: verify_tar_xz / verify_zip"]
         VerifyIn --> CleanupArtifacts["Artifact Cleanup: clean_zip_artifacts / clean tar"]
-        CleanupArtifacts --> RecompressXZ["Transcode Linux tar to .tar.xz (xz -9)"]
+        CleanupArtifacts --> RecompressXZ["Transcode Linux tar to .tar.xz (xz -9 -T0)"]
         RecompressXZ --> Repackage["zip -q Combined Bundle: <app>-<ver>-win-lnx.zip"]
         Repackage --> VerifyBundle["Verify Bundle Integrity: verify_zip_integrity"]
         VerifyBundle --> UpdateSource["Transactional Staging: atomic_stage_package()"]
@@ -123,7 +123,7 @@ flowchart TD
      - Downloads Linux (`.tar.gz`/`.tar.xz`) and Windows (`.zip`) binary assets using `download_asset()`.
      - Verifies archive integrity (`verify_tar_xz_integrity`, `verify_zip_integrity`).
      - **Artifact Cleanup**: Prunes `LICENSE*`, `*LICENCE*`, `NOTICE*`, `ATTRIBUTION*`, and `OFL-*.txt` directly from the Windows zip (`clean_zip_artifacts()`).
-     - **Linux XZ Transcoding**: Decompresses `.tar.gz`, prunes matching artifacts via `tar --delete`, and recompresses using `xz -9` to produce `.tar.xz`.
+     - **Linux XZ Transcoding**: Decompresses `.tar.gz`, strips base directory, prunes licensing/packaging artifacts, and recompresses using multi-threaded `xz -9 -T0` to produce `.tar.xz`.
      - Packages cleaned `.tar.xz` and `.zip` into combined bundle (`<app>-<ver>-win-lnx.zip`).
      - Verifies bundle integrity (`verify_zip_integrity`).
      - Atomically updates `--source` and stages to `--target` via `atomic_stage_package()`.
@@ -180,9 +180,9 @@ sequenceDiagram
 
             Note over Script,FS_Temp: Artifact Cleanup & XZ Transcoding
             Script->>FS_Temp: clean_zip_artifacts win.zip (Prune artifacts)
-            Script->>FS_Temp: gzip -d linux.tar.gz -> linux.tar
-            Script->>FS_Temp: tar --delete linux.tar (Prune artifacts)
-            Script->>FS_Temp: xz -9 linux.tar -> linux.tar.xz
+            Script->>FS_Temp: extract_archive & strip_base_directory
+            Script->>FS_Temp: prune_directory_artifacts (Prune artifacts)
+            Script->>FS_Temp: repack_directory_to_tar_xz (xz -9 -T0)
             Script->>FS_Temp: verify_tar_xz_integrity & verify_zip_integrity
             
             Script->>FS_Temp: zip -q bundle.zip linux.tar.xz win.zip
@@ -536,7 +536,7 @@ $ ./craftapps_package.sh --action build
 [INFO] Pruned 4 artifact file(s) from pdfcraft-1.0.0-win-x86_64.zip
 [INFO] Decompressing Linux gzip tarball: pdfcraft-1.0.0-linux-x86_64.tar.gz
 [INFO] Pruned 3 artifact file(s) from Linux tarball
-[INFO] Recompressing Linux tarball with xz -9...
+[INFO] Recompressing Linux tarball with xz -9 -T0...
 [OK] Recompressed to pdfcraft-1.0.0-linux-x86_64.tar.xz
 [INFO] Packaging archives into pdfcraft-1.0.0-win-lnx.zip in tmp...
 [INFO] Verifying repackaged zip integrity in tmp...

@@ -62,8 +62,8 @@ graph TD
     E -->|Yes| G{Host & Target Platform}
     
     G -->|Windows Target| H[Download to Windows TEMP -> Extract 7z -> Normalize -> Prune locales -> Pack 7z -mx=9]
-    G -->|Linux Target on Win| I[WSL Bridge: Download in WSL /tmp -> Extract tar -> Normalize -> Prune locales -> chmod 755 -> Pack tar.xz -9]
-    G -->|Linux Target on Linux| J[Native Linux: Download -> Extract tar -> Normalize -> Prune locales -> chmod 755 -> Pack tar.xz -9]
+    G -->|Linux Target on Win| I[WSL Bridge: Download in WSL /tmp -> Extract tar -> Normalize -> Prune locales -> chmod 755 -> Pack tar.xz -9 -T0]
+    G -->|Linux Target on Linux| J[Native Linux: Download -> Extract tar -> Normalize -> Prune locales -> chmod 755 -> Pack tar.xz -9 -T0]
     
     H --> K[Move Package Archive to --archive-path f:/stage/upload/pending/]
     I --> K

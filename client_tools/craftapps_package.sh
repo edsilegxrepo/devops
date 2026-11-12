@@ -54,7 +54,7 @@
 #   7. Transactional Repackager & Atomic Stager (--action build):
 #      Downloads to temp, verifies archive integrity (tar -tzf, unzip -tq),
 #      prunes packaging/licensing artifacts in-place, decompresses Linux tar.gz,
-#      prunes artifacts, recompresses with xz -9 to .tar.xz, bundles archives into
+#      prunes artifacts, recompresses with xz -9 -T0 to .tar.xz, bundles archives into
 #      combined zip, verifies output, moves to source library, and atomically stages
 #      to target pending directory via .tmp rename.
 #   8. Extraction & Installation Engine (--action deploy):

@@ -11,7 +11,7 @@
 #   1. Downloads upstream assets to an isolated temporary workspace.
 #   2. Renames binaries and directories to match standardized library conventions.
 #   3. Prunes packaging artifacts (licenses at root, non-English locales).
-#   4. Re-packages into .zip (Windows) and high-compression .tar.xz (Linux xz -9).
+#   4. Re-packages into .zip (Windows) and high-compression .tar.xz (Linux xz -9 -T0).
 #   5. Atomically replaces prior versions in the library (--source) and stages to --target.
 #
 # Designed for Cygwin, MSYS2 / Git Bash, WSL, and native Linux environments.
@@ -466,7 +466,7 @@ package_cli() {
             fi
             chmod 755 "${build_dir}/antigravity-cli"
 
-            log_info "Recompressing binary to $pkg_name (xz -9)..."
+            log_info "Recompressing binary to $pkg_name (xz -9 -T0)..."
             if ! recompress_folder_to_tar_xz "$build_dir" "antigravity-cli" "${build_dir}/${pkg_name}"; then
                 safe_rm_rf "$build_dir"
                 ERROR_COUNT=$((ERROR_COUNT + 1))
@@ -619,7 +619,7 @@ package_electron_component() {
             log_ok "[DRY-RUN] Would download: $lnx_url"
             log_ok "[DRY-RUN] Would rename top folder to ${final_folder_name}/"
             log_ok "[DRY-RUN] Would prune root licenses and unused locales"
-            log_ok "[DRY-RUN] Would recompress with xz -9: $pkg_name"
+            log_ok "[DRY-RUN] Would recompress with xz -9 -T0: $pkg_name"
             stage_package "" "$pkg_name" "$app_key" "lnx"
             UPDATED_COUNT=$((UPDATED_COUNT + 1))
         else
@@ -646,7 +646,7 @@ package_electron_component() {
             # Prune locales (keep only en-US.pak)
             prune_electron_locales "${build_dir}/staging/${final_folder_name}/locales" "en-US.pak"
 
-            log_info "Recompressing to $pkg_name (xz -9)..."
+            log_info "Recompressing to $pkg_name (xz -9 -T0)..."
             if ! recompress_folder_to_tar_xz "${build_dir}/staging" "$final_folder_name" "${build_dir}/${pkg_name}"; then
                 safe_rm_rf "$build_dir"
                 ERROR_COUNT=$((ERROR_COUNT + 1))

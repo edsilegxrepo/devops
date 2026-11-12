@@ -14,7 +14,7 @@ The **Google Antigravity Packaging Utility** (`antigravity_package.sh`) automate
 
 Each component is packaged into two standardized multi-platform distributions:
 - **Windows x64**: Standardized `.zip` archive containing the renamed portable executable.
-- **Linux x64**: High-compression `.tar.xz` tarball (compressed with `xz -9`) containing the stripped application hierarchy.
+- **Linux x64**: High-compression `.tar.xz` tarball (compressed with `xz -9 -T0`) containing the stripped application hierarchy.
 
 ### 1.2 Core Packaging Objectives
 - **Standardized Library Naming**: Unify diverse upstream download naming conventions into consistent, predictable filenames:
@@ -24,7 +24,7 @@ Each component is packaged into two standardized multi-platform distributions:
 - **Packaging Artifact De-Bloating**:
   - Prune duplicate licensing files (`LICENSE*`, `LICENSES*`) from archive roots.
   - Prune unused internationalization packages from `locales/` down to `en-US.pak` only, shedding dozens of megabytes of redundant locale data.
-- **High-Ratio Linux Transcoding**: Recompress upstream `.tar.gz` tarballs to `.tar.xz` using `xz -9`, achieving optimal bandwidth and storage efficiency.
+- **High-Ratio Linux Transcoding**: Recompress upstream `.tar.gz` tarballs to `.tar.xz` using multi-threaded `xz -9 -T0`, achieving optimal bandwidth and storage efficiency.
 - **Zero-Corruption Guarantee (Transactional Staging)**: All downloads, extraction, renaming, pruning, and repacking occur in an isolated temporary execution workspace. Files are moved to the library (`--source`) and staged to `--target` via atomic `.tmp` file renames.
 - **Dual-Repository Synchronization**:
   1. **Primary Library (`--source`)**: Updates the persistent, organized software library (e.g. `n:/softlib/software/public/devel/ide`), purging obsolete builds upon new version discovery.
@@ -72,7 +72,7 @@ flowchart TD
         LnxTransform --> LnxExtract["Extract upstream tar.gz"]
         LnxExtract --> LnxFolder["Normalize root directory name"]
         LnxFolder --> LnxPrune["Prune licenses & strip locales to en-US.pak"]
-        LnxPrune --> LnxXZ["Recompress with root/root ownership (xz -9)"]
+        LnxPrune --> LnxXZ["Recompress with root/root ownership (xz -9 -T0)"]
         LnxXZ --> LnxVerify["Verify xz integrity (tar -tJf)"]
     end
 
@@ -126,7 +126,7 @@ To maintain long-term resilience against infrastructure changes, the utility dyn
   ```
 - **Transformations**:
   - Windows: Renames `cli_windows_x64.exe` $\rightarrow$ `antigravity-cli.exe` and compresses with `zip -q`.
-  - Linux: Extracts `cli_linux_x64.tar.gz` (contains `antigravity`), renames to `antigravity-cli` (mode `755`), and recompresses with `xz -9`.
+  - Linux: Extracts `cli_linux_x64.tar.gz` (contains `antigravity`), renames to `antigravity-cli` (mode `755`), and recompresses with `xz -9 -T0`.
 
 #### 2. `antigravity-agent` (Antigravity Hub)
 - **Releases API**: `<HUB_UPDATER_BASE>/releases`
@@ -142,7 +142,7 @@ To maintain long-term resilience against infrastructure changes, the utility dyn
   - Linux: `https://storage.googleapis.com/antigravity-public/antigravity-hub/<version>-<execution_id>/linux-x64/Antigravity.tar.gz`
 - **Transformations**:
   - Windows: Renames `Antigravity-x64.exe` $\rightarrow$ `antigravity-agent-<ver>-w64.exe` and compresses with `zip -q`.
-  - Linux: Unpacks `Antigravity.tar.gz`, renames root folder `Antigravity-x64/` $\rightarrow$ `antigravity/`, deletes root licenses, deletes all non-English `.pak` files in `locales/` leaving only `en-US.pak`, and recompresses with `xz -9`.
+  - Linux: Unpacks `Antigravity.tar.gz`, renames root folder `Antigravity-x64/` $\rightarrow$ `antigravity/`, deletes root licenses, deletes all non-English `.pak` files in `locales/` leaving only `en-US.pak`, and recompresses with `xz -9 -T0`.
 
 #### 3. `antigravity-ide`
 - **Releases API**: `https://antigravity-ide-auto-updater-974169037036.us-central1.run.app/releases`
@@ -158,7 +158,7 @@ To maintain long-term resilience against infrastructure changes, the utility dyn
   - Linux: `https://edgedl.me.gvt1.com/edgedl/release2/j0qc3/antigravity/stable/<version>-<execution_id>/linux-x64/Antigravity%20IDE.tar.gz`
 - **Transformations**:
   - Windows: Renames `Antigravity IDE.exe` $\rightarrow$ `antigravity-ide-<ver>-w64.exe` and compresses with `zip -q`.
-  - Linux: Unpacks `Antigravity IDE.tar.gz`, renames root folder `Antigravity IDE/` $\rightarrow$ `antigravity-ide/` (stripping spaces), deletes root licenses, deletes all non-English `.pak` files leaving only `en-US.pak`, and recompresses with `xz -9`.
+  - Linux: Unpacks `Antigravity IDE.tar.gz`, renames root folder `Antigravity IDE/` $\rightarrow$ `antigravity-ide/` (stripping spaces), deletes root licenses, deletes all non-English `.pak` files leaving only `en-US.pak`, and recompresses with `xz -9 -T0`.
 
 ---
 
@@ -260,7 +260,7 @@ $ ./antigravity_package.sh --dry-run
 [OK] [DRY-RUN] Would download: https://storage.googleapis.com/antigravity-public/antigravity-hub/2.31.0-6379060755038208/linux-x64/Antigravity.tar.gz
 [OK] [DRY-RUN] Would rename top folder to antigravity/
 [OK] [DRY-RUN] Would prune root licenses and unused locales
-[OK] [DRY-RUN] Would recompress with xz -9: antigravity-agent-2.31.0-lnx.tar.xz
+[OK] [DRY-RUN] Would recompress with xz -9 -T0: antigravity-agent-2.31.0-lnx.tar.xz
 [OK] [DRY-RUN] Would remove obsolete source version: antigravity-agent-2.29.0-lnx.tar.xz
 [OK] [DRY-RUN] Would remove obsolete target version: antigravity-agent-2.29.0-lnx.tar.xz
 [OK] [DRY-RUN] Would move antigravity-agent-2.31.0-lnx.tar.xz to source: n:/softlib/software/public/devel/ide/antigravity-agent-2.31.0-lnx.tar.xz
