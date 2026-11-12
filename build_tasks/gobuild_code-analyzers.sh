@@ -28,6 +28,7 @@
 # Syntax:  ./gobuild_code-analyzers.sh [options] [build_all | <build_function>]
 # Example: ./gobuild_code-analyzers.sh --clean-cache build_all
 # Example: ./gobuild_code-analyzers.sh --distrib-base=/tmp/distrib build_gosec
+# Example: ./gobuild_code-analyzers.sh --deploy=d:/dev/go-tools --scope="go*,staticcheck"
 #
 # References: see below the toolchain organized by the nature of each tool.
 # +----------------+------------------------------------------+--------------------------------------------+------------------------------------------+
@@ -76,29 +77,37 @@
 # --- Global Configuration & Build Environment ---
 # Hardening of shell environment
 set -euo pipefail
-# Environment Detection: Dynamically resolve drive prefixes for Cygwin vs MSYS2 compatibility.
+# Environment Detection: Dynamically resolve drive prefixes and host platform for Cygwin/MSYS2/Linux compatibility.
 IS_CYGWIN=false
 IS_MSYS=false
+IS_LINUX=false
 DRIVE_PREFIX=""
+HOST_PLATFORM=""
 
-if [[ "$(uname -s)" == *"CYGWIN"* ]]; then
-  # shellcheck disable=SC2034 # Environment indicator
-  IS_CYGWIN=true
-  DRIVE_PREFIX="/cygdrive"
-elif [[ "$(uname -s)" == *"MSYS"* || "$(uname -s)" == *"MINGW"* ]]; then
-  # shellcheck disable=SC2034 # Environment indicator
-  IS_MSYS=true
-  DRIVE_PREFIX=""
-else
-  echo "Error: This script is designed to run on Cygwin or MSYS2/Git-Bash."
-  exit 1
-fi
-
-# Validation: Ensure GOPATH is defined for go install operations.
-if [ -z "${GOPATH:-}" ]; then
-  echo "Error: GOPATH is not defined. Please set your Go workspace environment variable."
-  exit 1
-fi
+case "$(uname -s)" in
+  *CYGWIN*)
+    # shellcheck disable=SC2034 # Environment indicator
+    IS_CYGWIN=true
+    DRIVE_PREFIX="/cygdrive"
+    HOST_PLATFORM="windows"
+    ;;
+  *MSYS* | *MINGW*)
+    # shellcheck disable=SC2034 # Environment indicator
+    IS_MSYS=true
+    DRIVE_PREFIX=""
+    HOST_PLATFORM="windows"
+    ;;
+  Linux*)
+    IS_LINUX=true
+    DRIVE_PREFIX=""
+    HOST_PLATFORM="linux"
+    ;;
+  *)
+    echo "Error: Unsupported platform '$(uname -s)'. Expected Cygwin, MSYS2/Git-Bash, or Linux."
+    exit 1
+    ;;
+esac
+readonly HOST_PLATFORM
 
 # Centralized paths for source code, binaries, and distribution archives.
 # Precedence: CLI flags > Environment variables > Built-in defaults.
@@ -118,7 +127,8 @@ DO_CLEAN=false                 # Flag to trigger cache cleanup before execution
 DO_PURGE_DIST=false            # Flag to purge distribution artifacts
 DO_REPORT_DIST=false           # Flag to report existing distribution archives
 DO_FLATTEN="${DO_FLATTEN:-true}" # Place archives directly in DISTRIB_BASE by default (use --no-flatten for subdirs)
-DO_SCOPE=""                    # Specific tool scope for maintenance tasks
+DO_SCOPE=""                    # Specific tool scope for maintenance/deploy tasks
+DEPLOY_DIR=""                  # Optional target directory to extract platform binaries into
 
 # Go build settings & optimizations
 readonly GH_BASE_URL="https://github.com"
@@ -144,7 +154,12 @@ fi
 readonly CGO_LDFLAGS="-linkmode external -extldflags '-static'"
 readonly DEFAULT_ZIG_BIN="d:/dev/zig/zig"
 ZIG_BIN="${ZIG_BIN:-}" # Resolved after CLI parsing (--zig-bin > ZIG_BIN env > PATH 'zig' > d:/dev/zig/zig)
-readonly ZIG_CACHE="$(cygpath "${LOCALAPPDATA:-}")/zig"
+if command -v cygpath >/dev/null 2>&1 && [ -n "${LOCALAPPDATA:-}" ]; then
+  ZIG_CACHE="$(cygpath "${LOCALAPPDATA}")/zig"
+else
+  ZIG_CACHE="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/zig"
+fi
+readonly ZIG_CACHE
 # CC_* variables: Direct Zig to target specific OS/libc families (finalized after ZIG_BIN resolution).
 CC_WINDOWS=""
 CC_LINUX=""
@@ -236,7 +251,8 @@ function displayHelp() {
   echo "  --compile-base <dir>     Temporary build/clone workspace (default: <install-base>/compile)"
   echo "  --distrib-base <dir>     Target directory for release archives (default: <install-base>/distrib)"
   echo "  --zig-bin <file>         Path to Zig binary for CGO builds (default: zig in PATH or ${DEFAULT_ZIG_BIN})"
-  echo "  --scope <pkg1,pkg2>      Restrict maintenance to specific tools (no build)"
+  echo "  --deploy <dir>           Extract built platform binaries in scope to <dir>"
+  echo "  --scope <pkg1,pkg2>      Restrict maintenance/deploy to specific tools (no build)"
   echo ""
   echo "Targets:"
   echo "  build_all             Build every tool in parallel"
@@ -422,6 +438,171 @@ function reportDistrib() {
     fi
   fi
   echo "${separator}"
+}
+
+# Extracts compiled platform-specific binaries in scope from DISTRIB_BASE into DEPLOY_DIR.
+# Arguments: $1 (optional filter: build_xxx, comma/wildcard scope list, or empty/all).
+function deployDistrib() {
+  local filter="${1:-}"
+  local target_pn="${filter#build_}"
+  local platform_suffix="_${HOST_PLATFORM}-${GOARCH}.tar.xz"
+
+  if [ ! -d "${DISTRIB_BASE}" ]; then
+    echo "Error: Distribution directory not found at ${DISTRIB_BASE}"
+    return 1
+  fi
+
+  # 1. Resolve target tools in scope (deduplicated, preserving MASTER_TOOLS order)
+  local -a target_tools=()
+  if [ -n "${target_pn}" ] && [ "${target_pn}" != "all" ] && [ "${target_pn}" != "HELP" ]; then
+    set -f
+    local scope_items="${target_pn//,/ }"
+    local -A seen_tools=()
+    local scope_item tool
+    for scope_item in ${scope_items}; do
+      local matched=false
+      for tool in "${MASTER_TOOLS[@]}"; do
+        # shellcheck disable=SC2053 # Intentional glob pattern match
+        if [[ "${tool}" == ${scope_item} ]]; then
+          matched=true
+          if [ -z "${seen_tools[$tool]:-}" ]; then
+            seen_tools["$tool"]=1
+            target_tools+=("${tool}")
+          fi
+        fi
+      done
+      [ "$matched" = false ] && echo "Warning: No tools matched scope pattern '${scope_item}'"
+    done
+    set +f
+    if [ "${#target_tools[@]}" -eq 0 ]; then
+      echo "Error: No valid tools matched target/scope '${target_pn}'."
+      return 1
+    fi
+  else
+    target_tools=("${MASTER_TOOLS[@]}")
+  fi
+
+  # 2. Discover newest matching platform archive per MASTER_TOOLS entry (tree + flat layouts)
+  local -A latest_archive=()
+  local f
+  for f in "${DISTRIB_BASE}"/*/*"${platform_suffix}" "${DISTRIB_BASE}"/*"${platform_suffix}"; do
+    [ -f "${f}" ] || continue
+    local fname="${f##*/}"
+    local tmp_dir="${f%/*}"
+    local PN_LOCAL=""
+    local candidate
+
+    if [ "${tmp_dir}" != "${DISTRIB_BASE}" ]; then
+      local dir_name="${tmp_dir##*/}"
+      for candidate in "${MASTER_TOOLS[@]}"; do
+        if [ "${dir_name}" == "${candidate}" ] && [[ "${fname}" == "${candidate}-"* ]]; then
+          PN_LOCAL="${candidate}"
+          break
+        fi
+      done
+    else
+      for candidate in "${MASTER_TOOLS[@]}"; do
+        if [[ "${fname}" == "${candidate}-"* ]] && [ "${#candidate}" -gt "${#PN_LOCAL}" ]; then
+          PN_LOCAL="${candidate}"
+        fi
+      done
+    fi
+    [ -z "${PN_LOCAL}" ] && continue
+
+    local ver_part="${fname#"${PN_LOCAL}"-}"
+    ver_part="${ver_part%"${platform_suffix}"}"
+    [ -z "${ver_part}" ] && continue
+
+    if [ -z "${latest_archive[$PN_LOCAL]:-}" ] || [ "${f}" -nt "${latest_archive[$PN_LOCAL]}" ]; then
+      latest_archive["$PN_LOCAL"]="${f}"
+    fi
+  done
+
+  # 3. Validate archive members and extract binaries into DEPLOY_DIR
+  echo -e "\nDeploying ${HOST_PLATFORM}-${GOARCH} binaries from ${DISTRIB_BASE} to ${DEPLOY_DIR}..."
+  local deployed_pkgs=0
+  local deployed_bins=0
+  local deploy_errors=0
+  local non_library_targets=0
+  local dir_created=false
+
+  for tool in "${target_tools[@]}"; do
+    if [ "${tool}" == "goleak" ]; then
+      if [ "${#target_tools[@]}" -eq 1 ]; then
+        echo "  [Skipped] goleak (library-only package, no binary archive)"
+      fi
+      continue
+    fi
+    ((non_library_targets += 1))
+
+    local archive="${latest_archive[$tool]:-}"
+    if [ -z "${archive}" ]; then
+      if [ -n "${target_pn}" ] && [ "${target_pn}" != "all" ]; then
+        echo "  [Missing] No ${HOST_PLATFORM}-${GOARCH} archive found for '${tool}'"
+      fi
+      continue
+    fi
+
+    local listing
+    if ! listing=$(tar -Jtf "${archive}" 2>/dev/null) || [ -z "${listing}" ]; then
+      echo "  [FAILED ] Corrupt or empty archive: ${archive##*/}"
+      ((deploy_errors += 1))
+      continue
+    fi
+
+    local -a clean_members=()
+    local unsafe_member=false
+    local raw_m
+    while IFS= read -r raw_m; do
+      [ -z "${raw_m}" ] && continue
+      local clean_m="${raw_m#./}"
+      if [[ -z "${clean_m}" || "${clean_m}" == /* || "${clean_m}" == *".."* || "${clean_m}" == *"/"* ]]; then
+        unsafe_member=true
+        break
+      fi
+      clean_members+=("${clean_m}")
+    done <<< "${listing}"
+
+    if [ "${unsafe_member}" = true ] || [ "${#clean_members[@]}" -eq 0 ]; then
+      echo "  [FAILED ] Refusing archive with unsafe or non-flat member paths: ${archive##*/}"
+      ((deploy_errors += 1))
+      continue
+    fi
+
+    if [ "${dir_created}" = false ]; then
+      if ! mkdir -p "${DEPLOY_DIR}"; then
+        echo "  [FAILED ] Unable to create deploy directory: ${DEPLOY_DIR}"
+        return 1
+      fi
+      dir_created=true
+    fi
+
+    if tar -Jxf "${archive}" -C "${DEPLOY_DIR}" --no-same-owner --unlink-first; then
+      if [ "${HOST_PLATFORM}" == "linux" ]; then
+        local bin_name
+        for bin_name in "${clean_members[@]}"; do
+          [ -f "${DEPLOY_DIR}/${bin_name}" ] && chmod +x "${DEPLOY_DIR}/${bin_name}"
+        done
+      fi
+      ((deployed_pkgs += 1))
+      ((deployed_bins += ${#clean_members[@]}))
+      echo "  [Deployed] ${tool} (${archive##*/}) -> ${clean_members[*]}"
+    else
+      echo "  [FAILED ] Failed to extract ${archive##*/} to ${DEPLOY_DIR}"
+      ((deploy_errors += 1))
+    fi
+  done
+
+  echo "Deployment summary (${HOST_PLATFORM}-${GOARCH} -> ${DEPLOY_DIR}): ${deployed_pkgs} package(s), ${deployed_bins} binary(ies) extracted, ${deploy_errors} error(s)."
+
+  if [ "${deploy_errors}" -gt 0 ]; then
+    return 1
+  fi
+  if [ "${deployed_pkgs}" -eq 0 ] && [ "${non_library_targets}" -gt 0 ]; then
+    echo "Error: No ${HOST_PLATFORM}-${GOARCH} archives were deployed to ${DEPLOY_DIR}."
+    return 1
+  fi
+  return 0
 }
 
 # Updates all Go modules in the current path to their latest versions.
@@ -1218,6 +1399,22 @@ while [[ "$#" -gt 0 ]]; do
       ZIG_BIN="$2"
       shift 2
       ;;
+    --deploy=*)
+      DEPLOY_DIR="${1#--deploy=}"
+      if [[ -z "${DEPLOY_DIR}" || "${DEPLOY_DIR}" =~ ^[[:space:]]*$ ]]; then
+        echo "Fatal Error: --deploy requires a non-empty directory path."
+        exit 1
+      fi
+      shift
+      ;;
+    --deploy)
+      if [ -z "${2:-}" ] || [[ "${2}" == -* ]] || [[ "${2}" =~ ^[[:space:]]*$ ]]; then
+        echo "Fatal Error: --deploy requires a directory path argument."
+        exit 1
+      fi
+      DEPLOY_DIR="$2"
+      shift 2
+      ;;
     --scope=*)
       DO_SCOPE="${1#--scope=}"
       if [[ -z "${DO_SCOPE}" || "${DO_SCOPE}" =~ ^[[:space:]]*$ ]]; then
@@ -1282,6 +1479,19 @@ if [[ "${COMPILE_BASE}" == "${DISTRIB_BASE}" || "${DISTRIB_BASE}" == "${COMPILE_
   exit 1
 fi
 
+if [ -n "${DEPLOY_DIR}" ]; then
+  DEPLOY_DIR="$(normalizePath "${DEPLOY_DIR}")"
+  validateBasePath "--deploy" "${DEPLOY_DIR}"
+  if [[ "${DEPLOY_DIR}" == "${COMPILE_BASE}" || "${DEPLOY_DIR}" == "${COMPILE_BASE}/"* || "${COMPILE_BASE}" == "${DEPLOY_DIR}/"* ]]; then
+    echo "Fatal Error: --deploy ('${DEPLOY_DIR}') and --compile-base ('${COMPILE_BASE}') must not be identical or nested within each other."
+    exit 1
+  fi
+  if [[ "${DEPLOY_DIR}" == "${DISTRIB_BASE}" || "${DEPLOY_DIR}" == "${DISTRIB_BASE}/"* || "${DISTRIB_BASE}" == "${DEPLOY_DIR}/"* ]]; then
+    echo "Fatal Error: --deploy ('${DEPLOY_DIR}') and --distrib-base ('${DISTRIB_BASE}') must not be identical or nested within each other."
+    exit 1
+  fi
+fi
+
 if [ -z "${ZIG_BIN}" ]; then
   if command -v zig >/dev/null 2>&1; then
     ZIG_BIN=$(command -v zig)
@@ -1299,35 +1509,52 @@ fi
 CC_WINDOWS="${ZIG_BIN} cc -target x86_64-windows-gnu"
 CC_LINUX="${ZIG_BIN} cc -target x86_64-linux-musl"
 
-readonly INSTALL_BASE COMPILE_BASE DISTRIB_BASE DO_FLATTEN ZIG_BIN CC_WINDOWS CC_LINUX
+readonly INSTALL_BASE COMPILE_BASE DISTRIB_BASE DEPLOY_DIR DO_FLATTEN ZIG_BIN CC_WINDOWS CC_LINUX
 
 # 1. Validation Phase: Mutually Exclusive Arguments
-# --scope is strictly for maintenance tasks and cannot be used during a build operation.
+# --scope is strictly for maintenance/deploy tasks and cannot be used during a build operation.
 if [ -n "${DO_SCOPE:-}" ] && [ -n "${ACTION:-}" ]; then
   echo "Fatal Error: --scope cannot be used when a build target ('${ACTION}') is specified."
   exit 1
 fi
+if [ "${DO_PURGE_DIST:-}" = true ] && [ -n "${DEPLOY_DIR:-}" ] && [ -z "${ACTION:-}" ]; then
+  echo "Fatal Error: --purge-distrib and --deploy cannot be combined without a build target."
+  exit 1
+fi
 
-# 2. Pre-Execution Maintenance Phase
-if [ "${DO_CLEAN:-}" = true ] || [ "${DO_PURGE_DIST:-}" = true ] || [ "${DO_REPORT_DIST:-}" = true ]; then
-  # Determine the target for maintenance functions
+# 2. Pre-Execution Maintenance & Standalone Deployment Phase
+if [ "${DO_CLEAN:-}" = true ] || [ "${DO_PURGE_DIST:-}" = true ] || [ "${DO_REPORT_DIST:-}" = true ] || [ -n "${DEPLOY_DIR:-}" ]; then
+  # Determine the target for maintenance/deploy functions
   # Priority: 1. Build Action, 2. Explicit Scope, 3. Empty (interpreted as 'all' by functions)
   maint_target="${ACTION:-${DO_SCOPE:-}}"
 
   [ "${DO_CLEAN:-}" = true ] && cleanCache
   [ "${DO_PURGE_DIST:-}" = true ] && purgeDistrib "${maint_target}"
   
-  # If no build target was specified, and we are not in help mode, we can exit after maintenance.
+  # If no build target was specified, finish reporting/deployment and exit.
   if [ -z "${ACTION:-}" ]; then
     [ "${DO_REPORT_DIST:-}" = true ] && reportDistrib "${maint_target}"
+    if [ -n "${DEPLOY_DIR:-}" ]; then
+      deployDistrib "${maint_target}" || exit 1
+    fi
     exit 0
   fi
 fi
 
-# 2b. Display Help Information (when invoked with no build action or maintenance flags)
+# 2b. Display Help Information (when invoked with no build action or maintenance/deploy flags)
 if [ -z "${ACTION:-}" ]; then
   # NO ARGUMENTS: Display usage guide
   displayHelp
+  exit 1
+fi
+
+# 2c. Build Environment Guards (enforced only when executing builds)
+if [ "${IS_LINUX}" = true ]; then
+  echo "Error: Building targets requires Cygwin or MSYS2/Git-Bash on Windows (standalone --deploy/--report-distrib/--purge-distrib are supported on Linux)."
+  exit 1
+fi
+if [ -z "${GOPATH:-}" ]; then
+  echo "Error: GOPATH is not defined. Please set your Go workspace environment variable."
   exit 1
 fi
 
@@ -1397,7 +1624,18 @@ if [ "${DO_REPORT_DIST:-}" = true ]; then
   reportDistrib "${ACTION:-}"
 fi
 
-printf 'Install Go tools in d:\dev\go-tools [Windows] or /u01/tools/ [linux], and make sure they are accessible via system path\n'
-printf 'On Windows, replicate to %%GOPATH%%\\bin\n'
+if [ -n "${DEPLOY_DIR:-}" ]; then
+  if ! deployDistrib "${ACTION:-}"; then
+    ((FAILURE_COUNT += 1))
+  fi
+fi
+
+if [ -n "${DEPLOY_DIR:-}" ]; then
+  printf 'Ensure %s is accessible via your system PATH\n' "${DEPLOY_DIR}"
+  printf 'On Windows, replicate to %%GOPATH%%\\bin if needed\n'
+else
+  printf 'Install Go tools in d:\dev\go-tools [Windows] or /u01/tools/ [linux] (or pass --deploy <dir>), and make sure they are accessible via system path\n'
+  printf 'On Windows, replicate to %%GOPATH%%\\bin\n'
+fi
 
 exit "${FAILURE_COUNT}"

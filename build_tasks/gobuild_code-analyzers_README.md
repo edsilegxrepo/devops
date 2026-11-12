@@ -30,11 +30,12 @@ The script uses standard Bash job control. It backgrounds every tool build, stor
 The orchestrator implements a **Location-Independent Tracking System**. Instead of relying on heuristic directory searches, every build engine (`codeBuild` and `codeInstall`) exports an absolute `PKG_BIN_PATH` upon successful compilation. This ensures that downstream functions (`pkgVersion`, `generateArchive`) always find the correct binary regardless of repository nesting depth (e.g., `gopls`).
 
 ### 6. Cross-Platform Environment Detection
-The orchestrator is fully compatible with both **Cygwin** and **MSYS2/Git-Bash**. It dynamically detects the host environment and resolves the correct Windows drive prefixing:
-- **Cygwin**: Uses `/cygdrive/` (e.g., `/cygdrive/c/`).
-- **MSYS2**: Uses native roots (e.g., `/c/`).
+The orchestrator is fully compatible with **Cygwin**, **MSYS2/Git-Bash**, and **Linux/WSL** (standalone `--deploy`, `--report-distrib`, and `--purge-distrib` run natively on Linux, while compilation requires Cygwin or MSYS2). It dynamically detects the host environment, sets `HOST_PLATFORM` (`windows` or `linux`), and resolves Windows drive prefixing:
+- **Cygwin**: Uses `/cygdrive/` (e.g., `/cygdrive/c/`), `HOST_PLATFORM=windows`.
+- **MSYS2**: Uses native roots (e.g., `/c/`), `HOST_PLATFORM=windows`.
+- **Linux**: Native POSIX paths, `HOST_PLATFORM=linux`.
 
-This dynamic resolution ensures that default staging paths remain functional regardless of the POSIX layer being used on Windows.
+This dynamic resolution ensures that default staging paths remain functional regardless of the POSIX layer being used and selects the matching platform archives automatically for `--deploy <dir>`.
 
 ### 7. Cygwin-Windows Interoperability
 To support reliable metadata extraction, the script utilizes `cygpath -w` when communicating with the Windows Go toolchain. This prevents "File Not Found" errors that occur when passing POSIX-style paths to native Windows binaries.
@@ -43,7 +44,7 @@ To support reliable metadata extraction, the script utilizes `cygpath -w` when c
 To ensure enterprise-grade reliability, the script implements "Bash Strict Mode" (`set -euo pipefail`). This enforces immediate abortion on unhandled errors and ensures that failures in parallel subshells are correctly detected.
 
 ### 9. Defensive Variable Management
-*   **Immutability**: Critical configuration constants (paths, Zig toolchain, compiler strings) are declared as `readonly` to prevent accidental mutation during the parallel execution phase. Configurable base directories (`INSTALL_BASE`, `COMPILE_BASE`, `DISTRIB_BASE`), `ZIG_BIN`/`CC_*`, and `DO_FLATTEN` resolve via CLI flags, environment variables, or built-in defaults, canonicalize via `cygpath -u` and `realpath -m`, pass safety validation against filesystem/system/drive roots and overlapping workspaces, and lock as `readonly` prior to execution.
+*   **Immutability**: Critical configuration constants (paths, host platform, Zig toolchain, compiler strings) are declared as `readonly` to prevent accidental mutation during the parallel execution phase. Configurable directories (`INSTALL_BASE`, `COMPILE_BASE`, `DISTRIB_BASE`, and optional `DEPLOY_DIR`), `ZIG_BIN`/`CC_*`, and `DO_FLATTEN` resolve via CLI flags, environment variables, or built-in defaults, canonicalize via `cygpath -u` and `realpath -m`, pass safety validation against filesystem/system/drive roots and overlapping workspaces, and lock as `readonly` prior to execution.
 *   **Safe Expansion**: All variable accesses use defensive expansion (e.g., `${VAR:-}`) to maintain stability under `nounset` conditions, especially for optional function arguments and environment metadata.
 
 ---
@@ -57,10 +58,11 @@ graph TD
     ParseArgs --> HelpCheck{"--help or invalid arg?"}
     HelpCheck -- Yes --> ShowHelp["Display Help & Exit 1"]
     HelpCheck -- No --> Validate["Canonicalize Paths, Validate Roots/Overlap, Resolve Zig & Lock readonly"]
-    Validate --> Maint["Pre-Execution Maintenance (--clean-cache / --purge-distrib / --report-distrib)"]
-    Maint --> MaintOnly{"Maintenance only (no build target)?"}
-    MaintOnly -- Yes --> ExitMaint(["Exit 0"])
-    MaintOnly -- No --> ActionType
+    Validate --> Maint["Pre-Execution Maintenance (--clean-cache / --purge-distrib / --report-distrib / standalone --deploy)"]
+    Maint --> MaintOnly{"Standalone mode (no build target)?"}
+    MaintOnly -- Yes --> ExitMaint(["Exit (0 on success, 1 on deploy error)"])
+    MaintOnly -- No --> BuildGuards["Verify Windows Build Host & GOPATH"]
+    BuildGuards --> ActionType
 
     subgraph ExecutionPhase ["Execution Phase (Parallel vs Single)"]
         ActionType{"build_all or single?"}
@@ -76,7 +78,7 @@ graph TD
     end
 
     Archive --> Cleanup["Purge Staged Binaries"]
-    Monitor --> Results["Report Success/Failure & Optional --report-distrib"]
+    Monitor --> Results["Report Success/Failure, Optional --report-distrib & Optional --deploy"]
     Cleanup --> Results
     Results --> End(["Conclusion: Exit with Failure Count"])
 ```
@@ -86,6 +88,7 @@ graph TD
 2.  **Metadata generation**: Git tags and commit hashes are transformed into a `PKG_VER` identifier.
 3.  **Transformation**: Source code is processed by the Go compiler. If CGO is enabled, Zig acts as the linker.
 4.  **Egress**: Binary artifacts are bundled with OS-specific extensions (`.exe` for Windows) and written directly to `DISTRIB_BASE` (default: `<INSTALL_BASE>/distrib`) as compressed `.tar.xz` archives by default (flat layout), or grouped into per-tool subdirectories when `--no-flatten` is specified.
+5.  **Deployment (Optional)**: When `--deploy <dir>` is passed, platform-matching archives (`windows-amd64` or `linux-amd64`) in scope are verified and extracted directly into `<dir>`.
 
 ---
 
@@ -266,7 +269,7 @@ The following table provides a high-level summary of the tools included in this 
 | **Utilities** | `tar`, `xz` | Packaging and compression. |
 | **Utilities** | `nproc` | CPU core detection for build optimization. |
 | **Utilities** | `cygpath`, `realpath` | Cross-platform path conversion and canonicalization (`coreutils`). |
-| **Environment** | `Cygwin` or `MSYS2/Git-Bash` | Required for running on Windows systems. |
+| **Environment** | `Cygwin`, `MSYS2/Git-Bash`, or `Linux` | Cygwin/MSYS2 required for compiling; Linux also supported for standalone `--deploy`, `--report-distrib`, and `--purge-distrib`. |
 
 ---
 
@@ -284,7 +287,8 @@ The following table provides a high-level summary of the tools included in this 
 | `--compile-base <dir>` | Overrides temporary clone and build workspace (`--compile-base <dir>` or `--compile-base=<dir>`, or `COMPILE_BASE` env var). | Option | `<INSTALL_BASE>/compile` |
 | `--distrib-base <dir>` | Overrides destination directory for compiled `.tar.xz` archives (`--distrib-base <dir>` or `--distrib-base=<dir>`, or `DISTRIB_BASE` env var). | Option | `<INSTALL_BASE>/distrib` |
 | `--zig-bin <file>` | Overrides Zig binary path for CGO cross-compilation (`--zig-bin <file>` or `--zig-bin=<file>`, or `ZIG_BIN` env var). | Option | `zig` in `PATH`, else `d:/dev/zig/zig` |
-| `--scope <list>` | Restricts maintenance to a comma-separated list (e.g., `gosec,golangci-lint`) or wildcard pattern (e.g., `go*`) of packages (`--scope <list>` or `--scope=<list>`). | Option | N/A |
+| `--deploy <dir>` | Automatically extracts compiled binaries in scope matching the detected host platform (`windows-amd64` or `linux-amd64`) into `<dir>` (`--deploy <dir>` or `--deploy=<dir>`). Works standalone (optionally with `--scope`) or combined with a build target. | Option | N/A |
+| `--scope <list>` | Restricts maintenance or standalone deployment (`--deploy`) to a comma-separated list (e.g., `gosec,golangci-lint`) or wildcard pattern (e.g., `go*`) of packages (`--scope <list>` or `--scope=<list>`). | Option | N/A |
 | `build_all` | Compiles all 21 targets concurrently in parallel mode. | Target | N/A |
 | `build_<name>` | Build a specific tool (e.g., `build_gofumpt`, `build_nilaway`). | Target | N/A |
 
@@ -344,6 +348,21 @@ Stage all compiled archives flatly (default) into a custom release folder while 
 Or re-root the entire staging hierarchy using `--install-base` and opt into per-tool subdirectories with `--no-flatten`:
 ```bash
 ./gobuild_code-analyzers.sh --no-flatten --install-base=/d/dev/go-analyzers-stage build_staticcheck
+```
+
+### 8. Automated Platform-Aware Deployment (--deploy)
+Extract all compiled binaries matching the current OS (`windows-amd64` on Cygwin/MSYS2, `linux-amd64` on Linux) into a target `PATH` folder:
+```bash
+# Windows (Cygwin / MSYS2)
+./gobuild_code-analyzers.sh --deploy=d:/dev/go-tools
+
+# Linux
+./gobuild_code-analyzers.sh --distrib-base=/stage/distrib --deploy=/u01/tools
+```
+Deploy only a subset of tools using `--scope`, or build and immediately deploy in one command:
+```bash
+./gobuild_code-analyzers.sh --deploy=d:/dev/go-tools --scope="go*,staticcheck"
+./gobuild_code-analyzers.sh --deploy=d:/dev/go-tools build_gosec
 ```
 
 ---
