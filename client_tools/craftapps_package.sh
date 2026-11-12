@@ -515,71 +515,10 @@ extract_asset_urls() {
 # ------------------------------------------------------------------------------
 # Section 8b: Artifact Cleanup & Recompression Engine
 # ------------------------------------------------------------------------------
-# (is_artifact_file and clean_zip_artifacts are provided by client_package_common.sh)
-
-# clean_and_recompress_linux_archive <archive_path>
-# Decompresses Linux tar.gz or tar.xz, removes matching artifacts (e.g. in root
-# or share/doc/<app>), and recompresses using xz -9, producing <archive>.tar.xz.
-# Outputs the new archive filename to standard output.
-clean_and_recompress_linux_archive() {
-    local archive_path="$1"
-    [[ -f "$archive_path" ]] || return 1
-
-    local dir
-    dir=$(dirname "$archive_path")
-    local fname
-    fname=$(basename "$archive_path")
-
-    local tar_file=""
-    if [[ "$fname" =~ \.tar\.gz$ ]]; then
-        log_info "Decompressing gzip archive: $fname..." >&2
-        gzip -d -f "$archive_path"
-        tar_file="${dir}/${fname%.gz}"
-    elif [[ "$fname" =~ \.tar\.xz$ ]]; then
-        log_info "Decompressing xz archive: $fname..." >&2
-        xz -d -f "$archive_path"
-        tar_file="${dir}/${fname%.xz}"
-    elif [[ "$fname" =~ \.tar$ ]]; then
-        tar_file="$archive_path"
-    else
-        echo "$fname"
-        return 0
-    fi
-
-    if [[ ! -f "$tar_file" ]]; then
-        log_error "Failed to produce uncompressed tar file: $tar_file" >&2
-        return 1
-    fi
-
-    # Inspect tar members for artifacts
-    local tar_entries_to_remove=()
-    while IFS= read -r entry || [[ -n "$entry" ]]; do
-        [[ -z "$entry" ]] && continue
-        local base="${entry##*/}"
-        if is_artifact_file "$base"; then
-            tar_entries_to_remove+=("$entry")
-        fi
-    done < <(tar --force-local -tf "$tar_file" 2>/dev/null || true)
-
-    if [[ ${#tar_entries_to_remove[@]} -gt 0 ]]; then
-        log_info "Removing ${#tar_entries_to_remove[@]} artifact file(s) from $(basename "$tar_file")..." >&2
-        tar --force-local --delete -f "$tar_file" "${tar_entries_to_remove[@]}" 2>/dev/null || true
-    else
-        log_info "No matching artifact files found in $(basename "$tar_file")." >&2
-    fi
-
-    # Recompress with xz -9
-    log_info "Compressing tar to xz: $(basename "$tar_file").xz..." >&2
-    xz -9 -f "$tar_file"
-    local xz_file="${tar_file}.xz"
-
-    if [[ ! -f "$xz_file" ]]; then
-        log_error "Failed to recompress tar to xz: $xz_file" >&2
-        return 1
-    fi
-
-    echo "$(basename "$xz_file")"
-}
+# Archive extraction, base folder stripping, artifact pruning (licenses subfolder,
+# ASSETS.md, portable.txt), and zip/xz recompression utilities are provided
+# by client_package_common.sh (strip_base_directory, prune_directory_artifacts,
+# repack_directory_to_zip, repack_directory_to_tar_xz).
 
 # ------------------------------------------------------------------------------
 # Section 8c: Application Deployment Pipeline (--action deploy)
@@ -1322,8 +1261,8 @@ for entry in "${PACKAGES[@]}"; do
         echo "   - $linux_name ($linux_url)"
         echo "   - $win_name ($win_url)"
         log_ok "[DRY-RUN] Would verify archive integrity in tmp"
-        log_ok "[DRY-RUN] Would prune artifact files (LICENSE*, NOTICE*, etc.) from $win_name"
-        log_ok "[DRY-RUN] Would prune artifacts from $linux_name and recompress to .tar.xz"
+        log_ok "[DRY-RUN] Would extract, strip base folder, and prune artifacts from $win_name"
+        log_ok "[DRY-RUN] Would extract, strip base folder, prune artifacts, and recompress $linux_name to .tar.xz"
         log_ok "[DRY-RUN] Would package both into $NEW_ZIP_NAME in tmp"
         log_ok "[DRY-RUN] Would verify package integrity in tmp"
         local_target_dir=""
@@ -1394,31 +1333,59 @@ for entry in "${PACKAGES[@]}"; do
         continue
     fi
 
-    # Step 5e: Prune Packaging Artifacts & Recompress Linux tarball to xz
-    log_step "Cleaning artifact files and converting Linux archive to xz for $app_name..."
-
-    # Prune artifacts from Windows zip directly
-    clean_zip_artifacts "${CURRENT_BUILD_DIR}/${win_name}"
-    if ! verify_zip_integrity "${CURRENT_BUILD_DIR}/${win_name}"; then
-        log_error "Windows zip failed integrity check after artifact cleanup: $win_name"
+    # Step 5e: Normalize Windows Archive (Extract, Strip Base Folder, Prune Artifacts & Repackage)
+    log_info "Normalizing Windows archive for $app_name (stripping base folder & pruning artifacts)..."
+    win_unpack="${CURRENT_BUILD_DIR}/win_unpacked"
+    mkdir -p "$win_unpack"
+    if ! extract_archive "${CURRENT_BUILD_DIR}/${win_name}" "$win_unpack"; then
+        log_error "Failed to extract Windows archive: $win_name"
         safe_rm_rf "$CURRENT_BUILD_DIR"
         CURRENT_BUILD_DIR=""
         ERROR_COUNT=$((ERROR_COUNT + 1))
         continue
     fi
-
-    # Decompress Linux archive, delete matching artifacts, and recompress to .tar.xz
-    cleaned_linux_name=$(clean_and_recompress_linux_archive "${CURRENT_BUILD_DIR}/${linux_name}")
-    if [[ -z "$cleaned_linux_name" || ! -s "${CURRENT_BUILD_DIR}/${cleaned_linux_name}" ]] || ! verify_tar_xz_integrity "${CURRENT_BUILD_DIR}/${cleaned_linux_name}"; then
-        log_error "Linux xz archive failed integrity check after recompression: $cleaned_linux_name"
+    safe_rm_f "${CURRENT_BUILD_DIR}/${win_name}"
+    strip_base_directory "$win_unpack"
+    prune_directory_artifacts "$win_unpack"
+    if ! repack_directory_to_zip "$win_unpack" "${CURRENT_BUILD_DIR}/${win_name}"; then
+        log_error "Failed to repackage Windows archive: $win_name"
         safe_rm_rf "$CURRENT_BUILD_DIR"
         CURRENT_BUILD_DIR=""
         ERROR_COUNT=$((ERROR_COUNT + 1))
         continue
     fi
-    linux_name="$cleaned_linux_name"
+    safe_rm_rf "$win_unpack"
 
-    # Step 5f: Repackage combined zip in tmp
+    # Step 5f: Normalize Linux Archive (Extract, Strip Base Folder, Prune Artifacts & Recompress to xz)
+    log_info "Normalizing Linux archive for $app_name (stripping base folder, pruning artifacts & transcoding to xz)..."
+    linux_unpack="${CURRENT_BUILD_DIR}/linux_unpacked"
+    mkdir -p "$linux_unpack"
+    if ! extract_archive "${CURRENT_BUILD_DIR}/${linux_name}" "$linux_unpack"; then
+        log_error "Failed to extract Linux archive: $linux_name"
+        safe_rm_rf "$CURRENT_BUILD_DIR"
+        CURRENT_BUILD_DIR=""
+        ERROR_COUNT=$((ERROR_COUNT + 1))
+        continue
+    fi
+    safe_rm_f "${CURRENT_BUILD_DIR}/${linux_name}"
+    strip_base_directory "$linux_unpack"
+    prune_directory_artifacts "$linux_unpack"
+
+    final_linux_name="${linux_name%.tar.gz}.tar.xz"
+    final_linux_name="${final_linux_name%.tgz}.tar.xz"
+    [[ "$final_linux_name" =~ \.tar\.xz$ ]] || final_linux_name="${final_linux_name}.tar.xz"
+
+    if ! repack_directory_to_tar_xz "$linux_unpack" "${CURRENT_BUILD_DIR}/${final_linux_name}"; then
+        log_error "Failed to recompress Linux archive to xz: $final_linux_name"
+        safe_rm_rf "$CURRENT_BUILD_DIR"
+        CURRENT_BUILD_DIR=""
+        ERROR_COUNT=$((ERROR_COUNT + 1))
+        continue
+    fi
+    safe_rm_rf "$linux_unpack"
+    linux_name="$final_linux_name"
+
+    # Step 5g: Repackage combined zip in tmp
     # Packages the Linux tar.xz and Windows zip together into <app>-<ver>-<suffix>.zip.
     log_info "Packaging archives into $NEW_ZIP_NAME in tmp..."
     if ! (cd "$CURRENT_BUILD_DIR" && zip -q "$NEW_ZIP_NAME" "$linux_name" "$win_name"); then
@@ -1429,7 +1396,7 @@ for entry in "${PACKAGES[@]}"; do
         continue
     fi
 
-    # Step 5g: Verify repackaged zip integrity in tmp (unzip -tq & non-empty check)
+    # Step 5h: Verify repackaged zip integrity in tmp (unzip -tq & non-empty check)
     log_info "Verifying repackaged zip integrity in tmp..."
     if [[ ! -s "${CURRENT_BUILD_DIR}/${NEW_ZIP_NAME}" ]] || ! verify_zip_integrity "${CURRENT_BUILD_DIR}/${NEW_ZIP_NAME}"; then
         log_error "Repackaged zip failed integrity verification in tmp: ${NEW_ZIP_NAME}"

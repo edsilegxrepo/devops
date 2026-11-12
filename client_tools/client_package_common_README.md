@@ -347,15 +347,39 @@ download_asset "https://example.com/app.exe" "/tmp/app.exe" "abcdef12345..." "sh
   - `$2`: Destination extraction directory.
 
 #### `is_artifact_file <filename>`
-- **Description**: Evaluates if a filename matches redundant packaging files (licenses, notices, OFL font declarations).
+- **Description**: Evaluates if a filename matches redundant packaging files (licenses, notices, OFL font declarations, asset documentation, portable markers).
 - **Matching Rules** (case-insensitive):
-  - `license*`, `*licence*`, `notice*`, `attribution*`, `ofl-*.txt`, `ofl.txt`
+  - `license*`, `*licence*`, `notice*`, `attribution*`, `ofl-*.txt`, `ofl.txt`, `assets.md`, `portable.txt`
 - **Exit Code**: `0` if file is an artifact to prune; `1` otherwise.
 
 #### `clean_zip_artifacts <zip_path>`
-- **Description**: Inspects table of contents of an existing `.zip` archive via `unzip -Z1` and purges matching artifact files in place using `zip -q -d` or `7za d` without full extraction.
+- **Description**: Inspects table of contents of an existing `.zip` archive via `unzip -Z1` and purges matching artifact files or `licenses/` subfolders in place using `zip -q -d` or `7za d` without full extraction.
 - **Parameters**:
   - `$1`: Target `.zip` file path.
+
+#### `strip_base_directory <target_dir>`
+- **Description**: Inspects an unpacked archive directory. If the directory contains exactly one top-level folder entry and no files (e.g. `pdfcraft-0.21.0-windows-x64-portable/`), it automatically moves all nested items up into `target_dir` and removes the wrapper folder.
+- **Parameters**:
+  - `$1`: Target unpacked directory path.
+
+#### `prune_directory_artifacts <target_dir>`
+- **Description**: Recursively scans an unpacked directory tree:
+  1. Recursively finds and purges any `licenses/` or `license/` subfolders (e.g. in app root or `share/doc/<app>/licenses/`).
+  2. Recursively deletes redundant packaging files: `LICENSE*`, `*LICENCE*`, `NOTICE*`, `ATTRIBUTION*`, `OFL*.txt`, `ASSETS.md`, and `portable.txt`.
+- **Parameters**:
+  - `$1`: Target unpacked directory path.
+
+#### `repack_directory_to_zip <content_dir> <dest_zip>`
+- **Description**: Packages the contents of `content_dir` directly into `dest_zip` without an enclosing top-level folder, and verifies zip CRC integrity.
+- **Parameters**:
+  - `$1`: Source content directory.
+  - `$2`: Destination `.zip` archive path.
+
+#### `repack_directory_to_tar_xz <content_dir> <dest_tar_xz>`
+- **Description**: Compresses the contents of `content_dir` directly into `dest_tar_xz` without an enclosing top-level folder, applying multi-threaded `xz -9 -T0` compression and normalized root ownership (`owner=0:group=0`), and verifies tar stream integrity.
+- **Parameters**:
+  - `$1`: Source content directory.
+  - `$2`: Destination `.tar.xz` archive path.
 
 #### `prune_root_licenses <target_dir>`
 - **Description**: Removes redundant license files (`LICENSE*`, `LICENSES*`, `NOTICE*`, `ATTRIBUTION*`, `OFL*.txt`) directly located in the root of an unpacked directory tree.

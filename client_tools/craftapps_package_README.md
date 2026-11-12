@@ -13,8 +13,9 @@ The **Storytold Craft Apps Packaging & Deployment Utility** (`craftapps_package.
 
 ### 1.2 Core Business & Technical Objectives
 - **Multi-Platform Archive Unification**: Bundle corresponding 64-bit Linux (`.tar.xz`) and Windows (`.zip`) release binaries into a single, standardized archive (`<app>-<version>-win-lnx.zip`) for distribution.
-- **Packaging Artifact De-Bloating**: Prune redundant license and attribution files (`LICENSE*`, `*LICENCE*`, `NOTICE*`, `ATTRIBUTION*`, `OFL-*.txt`) directly from archives in-place to minimize package bloat and unclutter runtime folders.
-- **Linux XZ Transcoding**: Decompress `.tar.gz` and recompress using `xz -9` to produce `.tar.xz` tarballs, ensuring optimal compression ratios.
+- **Base Folder Normalization**: Automatically strips redundant top-level wrapper directories (e.g. `<app>-<ver>-windows-x64-portable/` or `<app>-<ver>-linux-x86_64/`), guaranteeing all binaries, models, and assets sit directly at the root of their respective distribution archives.
+- **Packaging Artifact De-Bloating**: Recursively prunes redundant license files (`LICENSE*`, `*LICENCE*`, `NOTICE*`, `ATTRIBUTION*`, `OFL-*.txt`, `ASSETS.md`, `portable.txt`) and deletes `licenses/` subfolders to minimize package bloat and unclutter runtime folders.
+- **Linux XZ Transcoding**: Decompresses `.tar.gz` and recompresses using multi-threaded `xz -9 -T0` to produce high-compression `.tar.xz` tarballs with standardized `0:0` (`root/root`) ownership.
 - **Zero-Corruption Guarantee (Transactional Staging)**: Protect destination directories against partial writes, download corruptions, or interrupted operations by performing all extraction, repackaging, and integrity checks within an isolated temporary workspace before touching production libraries.
 - **End-to-End Portable Deployment**: Rapidly install and deploy binaries into target directories with flexible formatting options (`--flatten` for executable binaries only, or structured extraction without the versioned archive root folder).
 - **Dual-Repository Synchronization**:
@@ -472,8 +473,8 @@ $ ./craftapps_package.sh --action build --app soundcraft --dry-run
    - soundcraft-1.3.0-linux-x86_64.tar.gz (https://github.com/storytold/soundcraft/releases/download/v1.3.0/soundcraft-1.3.0-linux-x86_64.tar.gz)
    - soundcraft-1.3.0-windows-x86_64.zip (https://github.com/storytold/soundcraft/releases/download/v1.3.0/soundcraft-1.3.0-windows-x86_64.zip)
 [OK] [DRY-RUN] Would verify archive integrity in tmp
-[OK] [DRY-RUN] Would prune artifact files (LICENSE*, NOTICE*, etc.) from soundcraft-1.3.0-windows-x86_64.zip
-[OK] [DRY-RUN] Would prune artifacts from soundcraft-1.3.0-linux-x86_64.tar.gz and recompress to .tar.xz
+[OK] [DRY-RUN] Would extract, strip base folder, and prune artifacts from soundcraft-1.3.0-windows-x86_64.zip
+[OK] [DRY-RUN] Would extract, strip base folder, prune artifacts, and recompress soundcraft-1.3.0-linux-x86_64.tar.gz to .tar.xz
 [OK] [DRY-RUN] Would package both into soundcraft-1.3.0-win-lnx.zip in tmp
 [OK] [DRY-RUN] Would verify package integrity in tmp
 [OK] [DRY-RUN] Would remove obsolete source version: soundcraft-1.2.0-win-lnx.zip

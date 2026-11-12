@@ -463,11 +463,11 @@ download_asset() {
 # ------------------------------------------------------------------------------
 # is_artifact_file <filename>
 # Checks if a filename matches redundant packaging files to prune:
-# LICENSE*, *LICENCE*, NOTICE*, ATTRIBUTION*, OFL-*.txt (case-insensitive)
+# LICENSE*, *LICENCE*, NOTICE*, ATTRIBUTION*, OFL-*.txt, ASSETS.md, portable.txt (case-insensitive)
 is_artifact_file() {
     local fname="$1"
     local lower="${fname,,}"
-    if [[ "$lower" == license* || "$lower" == *licence* || "$lower" == notice* || "$lower" == attribution* || "$lower" == ofl-*.txt || "$lower" == ofl.txt ]]; then
+    if [[ "$lower" == license* || "$lower" == *licence* || "$lower" == notice* || "$lower" == attribution* || "$lower" == ofl-*.txt || "$lower" == ofl.txt || "$lower" == assets.md || "$lower" == portable.txt ]]; then
         return 0
     fi
     return 1
@@ -483,7 +483,7 @@ clean_zip_artifacts() {
     while IFS= read -r entry || [[ -n "$entry" ]]; do
         [[ -z "$entry" ]] && continue
         local base="${entry##*/}"
-        if is_artifact_file "$base"; then
+        if is_artifact_file "$base" || [[ "${entry,,}" =~ (^|/)licenses(/|$) || "${entry,,}" =~ (^|/)license(/|$) ]]; then
             entries_to_remove+=("$entry")
         fi
     done < <(unzip -Z1 "$zip_path" 2>/dev/null || true)
@@ -496,6 +496,99 @@ clean_zip_artifacts() {
             7za d "$zip_path" "${entries_to_remove[@]}" >/dev/null 2>&1 || true
         fi
     fi
+}
+
+# strip_base_directory <target_dir>
+# If target_dir contains exactly one directory entry and no files, moves all contents
+# of that directory up into target_dir and removes the now-empty wrapper folder.
+strip_base_directory() {
+    local target_dir="$1"
+    [[ -d "$target_dir" ]] || return 0
+    shopt -s nullglob dotglob
+    local items=("${target_dir}"/*)
+    shopt -u nullglob dotglob
+    if [[ ${#items[@]} -eq 1 && -d "${items[0]}" ]]; then
+        local base_dir="${items[0]}"
+        local base_name
+        base_name=$(basename "$base_dir")
+        log_info "Stripping base folder: ${base_name}"
+        local tmp_mv="${target_dir}_tmp_mv_$$"
+        mv "$base_dir" "$tmp_mv"
+        shopt -s nullglob dotglob
+        local inner_items=("${tmp_mv}"/*)
+        for item in "${inner_items[@]}"; do
+            mv "$item" "${target_dir}/"
+        done
+        shopt -u nullglob dotglob
+        rmdir "$tmp_mv" 2>/dev/null || rm -rf "$tmp_mv" 2>/dev/null || true
+    fi
+}
+
+# prune_directory_artifacts <target_dir>
+# Recursively removes artifact files (licenses, notices, attributions, OFL,
+# ASSETS.md, portable.txt) and any licenses subfolder.
+prune_directory_artifacts() {
+    local target_dir="$1"
+    [[ -d "$target_dir" ]] || return 0
+
+    # 1. Remove licenses/ or license/ subfolders wherever they exist
+    find "$target_dir" -type d \( -iname "licenses" -o -iname "license" \) -prune -exec rm -rf {} + 2>/dev/null || true
+
+    # 2. Remove packaging artifact files
+    find "$target_dir" -type f \( \
+        -iname "license*" -o \
+        -iname "*licence*" -o \
+        -iname "notice*" -o \
+        -iname "attribution*" -o \
+        -iname "ofl-*.txt" -o \
+        -iname "ofl.txt" -o \
+        -iname "assets.md" -o \
+        -iname "portable.txt" \
+    \) -delete 2>/dev/null || true
+}
+
+# repack_directory_to_zip <content_dir> <dest_zip>
+# Packages content_dir directly into dest_zip without a top-level wrapper directory.
+repack_directory_to_zip() {
+    local content_dir="$1"
+    local dest_zip="$2"
+    [[ -d "$content_dir" ]] || return 1
+    safe_rm_f "$dest_zip"
+    (cd "$content_dir" && zip -q -r "$dest_zip" .)
+    if ! verify_zip_integrity "$dest_zip"; then
+        log_error "Corrupted zip archive generated: $(basename "$dest_zip")"
+        safe_rm_f "$dest_zip"
+        return 1
+    fi
+    return 0
+}
+
+# repack_directory_to_tar_xz <content_dir> <dest_tar_xz>
+# Recompresses content_dir into a high-ratio .tar.xz archive with standardized
+# root/root ownership without a top-level wrapper directory.
+repack_directory_to_tar_xz() {
+    local content_dir="$1"
+    local dest_tar_xz="$2"
+    [[ -d "$content_dir" ]] || return 1
+    safe_rm_f "$dest_tar_xz"
+
+    (
+        cd "$content_dir"
+        shopt -s nullglob dotglob
+        local items=(*)
+        shopt -u nullglob dotglob
+        if [[ ${#items[@]} -gt 0 ]]; then
+            tar --force-local --owner=0 --group=0 --numeric-owner -cf - "${items[@]}" | xz -9 -T0 > "$dest_tar_xz"
+        else
+            tar --force-local --owner=0 --group=0 --numeric-owner -cf - --files-from /dev/null | xz -9 -T0 > "$dest_tar_xz"
+        fi
+    )
+    if ! verify_tar_xz_integrity "$dest_tar_xz"; then
+        log_error "Corrupted xz archive generated: $(basename "$dest_tar_xz")"
+        safe_rm_f "$dest_tar_xz"
+        return 1
+    fi
+    return 0
 }
 
 # prune_electron_locales <locales_dir> [keep_locale]
@@ -515,7 +608,7 @@ recompress_folder_to_tar_xz() {
     local folder_to_pack="$2"
     local dest_tar_xz="$3"
 
-    (cd "$parent_dir" && tar --force-local --owner=0 --group=0 --numeric-owner -cf - "$folder_to_pack" | xz -9 > "$dest_tar_xz")
+    (cd "$parent_dir" && tar --force-local --owner=0 --group=0 --numeric-owner -cf - "$folder_to_pack" | xz -9 -T0 > "$dest_tar_xz")
     if ! tar --force-local -tJf "$dest_tar_xz" >/dev/null 2>&1; then
         log_error "Corrupted xz archive generated: $(basename "$dest_tar_xz")"
         safe_rm_f "$dest_tar_xz"
