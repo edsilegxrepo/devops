@@ -34,7 +34,7 @@ The orchestrator is fully compatible with both **Cygwin** and **MSYS2/Git-Bash**
 - **Cygwin**: Uses `/cygdrive/` (e.g., `/cygdrive/c/`).
 - **MSYS2**: Uses native roots (e.g., `/c/`).
 
-This dynamic resolution ensures that hardcoded paths remain functional regardless of the POSIX layer being used on Windows.
+This dynamic resolution ensures that default staging paths remain functional regardless of the POSIX layer being used on Windows.
 
 ### 7. Cygwin-Windows Interoperability
 To support reliable metadata extraction, the script utilizes `cygpath -w` when communicating with the Windows Go toolchain. This prevents "File Not Found" errors that occur when passing POSIX-style paths to native Windows binaries.
@@ -43,7 +43,7 @@ To support reliable metadata extraction, the script utilizes `cygpath -w` when c
 To ensure enterprise-grade reliability, the script implements "Bash Strict Mode" (`set -euo pipefail`). This enforces immediate abortion on unhandled errors and ensures that failures in parallel subshells are correctly detected.
 
 ### 9. Defensive Variable Management
-*   **Immutability**: Critical configuration constants (paths, compiler strings) are declared as `readonly` to prevent accidental mutation during the parallel execution phase.
+*   **Immutability**: Critical configuration constants (paths, Zig toolchain, compiler strings) are declared as `readonly` to prevent accidental mutation during the parallel execution phase. Configurable base directories (`INSTALL_BASE`, `COMPILE_BASE`, `DISTRIB_BASE`), `ZIG_BIN`/`CC_*`, and `DO_FLATTEN` resolve via CLI flags, environment variables, or built-in defaults, canonicalize via `cygpath -u` and `realpath -m`, pass safety validation against filesystem/system/drive roots and overlapping workspaces, and lock as `readonly` prior to execution.
 *   **Safe Expansion**: All variable accesses use defensive expansion (e.g., `${VAR:-}`) to maintain stability under `nounset` conditions, especially for optional function arguments and environment metadata.
 
 ---
@@ -53,35 +53,39 @@ To ensure enterprise-grade reliability, the script implements "Bash Strict Mode"
 ### Operational Flow Diagram
 ```mermaid
 graph TD
-    Start([Execute Script]) --> ParseArgs[Parse CLI Arguments]
-    ParseArgs --> Clean{--clean-cache?}
-    Clean -- Yes --> Wipe[Wipe Zig/Go Caches]
-    Clean -- No --> ActionType
+    Start(["Execute Script"]) --> ParseArgs["Parse CLI Arguments"]
+    ParseArgs --> HelpCheck{"--help or invalid arg?"}
+    HelpCheck -- Yes --> ShowHelp["Display Help & Exit 1"]
+    HelpCheck -- No --> Validate["Canonicalize Paths, Validate Roots/Overlap, Resolve Zig & Lock readonly"]
+    Validate --> Maint["Pre-Execution Maintenance (--clean-cache / --purge-distrib / --report-distrib)"]
+    Maint --> MaintOnly{"Maintenance only (no build target)?"}
+    MaintOnly -- Yes --> ExitMaint(["Exit 0"])
+    MaintOnly -- No --> ActionType
 
     subgraph ExecutionPhase ["Execution Phase (Parallel vs Single)"]
-        ActionType{build_all or single?}
-        ActionType -- build_all --> LaunchAll[Launch all build functions in background]
-        ActionType -- single --> LaunchOne[Execute specific build function]
+        ActionType{"build_all or single?"}
+        ActionType -- build_all --> LaunchAll["Launch all build_* functions in background"]
+        ActionType -- single --> LaunchOne["Execute specific build_* function"]
         
-        LaunchAll --> Monitor[PID Monitoring Loop]
-        LaunchOne --> RepoPrep[repoPrep: Clone & Versioning]
+        LaunchAll --> Monitor["PID Monitoring Loop (wait -n)"]
+        LaunchOne --> RepoPrep["repoPrep: Purge Prior Tool Artifacts, Clone & Version"]
         
-        RepoPrep --> Analysis[codeAnalysis: Tidy, Format, Vet]
-        Analysis --> Compile[codeBuild: Multi-OS Compilation]
-        Compile --> Archive[generateArchive: tar.xz Compression]
+        RepoPrep --> Analysis["codeAnalysis: Tidy, Format, Vet"]
+        Analysis --> Compile["codeBuild / codeInstall: Multi-OS Compilation"]
+        Compile --> Archive["generateArchive: tar.xz to DISTRIB_BASE (flat default) or DISTRIB_BASE/<tool>/ (--no-flatten)"]
     end
 
-    Archive --> Move[Move to DISTRIB_BASE]
-    Move --> Cleanup[Purge Temp Workspace]
-    Monitor --> Results[Report Success/Failure & Counts]
-    Results --> End([Conclusion: Exit with Failure Count])
+    Archive --> Cleanup["Purge Staged Binaries"]
+    Monitor --> Results["Report Success/Failure & Optional --report-distrib"]
+    Cleanup --> Results
+    Results --> End(["Conclusion: Exit with Failure Count"])
 ```
 
 ### Data Sequence
-1.  **Ingress**: The script clones the source code from remote repositories into the `compile/` directory.
+1.  **Ingress**: The script clones the source code from remote repositories into `COMPILE_BASE` (default: `<INSTALL_BASE>/compile`).
 2.  **Metadata generation**: Git tags and commit hashes are transformed into a `PKG_VER` identifier.
 3.  **Transformation**: Source code is processed by the Go compiler. If CGO is enabled, Zig acts as the linker.
-4.  **Egress**: Binary artifacts are bundled with OS-specific extensions (`.exe` for Windows) and moved to the `distrib/` folder as compressed `.tar.xz` archives.
+4.  **Egress**: Binary artifacts are bundled with OS-specific extensions (`.exe` for Windows) and written directly to `DISTRIB_BASE` (default: `<INSTALL_BASE>/distrib`) as compressed `.tar.xz` archives by default (flat layout), or grouped into per-tool subdirectories when `--no-flatten` is specified.
 
 ---
 
@@ -261,6 +265,7 @@ The following table provides a high-level summary of the tools included in this 
 | **Version Control**| `git` | Repository cloning and version metadata. |
 | **Utilities** | `tar`, `xz` | Packaging and compression. |
 | **Utilities** | `nproc` | CPU core detection for build optimization. |
+| **Utilities** | `cygpath`, `realpath` | Cross-platform path conversion and canonicalization (`coreutils`). |
 | **Environment** | `Cygwin` or `MSYS2/Git-Bash` | Required for running on Windows systems. |
 
 ---
@@ -271,9 +276,15 @@ The following table provides a high-level summary of the tools included in this 
 | :--- | :--- | :--- | :--- |
 | `--help` | Displays the help menu and list of available targets. | Flag | N/A |
 | `--clean-cache` | Clears the Zig global cache and Go build cache before building. | Flag | N/A |
-| `--purge-distrib` | Deletes distribution subdirectories for the selected build target(s). | Flag | N/A |
-| `--report-distrib` | Generates a formatted table of all currently compiled binaries. | Flag | N/A |
-| `--scope=<list>` | Restricts maintenance to a comma-separated list (e.g.: `gosec,golangci-lint`) or wildcard pattern (e.g., `go*`) of packages. | Option | N/A |
+| `--purge-distrib` | Deletes Go analyzer distribution artifacts (both per-tool subdirectories and flat `.tar.xz` archives for known `MASTER_TOOLS`, leaving unrelated files in shared directories untouched). | Flag | N/A |
+| `--report-distrib` | Generates a formatted table of all currently compiled binaries (scans both tree and flat layouts). | Flag | N/A |
+| `--flatten` | Places all generated `.tar.xz` archives directly inside `DISTRIB_BASE` (default behavior; kept for explicit invocations). | Flag | `true` |
+| `--no-flatten` | Groups generated `.tar.xz` archives into per-tool `<DISTRIB_BASE>/<tool>/` subdirectories instead of a flat directory. | Flag | `false` |
+| `--install-base <dir>` | Overrides base root directory (`--install-base <dir>` or `--install-base=<dir>`, or `INSTALL_BASE` env var). Re-roots both `COMPILE_BASE` and `DISTRIB_BASE` unless explicitly overridden. | Option | `<DRIVE_PREFIX>/f/stage/install` |
+| `--compile-base <dir>` | Overrides temporary clone and build workspace (`--compile-base <dir>` or `--compile-base=<dir>`, or `COMPILE_BASE` env var). | Option | `<INSTALL_BASE>/compile` |
+| `--distrib-base <dir>` | Overrides destination directory for compiled `.tar.xz` archives (`--distrib-base <dir>` or `--distrib-base=<dir>`, or `DISTRIB_BASE` env var). | Option | `<INSTALL_BASE>/distrib` |
+| `--zig-bin <file>` | Overrides Zig binary path for CGO cross-compilation (`--zig-bin <file>` or `--zig-bin=<file>`, or `ZIG_BIN` env var). | Option | `zig` in `PATH`, else `d:/dev/zig/zig` |
+| `--scope <list>` | Restricts maintenance to a comma-separated list (e.g., `gosec,golangci-lint`) or wildcard pattern (e.g., `go*`) of packages (`--scope <list>` or `--scope=<list>`). | Option | N/A |
 | `build_all` | Compiles all 21 targets concurrently in parallel mode. | Target | N/A |
 | `build_<name>` | Build a specific tool (e.g., `build_gofumpt`, `build_nilaway`). | Target | N/A |
 
@@ -325,14 +336,25 @@ The `--scope` flag allows you to run maintenance tasks on a specific subset of t
     ./gobuild_code-analyzers.sh --purge-distrib --report-distrib --scope=gopls,mockery
     ```
 
+### 7. Custom Portable Directories and Output Layout
+Stage all compiled archives flatly (default) into a custom release folder while using a fast scratch drive for cloning and compiling:
+```bash
+./gobuild_code-analyzers.sh --compile-base=d:/scratch/compile --distrib-base=f:/stage/upload/pending build_all
+```
+Or re-root the entire staging hierarchy using `--install-base` and opt into per-tool subdirectories with `--no-flatten`:
+```bash
+./gobuild_code-analyzers.sh --no-flatten --install-base=/d/dev/go-analyzers-stage build_staticcheck
+```
+
 ---
 
 ## Viewing Results
 After completion, the script provides a comprehensive summary:
 `All builds finished in Xm Ys. Success: <N>, Failures: <M>, Status: PASS/FAIL`
 
-The archives will be located in:
-`<INSTALL_BASE>\distrib/<package_name>/<package>-<version>_<os>-amd64.tar.xz`
+The archives will be located in `DISTRIB_BASE` (default: `<INSTALL_BASE>/distrib`):
+*   **Default (Flattened Layout)**: `<DISTRIB_BASE>/<package>-<version>_<os>-amd64.tar.xz`
+*   **Tree Layout (`--no-flatten`)**: `<DISTRIB_BASE>/<package_name>/<package>-<version>_<os>-amd64.tar.xz`
 
 The script's exit code will be equal to the number of failed builds (0 for total success).
 

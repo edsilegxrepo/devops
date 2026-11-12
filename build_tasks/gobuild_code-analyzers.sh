@@ -13,7 +13,7 @@
 #   - Version Integrity: Automatically derive semantic versions or short commit hashes to ensure every binary's origin is traceable.
 #
 # Core Components:
-#   - Global Configuration: Defines centralized paths, build options (PIE, trimpath), and cross-compilation environment variables.
+#   - Global Configuration: Defines centralized paths, build options (PIE, trimpath, buildvcs=false), and cross-compilation environment variables.
 #   - Build Utilities: Modular shell functions orchestration (`repoPrep`, `codeAnalysis`, `codeBuild`, `generateArchive`) that form the backbone of the pipeline.
 #   - Tool-Specific Wrappers: Lightweight subshell environments that configure package-specific variables and metadata.
 #   - Parallel Execution Engine: A robust process management system that utilizes background subshells and PID tracking to build all tools concurrently.
@@ -25,9 +25,9 @@
 #   4. Multi-Target Compilation: Dispatches build commands to the Go compiler, injecting version flags via `LDFLAGS` and routing CGO calls through Zig.
 #   5. Distribution & Cleanup: Compresses binaries into architecture-specific `.tar.xz` archives, moves them to the `distrib` folder, and purges temporary working files.
 # -------------------------------------------------------------------
-# Syntax:  ./gobuild_code-analyzers.sh [--clean-cache] [all | <build_function>]
-# Example: ./gobuild_code-analyzers.sh --clean-cache all
-# Example: ./gobuild_code-analyzers.sh build_gosec
+# Syntax:  ./gobuild_code-analyzers.sh [options] [build_all | <build_function>]
+# Example: ./gobuild_code-analyzers.sh --clean-cache build_all
+# Example: ./gobuild_code-analyzers.sh --distrib-base=/tmp/distrib build_gosec
 #
 # References: see below the toolchain organized by the nature of each tool.
 # +----------------+------------------------------------------+--------------------------------------------+------------------------------------------+
@@ -101,11 +101,13 @@ if [ -z "${GOPATH:-}" ]; then
 fi
 
 # Centralized paths for source code, binaries, and distribution archives.
-readonly INSTALL_BASE="${DRIVE_PREFIX}/f/stage/install"
-readonly COMPILE_BASE="${INSTALL_BASE}/compile" # Temporary workspace for cloning and building
-readonly DISTRIB_BASE="${INSTALL_BASE}/distrib" # Final destination for compressed archives
-readonly BUILD_HOME="bin"                       # Subdirectory within each tool where binaries are placed
-readonly TAR_OPTS="-Jcf"                        # tar options: J (xz), c (create), f (file)
+# Precedence: CLI flags > Environment variables > Built-in defaults.
+readonly DEFAULT_INSTALL_BASE="${DRIVE_PREFIX}/f/stage/install"
+INSTALL_BASE="${INSTALL_BASE:-${DEFAULT_INSTALL_BASE}}"
+COMPILE_BASE="${COMPILE_BASE:-}" # Defaults to ${INSTALL_BASE}/compile after CLI parsing
+DISTRIB_BASE="${DISTRIB_BASE:-}" # Defaults to ${INSTALL_BASE}/distrib after CLI parsing
+readonly BUILD_HOME="bin"        # Subdirectory within each tool where binaries are placed
+readonly TAR_OPTS="-Jcf"         # tar options: J (xz), c (create), f (file)
 
 # System and execution metadata
 readonly CPU_CORES=$(nproc)             # Detected CPU cores for parallel build optimization
@@ -113,15 +115,16 @@ readonly LOG_PATH="${TMPDIR:-/tmp}/logs/golang" # Path to store build logs for b
 SECONDS=0                      # Timer for calculating total execution duration
 ACTION=""                      # Current build target (determined by CLI arguments)
 DO_CLEAN=false                 # Flag to trigger cache cleanup before execution
-DO_PURGE_DIST=false            # Flag to purge distribution subdirectories
+DO_PURGE_DIST=false            # Flag to purge distribution artifacts
 DO_REPORT_DIST=false           # Flag to report existing distribution archives
+DO_FLATTEN="${DO_FLATTEN:-true}" # Place archives directly in DISTRIB_BASE by default (use --no-flatten for subdirs)
 DO_SCOPE=""                    # Specific tool scope for maintenance tasks
 
 # Go build settings & optimizations
 readonly GH_BASE_URL="https://github.com"
 export GOPROXY="https://proxy.golang.org,direct"
-# GO_OPTS: -trimpath (removes local file paths), -buildmode=pie (Security: ASLR support), -p (Parallelism)
-declare -a GO_OPTS=(-trimpath -buildmode=pie "-p=$((CPU_CORES / 2))")
+# GO_OPTS: -trimpath (removes local file paths), -buildmode=pie (Security: ASLR support), -buildvcs=false (omits VCS metadata), -p (Parallelism)
+declare -a GO_OPTS=(-trimpath -buildmode=pie -buildvcs=false "-p=$((CPU_CORES / 2))")
 readonly BASE_LDFLAGS="-s -w" # Default size-reduction flags
 readonly GOARCH=amd64
 declare -a GOOS_LIST=(windows linux) # Compile for both Windows and Linux simultaneously
@@ -139,11 +142,12 @@ fi
 # CGO and Cross-Compilation (Zig) settings
 # CGO_LDFLAGS: Forces static linking of external libraries (glibc/musl) for portability.
 readonly CGO_LDFLAGS="-linkmode external -extldflags '-static'"
-readonly ZIG_BIN="d:/dev/zig/zig" # Path to the Zig executable (used as a C compiler)
+readonly DEFAULT_ZIG_BIN="d:/dev/zig/zig"
+ZIG_BIN="${ZIG_BIN:-}" # Resolved after CLI parsing (--zig-bin > ZIG_BIN env > PATH 'zig' > d:/dev/zig/zig)
 readonly ZIG_CACHE="$(cygpath "${LOCALAPPDATA:-}")/zig"
-# CC_* variables: Direct Zig to target specific OS/libc families (GNU for Windows, MUSL for Linux).
-readonly CC_WINDOWS="${ZIG_BIN} cc -target x86_64-windows-gnu"
-readonly CC_LINUX="${ZIG_BIN} cc -target x86_64-linux-musl"
+# CC_* variables: Direct Zig to target specific OS/libc families (finalized after ZIG_BIN resolution).
+CC_WINDOWS=""
+CC_LINUX=""
 
 # --- Pre-Execution Guard: Instance Locking & Lifecycle Management ---
 LOCK_FILE="${TMPDIR:-/tmp}/gobuild_code-analyzers.lock"
@@ -178,6 +182,42 @@ echo $$ > "$LOCK_FILE"
 trap cleanup EXIT
 trap "exit 1" INT TERM
 
+# Normalizes Windows, POSIX, or relative paths into a canonical absolute POSIX path.
+function normalizePath() {
+  local raw="${1:-}"
+  if [[ -z "${raw}" || "${raw}" =~ ^[[:space:]]*$ ]]; then
+    echo ""
+    return 0
+  fi
+  local norm
+  if command -v cygpath >/dev/null 2>&1; then
+    norm=$(cygpath -u "${raw}")
+  else
+    norm="${raw//\\//}"
+    if [[ "${norm}" != /* ]]; then
+      norm="${PWD}/${norm}"
+    fi
+  fi
+  if command -v realpath >/dev/null 2>&1; then
+    norm=$(realpath -m "${norm}")
+  else
+    while [[ "${norm}" != "/" && "${norm}" == */ ]]; do
+      norm="${norm%/}"
+    done
+  fi
+  echo "${norm}"
+}
+
+# Guards against dangerous filesystem, system, or drive roots being passed as base directories.
+function validateBasePath() {
+  local label="$1"
+  local path="$2"
+  if [[ -z "${path}" || "${path}" == *".."* || "${path}" =~ ^(/+|/bin|/sbin|/etc|/usr|/var|/tmp|/opt|/home|/root|/dev|/proc|/sys|/lib|/lib64|/cygdrive|/cygdrive/[a-zA-Z]|/[a-zA-Z])$ ]]; then
+    echo "Fatal Error: Unsafe or invalid ${label} path '${path}'. Refusing to operate on filesystem, system, or drive root."
+    exit 1
+  fi
+}
+
 # Displays the script usage guide and available build targets.
 function displayHelp() {
   echo "-------------------------------------------------------------------"
@@ -186,11 +226,17 @@ function displayHelp() {
   echo "Syntax:  $(basename "$0") [option] [target]"
   echo ""
   echo "Options:"
-  echo "  --help, -h            Display this help menu"
-  echo "  --clean-cache         Clean Zig and Go caches"
-  echo "  --purge-distrib       Purge distribution subdirs for selected target(s)"
-  echo "  --report-distrib      List all compiled binaries in a table"
-  echo "  --scope=<pkg1,pkg2>   Restrict maintenance to specific tools (no build)"
+  echo "  --help, -h               Display this help menu"
+  echo "  --clean-cache            Clean Zig and Go caches"
+  echo "  --purge-distrib          Purge distribution artifacts for selected target(s)"
+  echo "  --report-distrib         List all compiled binaries in a table"
+  echo "  --flatten                Place all archives directly in distrib-base (default)"
+  echo "  --no-flatten             Group archives into per-tool subdirs (<distrib-base>/<tool>/)"
+  echo "  --install-base <dir>     Base directory for compile and distrib (default: ${DEFAULT_INSTALL_BASE})"
+  echo "  --compile-base <dir>     Temporary build/clone workspace (default: <install-base>/compile)"
+  echo "  --distrib-base <dir>     Target directory for release archives (default: <install-base>/distrib)"
+  echo "  --zig-bin <file>         Path to Zig binary for CGO builds (default: zig in PATH or ${DEFAULT_ZIG_BIN})"
+  echo "  --scope <pkg1,pkg2>      Restrict maintenance to specific tools (no build)"
   echo ""
   echo "Targets:"
   echo "  build_all             Build every tool in parallel"
@@ -231,9 +277,9 @@ function cleanCache() {
   go clean -cache
 }
 
-# Purges distribution subdirectories for the selected target or all tools.
+# Purges Go analyzer distribution artifacts for the selected target or all tools.
 # Arguments: $1 (optional filter: build_xxx or all).
-# Functionality: Deletes tool-specific folders in DISTRIB_BASE to ensure a fresh release state.
+# Functionality: Deletes tool-specific subdirectories and flat .tar.xz archives in DISTRIB_BASE.
 function purgeDistrib() {
   local filter="${1:-}"
   local target_pn="${filter#build_}"
@@ -249,9 +295,12 @@ function purgeDistrib() {
         # Match using Bash pattern matching (supports wildcards like go*)
         # shellcheck disable=SC2053 # Intentional glob pattern match
         if [[ "${tool}" == ${scope_item} ]]; then
-          echo "Purging distribution directory for ${tool}..."
+          echo "Purging distribution artifacts for ${tool}..."
           if [[ -n "${tool}" && "${tool}" != "/" ]]; then
             rm -rf "${DISTRIB_BASE:?}/${tool:?}"
+            set +f
+            rm -f "${DISTRIB_BASE:?}/${tool:?}-"*.tar.xz
+            set -f
             matched=true
           fi
         fi
@@ -260,9 +309,14 @@ function purgeDistrib() {
     done
     set +f
   elif [ "${target_pn}" == "all" ] || [ -z "${target_pn}" ]; then
-    echo "Purging all distribution directories..."
-    # Robust deletion of the entire distribution contents.
-    rm -rf "${DISTRIB_BASE:?}"/*
+    echo "Purging all Go analyzer distribution artifacts in ${DISTRIB_BASE}..."
+    local tool
+    for tool in "${MASTER_TOOLS[@]}"; do
+      if [[ -n "${tool}" && "${tool}" != "/" ]]; then
+        rm -rf "${DISTRIB_BASE:?}/${tool:?}"
+        rm -f "${DISTRIB_BASE:?}/${tool:?}-"*.tar.xz
+      fi
+    done
   else
     echo "Skipping purge: Unrecognized target '${target_pn}'"
   fi
@@ -292,13 +346,32 @@ function reportDistrib() {
   local -A pkg_archives=()
   local -A pkg_versions=()
 
-  # Use a standard for loop with native shell expansion to avoid process fork overhead
-  for f in "${DISTRIB_BASE}"/*/*.tar.xz; do
+  # Scan both tree subdirectories (<distrib>/<tool>/*.tar.xz) and flat archives (<distrib>/*.tar.xz)
+  for f in "${DISTRIB_BASE}"/*/*.tar.xz "${DISTRIB_BASE}"/*.tar.xz; do
     [ -f "${f}" ] || continue
 
-    # Fast path: Use shell parameter expansion instead of basename/dirname
+    local fname="${f##*/}"
     local tmp_dir="${f%/*}"
-    local PN_LOCAL="${tmp_dir##*/}"
+    local PN_LOCAL=""
+
+    if [ "${tmp_dir}" != "${DISTRIB_BASE}" ]; then
+      local dir_name="${tmp_dir##*/}"
+      local candidate
+      for candidate in "${MASTER_TOOLS[@]}"; do
+        if [ "${dir_name}" == "${candidate}" ] && [[ "${fname}" == "${candidate}-"* ]]; then
+          PN_LOCAL="${candidate}"
+          break
+        fi
+      done
+    else
+      local candidate
+      for candidate in "${MASTER_TOOLS[@]}"; do
+        if [[ "${fname}" == "${candidate}-"* ]] && [ "${#candidate}" -gt "${#PN_LOCAL}" ]; then
+          PN_LOCAL="${candidate}"
+        fi
+      done
+    fi
+    [ -z "${PN_LOCAL}" ] && continue
     
     # Apply filtering logic if a specific target or scope is requested
     if [ -n "${target_pn}" ] && [ "${target_pn}" != "all" ] && [ "${target_pn}" != "HELP" ]; then
@@ -318,8 +391,6 @@ function reportDistrib() {
       [ "$matched" = false ] && continue
     fi
 
-    local fname="${f##*/}"
-    
     # Extract version metadata: Strip tool name and trailing OS/arch suffix
     local tmp="${fname#"${PN_LOCAL}"-}"
     local version="${tmp%_*}"
@@ -403,11 +474,18 @@ function pkgVersion() {
 function repoPrep() {
   local PN="${1:-}" ORG="${2:-}" REPO="${3:-}" FILTER="${4:-}" MODE="${5:-}"
   echo -e "\n----- Building ${PN} -----"
+  mkdir -p "${COMPILE_BASE}"
   cd "${COMPILE_BASE}" || exit
-  # Clean up existing distribution artifacts for this tool
+  # Clean up existing distribution artifacts (both flat and tree layouts) for this tool
   rm -rf "${DISTRIB_BASE:?}/${PN:?}"
+  rm -f "${DISTRIB_BASE:?}/${PN:?}-"*.tar.xz
   # Initialize the compile workspace and the final distribution folder
-  mkdir -p "${PN}/${BUILD_HOME}" "${DISTRIB_BASE}/${PN}" && cd "${PN}" || exit
+  if [ "${DO_FLATTEN}" = true ]; then
+    mkdir -p "${PN}/${BUILD_HOME}" "${DISTRIB_BASE}"
+  else
+    mkdir -p "${PN}/${BUILD_HOME}" "${DISTRIB_BASE}/${PN}"
+  fi
+  cd "${PN}" || exit
 
   if [ "$MODE" == "NOCLONE" ]; then
     mkdir -p "${REPO}" && cd "${REPO}" || exit
@@ -604,8 +682,12 @@ function generateArchive() {
   done
 
   # ATOMIC PACKAGING: Ensure both Windows and Linux archives are created successfully.
-  local win_archive="${DISTRIB_BASE}/${PKG_NAME}/${PKG_NAME}-${PKG_VER}_windows-amd64.tar.xz"
-  local lin_archive="${DISTRIB_BASE}/${PKG_NAME}/${PKG_NAME}-${PKG_VER}_linux-amd64.tar.xz"
+  local distrib_target_dir="${DISTRIB_BASE}/${PKG_NAME}"
+  if [ "${DO_FLATTEN}" = true ]; then
+    distrib_target_dir="${DISTRIB_BASE}"
+  fi
+  local win_archive="${distrib_target_dir}/${PKG_NAME}-${PKG_VER}_windows-amd64.tar.xz"
+  local lin_archive="${distrib_target_dir}/${PKG_NAME}-${PKG_VER}_linux-amd64.tar.xz"
 
   tar "${TAR_OPTS}" "${win_archive}" "${win_bin_array[@]}" || return 1
   
@@ -1064,18 +1146,102 @@ while [[ "$#" -gt 0 ]]; do
       DO_REPORT_DIST=true
       shift
       ;;
-    --scope=*)
-      DO_SCOPE="${1#--scope=}"
+    --flatten)
+      DO_FLATTEN=true
       shift
       ;;
+    --no-flatten)
+      DO_FLATTEN=false
+      shift
+      ;;
+    --install-base=*)
+      INSTALL_BASE="${1#--install-base=}"
+      if [ -z "${INSTALL_BASE}" ]; then
+        echo "Fatal Error: --install-base requires a non-empty directory path."
+        exit 1
+      fi
+      shift
+      ;;
+    --install-base)
+      if [ -z "${2:-}" ] || [[ "${2}" == -* ]]; then
+        echo "Fatal Error: --install-base requires a directory path argument."
+        exit 1
+      fi
+      INSTALL_BASE="$2"
+      shift 2
+      ;;
+    --compile-base=*)
+      COMPILE_BASE="${1#--compile-base=}"
+      if [ -z "${COMPILE_BASE}" ]; then
+        echo "Fatal Error: --compile-base requires a non-empty directory path."
+        exit 1
+      fi
+      shift
+      ;;
+    --compile-base)
+      if [ -z "${2:-}" ] || [[ "${2}" == -* ]]; then
+        echo "Fatal Error: --compile-base requires a directory path argument."
+        exit 1
+      fi
+      COMPILE_BASE="$2"
+      shift 2
+      ;;
+    --distrib-base=*)
+      DISTRIB_BASE="${1#--distrib-base=}"
+      if [ -z "${DISTRIB_BASE}" ]; then
+        echo "Fatal Error: --distrib-base requires a non-empty directory path."
+        exit 1
+      fi
+      shift
+      ;;
+    --distrib-base)
+      if [ -z "${2:-}" ] || [[ "${2}" == -* ]]; then
+        echo "Fatal Error: --distrib-base requires a directory path argument."
+        exit 1
+      fi
+      DISTRIB_BASE="$2"
+      shift 2
+      ;;
+    --zig-bin=*)
+      ZIG_BIN="${1#--zig-bin=}"
+      if [[ -z "${ZIG_BIN}" || "${ZIG_BIN}" =~ ^[[:space:]]*$ ]]; then
+        echo "Fatal Error: --zig-bin requires a non-empty file path."
+        exit 1
+      fi
+      shift
+      ;;
+    --zig-bin)
+      if [ -z "${2:-}" ] || [[ "${2}" == -* ]] || [[ "${2}" =~ ^[[:space:]]*$ ]]; then
+        echo "Fatal Error: --zig-bin requires a file path argument."
+        exit 1
+      fi
+      ZIG_BIN="$2"
+      shift 2
+      ;;
+    --scope=*)
+      DO_SCOPE="${1#--scope=}"
+      if [[ -z "${DO_SCOPE}" || "${DO_SCOPE}" =~ ^[[:space:]]*$ ]]; then
+        echo "Fatal Error: --scope requires a non-empty tool list or pattern."
+        exit 1
+      fi
+      shift
+      ;;
+    --scope)
+      if [ -z "${2:-}" ] || [[ "${2}" == -* ]] || [[ "${2}" =~ ^[[:space:]]*$ ]]; then
+        echo "Fatal Error: --scope requires a tool list or pattern argument."
+        exit 1
+      fi
+      DO_SCOPE="$2"
+      shift 2
+      ;;
     build_all)
-      ACTION="build_all" # Set target to build all 20 tools concurrently
+      ACTION="build_all" # Set target to build all 21 tools concurrently
       shift
       ;;
     *)
-      # DYNAMIC DISPATCH: Check if the argument is a valid bash function name.
+      # DYNAMIC DISPATCH: Check if the argument is a valid build_* function name.
       # Using '--' ensures that arguments starting with '-' are treated as names, not declare options.
-      if declare -f -- "$1" >/dev/null; then
+      if [[ "$1" == build_* ]] && declare -f -- "$1" >/dev/null; then
         ACTION="$1"
         shift
       else
@@ -1090,6 +1256,50 @@ while [[ "$#" -gt 0 ]]; do
       ;;
   esac
 done
+
+# 0a. Early Help Exit (before path validation or maintenance side effects)
+if [ "${ACTION:-}" == "HELP" ]; then
+  displayHelp
+  exit 1
+fi
+
+# 0b. Resolve, Normalize, Validate, and Lock Base Paths & Zig Toolchain
+if [[ "${DO_FLATTEN}" != "true" && "${DO_FLATTEN}" != "false" ]]; then
+  echo "Fatal Error: Invalid DO_FLATTEN value '${DO_FLATTEN}'. Expected 'true' or 'false'."
+  exit 1
+fi
+
+INSTALL_BASE="$(normalizePath "${INSTALL_BASE}")"
+COMPILE_BASE="$(normalizePath "${COMPILE_BASE:-${INSTALL_BASE}/compile}")"
+DISTRIB_BASE="$(normalizePath "${DISTRIB_BASE:-${INSTALL_BASE}/distrib}")"
+
+validateBasePath "--install-base" "${INSTALL_BASE}"
+validateBasePath "--compile-base" "${COMPILE_BASE}"
+validateBasePath "--distrib-base" "${DISTRIB_BASE}"
+
+if [[ "${COMPILE_BASE}" == "${DISTRIB_BASE}" || "${DISTRIB_BASE}" == "${COMPILE_BASE}/"* || "${COMPILE_BASE}" == "${DISTRIB_BASE}/"* ]]; then
+  echo "Fatal Error: --compile-base ('${COMPILE_BASE}') and --distrib-base ('${DISTRIB_BASE}') must not be identical or nested within each other."
+  exit 1
+fi
+
+if [ -z "${ZIG_BIN}" ]; then
+  if command -v zig >/dev/null 2>&1; then
+    ZIG_BIN=$(command -v zig)
+  else
+    ZIG_BIN="${DEFAULT_ZIG_BIN}"
+  fi
+fi
+if command -v cygpath >/dev/null 2>&1 && [[ "${ZIG_BIN}" == /* || "${ZIG_BIN}" == *\\* ]]; then
+  ZIG_BIN=$(cygpath -m "${ZIG_BIN}")
+fi
+if [[ -z "${ZIG_BIN}" || "${ZIG_BIN}" =~ ^[[:space:]]*$ ]]; then
+  echo "Fatal Error: Invalid --zig-bin path '${ZIG_BIN}'."
+  exit 1
+fi
+CC_WINDOWS="${ZIG_BIN} cc -target x86_64-windows-gnu"
+CC_LINUX="${ZIG_BIN} cc -target x86_64-linux-musl"
+
+readonly INSTALL_BASE COMPILE_BASE DISTRIB_BASE DO_FLATTEN ZIG_BIN CC_WINDOWS CC_LINUX
 
 # 1. Validation Phase: Mutually Exclusive Arguments
 # --scope is strictly for maintenance tasks and cannot be used during a build operation.
@@ -1114,15 +1324,15 @@ if [ "${DO_CLEAN:-}" = true ] || [ "${DO_PURGE_DIST:-}" = true ] || [ "${DO_REPO
   fi
 fi
 
-# 2. Display Help Information
-if [ -z "${ACTION:-}" ] || [ "${ACTION:-}" == "HELP" ]; then
-  # NO ARGUMENTS or HELP REQUESTED: Display usage guide
+# 2b. Display Help Information (when invoked with no build action or maintenance flags)
+if [ -z "${ACTION:-}" ]; then
+  # NO ARGUMENTS: Display usage guide
   displayHelp
   exit 1
 fi
 
 # 3. Execution Phase: Background Processing and Parallelism
-mkdir -p "${LOG_PATH}"
+mkdir -p "${LOG_PATH}" "${COMPILE_BASE}" "${DISTRIB_BASE}"
 rm -rf "${LOG_PATH:?}"/*.log
 
 SUCCESS_COUNT=0
