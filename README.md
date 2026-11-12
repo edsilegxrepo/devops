@@ -22,18 +22,19 @@ Hardened frameworks for system security and code quality assurance.
 
 ### 2. Build & Validation Tasks (`/build_tasks`)
 Automation for building, and validating core system components.
-- `build_all.sh`: Top-level orchestrator for batch module compilation, repository template governance (`.gitignore`, `SECURITY.md`, `LICENSE`), and parallel Git synchronizations across sub-projects.
+- `build_orchestrate.sh`: Top-level orchestrator (backed by `build.inc`) for parallel module compilation, template governance (`.gitignore`, `SECURITY.md`, `LICENSE`), release code signing, and Git synchronizations across sub-projects.
 - `build_go.sh`: Go compilation, static analysis (`go vet`, `golangci-lint`), vulnerability scanning (`govulncheck`, `gosec`), ASLR PIE binary hardening, and distribution packaging with automated `SHA256SUMS` generation.
 - `build_go_exec.sh`: Orchestration wrapper preparing, patching, configuring, and executing Go projects (supporting `git-clone` and `local` modes) with non-interactive overlay patch staging and handover to `build_go.sh`.
 - `build_python_win.sh`: Packaging for Windows Python distributions, focusing on a minimal binary only archive.
 - `bun_upgrade.sh`: Automated lifecycle management, installation, upgrading, caching, and package registry tool for the Bun JavaScript runtime across Windows (Cygwin/MSYS2) and Linux environments.
 - `chartdb-setup.sh`: Repeatable deployment, automated security remediation, and build orchestration framework for the ChartDB database visualization suite (integrating `chartdb-patch.py` for CVE patching, dependency overrides, Vite/Monaco compatibility shims, and SPA dev/production serving).
 - `chromium_upgrade.sh`: Automates downloading, locale-pruning, repackaging, and deploying Chromium browser builds across Windows (Cygwin/MSYS2) and Linux environments.
+- `dotnet_packaging.sh`: Cross-platform `.NET` Windows installer bundle synchronization and staging pipeline supporting explicit channels (`--version`) and local archive discovery (`--auto` for `major >= 8`), official `releases.json` resolution, SHA-512 verification, incremental component reuse, and atomic staging across Cygwin, MSYS2, and Linux/WSL.
 - `javacmd_build.sh`: Unified, generic Java compilation and packaging wrapper integrating Checkstyle, PMD, and SpotBugs validation.
 - `jdk_packaging.sh`: Automates Azul Zulu JDK repackaging, footprint minimization, Maven integration, and JTLSTester diagnostic injection.
 - `tomcat_packaging.sh`: Reconstructs, customizes, and packages Apache Tomcat layouts, applying configuration patches and resolving external database drivers.
 - `tomcat_probe_build.sh`: Automates retrieval, compilation, customization, and secure packaging of the `psi-probe` monitoring tool for `javax` namespace Tomcat environments.
-- `gobuild_code-analyzers.sh`: Automation for compiling Go-based static analysis tools.
+- `gobuild_code-analyzers.sh`: Parallel build orchestrator compiling, hardening (PIE, `-buildvcs=false`), cross-compiling (Zig/musl for Linux & native Windows AMD64), flat/tree packaging, and platform-deploying (`--deploy`) 21 Go static analysis and developer tools.
 - `openssl_build.sh`: A multi-mode (RPM/Archive/All) script for isolated OpenSSL builds.
 - `sqlite3_validate.sh`: A suite for verifying SQLite 3 binary builds against specs.
 - `rust_upgrade.sh`: Automated management of Rust toolchain deployments and target libraries.
@@ -62,12 +63,13 @@ Low-level system adjustments and service delegations.
 - `defender_setup.ps1`: Audits and manages coexistence, passive mode, and uninstallation of Microsoft Defender on systems with SentinelOne.
 - `ntlmctl.ps1`: NTLM Protocol & Audit Manager controlling NTLM authentication enforcement (disabling NTLMv1/LM via `LmCompatibilityLevel = 5`), incoming authentication auditing (`AuditReceiptEvents`), and event log channel enablement.
 - `procmgr.ps1`: Comprehensive PowerShell process management utility for listing, diagnosing, setting priority/affinity, and terminating processes.
-- `svcmgr.ps1`: Unified service control CLI for managing user-space Windows services (nginx, gitea, etc.) without requiring administrator privileges.
-- `nginx_ctl.cmd`: Native Windows command script wrapper managing the runtime lifecycle of the Nginx web server.
+- `winsvc/svcmgr.ps1`: Extensible plugin-based service control CLI (backed by `ProcessControl` and JSON service descriptors) for managing user-space Windows services (`nginx`, `gitea`, `sftpgo`) without administrator privileges.
 - `os_service_account.sh`: Provisions unprivileged OS service accounts (e.g., `gfaudit`) for compliance audit automation.
 - `ubuntu_upgrade.sh`: Orchestrates non-interactive system package updates, telemetry/ESM disabling, parallel Flatpak upgrades, and mainline kernel updates.
 - `ubuntu_kernel_updater.sh`: Detects, installs, and manages mainline upstream kernels bypassing APT dependency checks, and purges older kernels.
 - `proxmox_update.sh`: Proxmox VE update orchestrator with pre-flight storage gating, early archive purging, strict dist-upgrade semantics, kernel lifecycle management, and bootloader synchronization.
+- `proxmox_tune.sh`: Idempotent Proxmox VE `proxmox-widget-toolkit` subscription notice patcher.
+- `lib/`: Shared 3-tier OS abstraction library (`system.sh`, `debian_sys.sh`, `rhel_sys.sh`) providing common logging, distro detection, and package management helpers.
 - `max_root.sh`: Cross-platform pre-upgrade storage maximization utility reclaiming disk space across systemd journals, logs, caches, and package manager databases.
 - `disktemp.sh`: Enterprise storage hardware temperature audit utility supporting NVMe, SATA, SAS, and USB drives across RHEL, Debian, and Proxmox with JSON telemetry export.
 - `list_disks.sh`: Storage topology, hardware asset inventory, and health audit utility correlating filesystem mounts, ZFS pools, LVM groups, SMART health, and SSD endurance metrics.
@@ -96,7 +98,9 @@ A comprehensive suite for managing multi-version Python environments and package
 ### 7. Client Connectivity Tools (`/client_tools`)
 Specialized utilities for end-user environment management.
 - `CitrixTool.ps1`: Citrix Workspace Backup & Restore CLI Utility.
-- `craftapps_package.sh`: Cross-platform packaging and release automation pipeline for Storytold desktop applications (monitoring GitHub releases, validating Linux/Windows binaries, bundling unified multi-platform archives, and atomically synchronizing libraries and upload staging).
+- `antigravity_package.sh`: Cross-platform release monitoring, license/locale pruning, `xz -9 -T0` Linux transcoding, and transactional library/upload staging pipeline for Google Antigravity CLI, Agent, and IDE distributions.
+- `client_package_common.sh`: Shared cross-platform foundation library providing Cygwin/MSYS2/WSL/Linux path normalization, defensive deletion guards, checksum validation, artifact/locale pruning, `xz -9 -T0` repacking, and atomic `.tmp` staging.
+- `craftapps_package.sh`: Cross-platform packaging and release automation pipeline for Storytold desktop applications (monitoring GitHub releases, validating Linux/Windows binaries, pruning redundant packaging artifacts, bundling unified multi-platform archives, deploying locally via `--deploy`, and atomically synchronizing libraries and upload staging).
 - `md2pdf.sh`: High-performance, concurrent Markdown to PDF batch converter (using a custom Node.js compiler with Puppeteer browser rendering).
 - `generate_pdf.sh`: High-performance, concurrent Office to PDF batch converter (using LibreOffice headless rendering, preserving original file modification timestamps for compliance auditing, and outputting NDJSON logs).
 - `pdf_text-extractor.sh`: High-performance, concurrent layout-preserved plain text extractor from PDF documents, supporting single-file/batch operations, throttle concurrency, and NDJSON logging.
