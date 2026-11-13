@@ -21,7 +21,8 @@ Hardened frameworks for system security and code quality assurance.
 - `generate_diffs.sh`: High-performance, concurrent script diff generator with fuzzy rename and extension change detection.
 
 ### 2. Build & Validation Tasks (`/build_tasks`)
-Automation for building, and validating core system components.
+Automation for building, packaging, and validating core system components.
+- `antigravity_package.sh`: Cross-platform release monitoring, license/locale pruning, `xz -9 -T0` Linux transcoding, and transactional library/upload staging pipeline for Google Antigravity CLI, Agent, and IDE distributions.
 - `build_orchestrate.sh`: Top-level orchestrator (backed by `build.inc`) for parallel module compilation, template governance (`.gitignore`, `SECURITY.md`, `LICENSE`), release code signing, and Git synchronizations across sub-projects.
 - `build_go.sh`: Go compilation, static analysis (`go vet`, `golangci-lint`), vulnerability scanning (`govulncheck`, `gosec`), ASLR PIE binary hardening, and distribution packaging with automated `SHA256SUMS` generation.
 - `build_go_exec.sh`: Orchestration wrapper preparing, patching, configuring, and executing Go projects (supporting `git-clone` and `local` modes) with non-interactive overlay patch staging and handover to `build_go.sh`.
@@ -29,6 +30,8 @@ Automation for building, and validating core system components.
 - `bun_upgrade.sh`: Automated lifecycle management, installation, upgrading, caching, and package registry tool for the Bun JavaScript runtime across Windows (Cygwin/MSYS2) and Linux environments.
 - `chartdb-setup.sh`: Repeatable deployment, automated security remediation, and build orchestration framework for the ChartDB database visualization suite (integrating `chartdb-patch.py` for CVE patching, dependency overrides, Vite/Monaco compatibility shims, and SPA dev/production serving).
 - `chromium_upgrade.sh`: Automates downloading, locale-pruning, repackaging, and deploying Chromium browser builds across Windows (Cygwin/MSYS2) and Linux environments.
+- `client_package_common.sh`: Shared cross-platform foundation library providing Cygwin/MSYS2/WSL/Linux path normalization, defensive deletion guards, checksum validation, locale pruning, WSL permission-preserving `xz -9 -T0` repacking, and atomic `.tmp` staging.
+- `craftapps_package.sh`: Cross-platform packaging and release automation pipeline for Storytold desktop applications (monitoring GitHub releases, validating Linux/Windows binaries, pruning redundant packaging artifacts, bundling unified multi-platform archives, deploying locally via `--deploy`, and atomically synchronizing libraries and upload staging).
 - `dotnet_packaging.sh`: Cross-platform `.NET` Windows installer bundle synchronization and staging pipeline supporting explicit channels (`--version`) and local archive discovery (`--auto` for `major >= 8`), official `releases.json` resolution, SHA-512 verification, incremental component reuse, and atomic staging across Cygwin, MSYS2, and Linux/WSL.
 - `javacmd_build.sh`: Unified, generic Java compilation and packaging wrapper integrating Checkstyle, PMD, and SpotBugs validation.
 - `jdk_packaging.sh`: Automates Azul Zulu JDK repackaging, footprint minimization, Maven integration, and JTLSTester diagnostic injection.
@@ -40,6 +43,8 @@ Automation for building, and validating core system components.
 - `rust_upgrade.sh`: Automated management of Rust toolchain deployments and target libraries.
 - `rust_upgrade_win.sh`: Unified, parallelized Rust toolchain deployment, linter compilation, and environment detection manager for Windows (Cygwin/MSYS2).
 - `rust_cachemgr.sh`: Safety-critical caching manager and pruning optimizer for Cargo and compiler caches.
+- `vscode_package.sh`: Automated Microsoft Visual Studio Code stable release pipeline downloading and SHA-256 verifying `vscode_cli` and `vscode` IDE archives, pruning redundant licenses/locales/policies, transcoding Linux archives via WSL/Linux ext4 (`xz -9 -T0`) preserving setuid permissions, and atomically staging packages.
+- `gosanitize/`: Cross-platform Go utility (`main.go`) that autodetects Linux ELF and Windows PE binaries and safely strips embedded Go `buildinfo` metadata in-place with atomic writes, Authenticode guards, and optional backup preservation.
 - `packaging/`: Multi-distribution packaging framework for universal Rust and Go applications, automating static musl compilation, Zig cross-compilation, and unified RPM, Debian (.deb), Linux (.tar.xz), and Windows (.zip) artifact generation.
 
 ### 3. Git Management (`/git_repomgr`)
@@ -98,9 +103,6 @@ A comprehensive suite for managing multi-version Python environments and package
 ### 7. Client Connectivity Tools (`/client_tools`)
 Specialized utilities for end-user environment management.
 - `CitrixTool.ps1`: Citrix Workspace Backup & Restore CLI Utility.
-- `antigravity_package.sh`: Cross-platform release monitoring, license/locale pruning, `xz -9 -T0` Linux transcoding, and transactional library/upload staging pipeline for Google Antigravity CLI, Agent, and IDE distributions.
-- `client_package_common.sh`: Shared cross-platform foundation library providing Cygwin/MSYS2/WSL/Linux path normalization, defensive deletion guards, checksum validation, artifact/locale pruning, `xz -9 -T0` repacking, and atomic `.tmp` staging.
-- `craftapps_package.sh`: Cross-platform packaging and release automation pipeline for Storytold desktop applications (monitoring GitHub releases, validating Linux/Windows binaries, pruning redundant packaging artifacts, bundling unified multi-platform archives, deploying locally via `--deploy`, and atomically synchronizing libraries and upload staging).
 - `md2pdf.sh`: High-performance, concurrent Markdown to PDF batch converter (using a custom Node.js compiler with Puppeteer browser rendering).
 - `generate_pdf.sh`: High-performance, concurrent Office to PDF batch converter (using LibreOffice headless rendering, preserving original file modification timestamps for compliance auditing, and outputting NDJSON logs).
 - `pdf_text-extractor.sh`: High-performance, concurrent layout-preserved plain text extractor from PDF documents, supporting single-file/batch operations, throttle concurrency, and NDJSON logging.

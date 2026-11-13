@@ -21,7 +21,7 @@ The **Storytold Craft Apps Packaging & Deployment Utility** (`craftapps_package.
 - **Dual-Repository Synchronization**:
   1. **Primary Library (`--source`)**: Updates the persistent, organized software library (e.g. `n:/softlib/software/public/<rel_dir>/` on Windows or `/mnt/n/...` / `/opt/...` on Linux), purging obsolete builds and placing the validated archive.
   2. **Staging Area (`--target`)**: Atomically deploys the verified package into the upload distribution directory (e.g. `f:/stage/upload/pending/` or custom Linux path) via `.tmp` file renaming to ensure external upload daemons and file watchers never read incomplete archives.
-- **Shared Foundation & Low Overhead**: Leverages the shared client packaging library [`client_package_common.sh`](file:///e:/data/devel/build/code/private/devops/client_tools/client_package_common.sh) and foundational POSIX shell tools (`curl`, `zip`, `unzip`, `jq`, `tar`, `gzip`, `xz`, and coreutils), eliminating heavyweight runtimes such as Python or Node.js.
+- **Shared Foundation & Low Overhead**: Leverages the shared client packaging library [`client_package_common.sh`](file:///e:/data/devel/build/code/private/devops/build_tasks/client_package_common.sh) and foundational POSIX shell tools (`curl`, `zip`, `unzip`, `jq`, `tar`, `gzip`, `xz`, and coreutils), eliminating heavyweight runtimes such as Python or Node.js.
 - **Cross-Platform Path Harmonization**: Automatically identifies the host environment (`cygwin`, `msys2`, `wsl`, `linux`) and translates between user-facing canonical paths (`drive:/path/sub`), Cygwin mounts (`/cygdrive/x/...`), MSYS2 mounts (`/x/...`), WSL mounts (`/mnt/x/...`), and standard POSIX Linux paths.
 
 ---
@@ -86,7 +86,7 @@ flowchart TD
 ### 2.2 Key Architectural Decisions
 
 1. **Delegated Common Packaging Foundation**:
-   - Core packaging primitives — host platform detection (`PLATFORM`), dual-layer path translation (`enforce_drive_path`, `to_posix_path`), defensive deletion containment (`safe_rm_rf`, `safe_rm_f`), signal lifecycle traps (`cleanup_workspace`), and transactional `.tmp` release staging (`atomic_stage_package`) — are delegated to [`client_package_common.sh`](file:///e:/data/devel/build/code/private/devops/client_tools/client_package_common.sh). Full architectural details and API specifications are centralized in [`client_package_common_README.md`](file:///e:/data/devel/build/code/private/devops/client_tools/client_package_common_README.md).
+   - Core packaging primitives — host platform detection (`PLATFORM`), dual-layer path translation (`enforce_drive_path`, `to_posix_path`), defensive deletion containment (`safe_rm_rf`, `safe_rm_f`), signal lifecycle traps (`cleanup_workspace`), and transactional `.tmp` release staging (`atomic_stage_package`) — are delegated to [`client_package_common.sh`](file:///e:/data/devel/build/code/private/devops/build_tasks/client_package_common.sh). Full architectural details and API specifications are centralized in [`client_package_common_README.md`](file:///e:/data/devel/build/code/private/devops/build_tasks/client_package_common_README.md).
 2. **Dual-Action Pipeline (`--action build` vs `--action deploy`)**:
    - Seamlessly pairs automated release packaging and multi-platform aggregation with direct host installation and extraction into target environments.
 3. **Resilient GitHub Release Discovery**:
@@ -225,7 +225,7 @@ The script utilizes a **strictly sequential batch loop**. This design choice is 
 ## 5. Dependencies and Requirements
 
 ### 5.1 Foundation & Application Prerequisites
-Packaging and deployment operations rely on the shared foundation library [`client_package_common.sh`](file:///e:/data/devel/build/code/private/devops/client_tools/client_package_common.sh). All standard POSIX tools (`bash`, `curl`, `coreutils`, `tar`, `gzip`, `xz`, `zip`, `unzip`) and platform compatibility matrices are documented in [`client_package_common_README.md#6-prerequisites-and-platform-compatibility`](file:///e:/data/devel/build/code/private/devops/client_tools/client_package_common_README.md#6-prerequisites-and-platform-compatibility).
+Packaging and deployment operations rely on the shared foundation library [`client_package_common.sh`](file:///e:/data/devel/build/code/private/devops/build_tasks/client_package_common.sh). All standard POSIX tools (`bash`, `curl`, `coreutils`, `tar`, `gzip`, `xz`, `zip`, `unzip`) and platform compatibility matrices are documented in [`client_package_common_README.md#6-prerequisites-and-platform-compatibility`](file:///e:/data/devel/build/code/private/devops/build_tasks/client_package_common_README.md#6-prerequisites-and-platform-compatibility).
 
 In addition to the foundation library tools, `craftapps_package.sh` requires:
 
@@ -327,8 +327,8 @@ flowchart TD
 | **Encryption in Transit** | **Compliant** | All API calls and asset downloads are forced over HTTPS (`https://api.github.com` and `https://github.com`) using `curl -sSL`. TLS 1.2 and TLS 1.3 are strictly enforced; SSL verification is never disabled. |
 | **Secret Management** | **Compliant** | Secrets are never written to disk, logged to standard output, or stored in temporary files. The diagnostic banner masks credentials, displaying only `Authenticated (API token active)`. If `gh` CLI is used, tokens remain secured in the OS credential manager. |
 | **RBAC / Least Privilege** | **Compliant** | Upstream: Only read permissions for public release assets are required.<br>Downstream: The script operates within the least-privilege context of the invoking user and requires no Administrator or root privileges. |
-| **File Permissions** | **Compliant** | Handled by `atomic_stage_package()` in [`client_package_common.sh`](file:///e:/data/devel/build/code/private/devops/client_tools/client_package_common.sh), strictly enforcing POSIX mode `644` (`chmod 644`) across library and staging destinations. |
-| **Filesystem Blast Radius** | **Compliant** | Handled by `safe_rm_rf()` in [`client_package_common.sh`](file:///e:/data/devel/build/code/private/devops/client_tools/client_package_common.sh) with system root and drive mount blacklists (see [Security Architecture in `client_package_common_README.md`](file:///e:/data/devel/build/code/private/devops/client_tools/client_package_common_README.md#4-security-architecture--blast-radius-protection)). |
+| **File Permissions** | **Compliant** | Handled by `atomic_stage_package()` in [`client_package_common.sh`](file:///e:/data/devel/build/code/private/devops/build_tasks/client_package_common.sh), strictly enforcing POSIX mode `644` (`chmod 644`) across library and staging destinations. |
+| **Filesystem Blast Radius** | **Compliant** | Handled by `safe_rm_rf()` in [`client_package_common.sh`](file:///e:/data/devel/build/code/private/devops/build_tasks/client_package_common.sh) with system root and drive mount blacklists (see [Security Architecture in `client_package_common_README.md`](file:///e:/data/devel/build/code/private/devops/build_tasks/client_package_common_README.md#4-security-architecture--blast-radius-protection)). |
 | **Vulnerable Libraries** | **Compliant** | Zero third-party scripting libraries or external modules (no npm, pip, gem packages). Employs trusted OS-level binaries maintained and patched directly by Cygwin package maintainers. |
 
 ---

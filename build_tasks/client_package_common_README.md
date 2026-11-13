@@ -7,10 +7,11 @@ A shared POSIX-compliant shell library providing enterprise-grade foundational u
 ## 1. Library Overview and Objectives
 
 ### 1.1 Executive Summary
-The **Client Packaging Foundation Library** ([`client_package_common.sh`](file:///e:/data/devel/build/code/private/devops/client_tools/client_package_common.sh)) serves as the shared architectural substrate powering client packaging and deployment utilities, including:
-1. **Google Antigravity Packaging Pipeline** ([`antigravity_package.sh`](file:///e:/data/devel/build/code/private/devops/client_tools/antigravity_package.sh))
-2. **CraftApps Multi-Component Release Suite** ([`craftapps_package.sh`](file:///e:/data/devel/build/code/private/devops/client_tools/craftapps_package.sh))
-3. Future standalone packaging, transcoding, and release synchronization scripts.
+The **Client Packaging Foundation Library** ([`client_package_common.sh`](file:///e:/data/devel/build/code/private/devops/build_tasks/client_package_common.sh)) serves as the shared architectural substrate powering client packaging and deployment utilities, including:
+1. **Google Antigravity Packaging Pipeline** ([`antigravity_package.sh`](file:///e:/data/devel/build/code/private/devops/build_tasks/antigravity_package.sh))
+2. **CraftApps Multi-Component Release Suite** ([`craftapps_package.sh`](file:///e:/data/devel/build/code/private/devops/build_tasks/craftapps_package.sh))
+3. **Visual Studio Code Packaging Pipeline** ([`vscode_package.sh`](file:///e:/data/devel/build/code/private/devops/build_tasks/vscode_package.sh))
+4. Future standalone packaging, transcoding, and release synchronization scripts.
 
 Consumer scripts operate in heterogeneous runtime environments ranging from Windows developer workstations (MSYS2, Cygwin) to Windows enterprise servers (WSL) and cloud CI/CD builders (Linux). This library abstracts platform differences, enforces defensive safety barriers against filesystem corruption, and guarantees transactional package publishing.
 
@@ -418,7 +419,7 @@ All published packages staged to `--source` or `--target` are explicitly assigne
 ## 5. Consumer Integration Guide & Boilerplate
 
 ### 5.1 Sourcing Convention
-Consumer scripts should source [`client_package_common.sh`](file:///e:/data/devel/build/code/private/devops/client_tools/client_package_common.sh) using dynamic directory resolution based on `${BASH_SOURCE[0]}`:
+Consumer scripts should source [`client_package_common.sh`](file:///e:/data/devel/build/code/private/devops/build_tasks/client_package_common.sh) using dynamic directory resolution based on `${BASH_SOURCE[0]}`:
 
 ```bash
 #!/usr/bin/env bash
@@ -550,11 +551,11 @@ To verify the library's integrity and validate all internal functions across you
 
 ```bash
 # 1. Syntax Audit
-bash -n client_tools/client_package_common.sh
+bash -n build_tasks/client_package_common.sh
 
 # 2. Interactive Function Smoke Test
 bash -c '
-    source client_tools/client_package_common.sh
+    source build_tasks/client_package_common.sh
     echo "Platform detected: $PLATFORM"
     echo "Is Windows? $(is_windows_platform && echo YES || echo NO)"
     echo "Target OS: $(get_target_os)"
