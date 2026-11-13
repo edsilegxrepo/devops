@@ -201,8 +201,8 @@ graph LR
 | :--- | :--- | :--- | :--- |
 | **Bash** | System Shell | `4.0+` | Shell runtime supporting arrays, parameter expansion, and process tracking. |
 | **GNU Coreutils** | System Utilities | POSIX | `cp -af`, `mkdir`, `rm -rf`, `mktemp`, `kill`, `date`. |
-| **[build.inc](build.inc)** | Shared Include | `2.0.0+` | Central exit codes, host detection, logging, and keygen helpers. |
-| **[build_go.sh](build_go.sh)** | Compiler Engine | `2.2.0+` | Module compiler, linter runner, test harness, and distribution packager. |
+| **[build.inc](build.inc)** | Shared Include | `2.0.1+` | Central exit codes, host detection, logging, version sanitizing, and keygen helpers. |
+| **[build_go.sh](build_go.sh)** | Compiler Engine | `2.2.1+` | Module compiler, linter runner, test harness, and distribution packager. |
 | **[git_autosync.sh](private/devops/git_repomgr/git_autosync.sh)** | Internal Script | `1.0.0+` | Multi-repository Git sync manager. |
 | **OpenSSH (ssh-keygen)** | Cryptographic Tool | `8.0+` | Ed25519 signing keypair generation and release artifact verification (see [build_SIGNING.md](build_SIGNING.md)). |
 | **Governance Templates** | Config Assets | Latest | `TMPL.gitignore`, `SECURITY.md`, `LICENSE`. |
@@ -278,6 +278,7 @@ graph LR
 | `--testsuite` | Execute automated Go test suite with coverage (`go test -v -cover ./...`) across all modules. | Flag | `false` |
 | `--update-modules` | Force updating all dependencies to the latest release (`go get -u`). | Flag | `false` |
 | `--vendor` | Synchronize module vendor directories (`go mod vendor`). | Flag | `false` |
+| `--remove-buildinfo` | Strip Go buildinfo metadata from compiled binaries (forwarded to `build_go.sh`). | Flag | `false` |
 | `--log=<file>` | Append structured NDJSON execution logs to the specified file. | String | *Disabled* |
 
 ---

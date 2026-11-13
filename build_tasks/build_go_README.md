@@ -15,9 +15,9 @@ This document provides the architectural specification, operational sequence bre
 |  +---------------------+   +---------------------+   +-----------------------+   +-------------------------+  |
 |  | Quality & Test Gate |   | Static Compiler     |   | Multi-Format Packager |   | Integrity & Signing     |  |
 |  | go test (-cover),   |-->| CGO_ENABLED=0,      |-->| .tar.xz (Linux),      |-->| <artifact>.sha256,      |  |
-|  | go vet, gofumpt,    |   | -trimpath, ldflags  |   | .zip (Windows),       |   | <artifact>.sig          |  |
-|  | golangci-lint,      |   | (Version, Git hash),|   | .deb (dpkg-deb),      |   | (ssh-keygen -Y sign),   |  |
-|  | govulncheck, gosec  |   | output to ../bin    |   | .rpm (rpmbuild)       |   | cleanup intermediate    |  |
+|  | go vet, gofumpt,    |   | -trimpath, PIE,     |   | .zip (Windows),       |   | <artifact>.sig          |  |
+|  | golangci-lint,      |   | ldflags, gosanitize |   | .deb (dpkg-deb),      |   | (ssh-keygen -Y sign),   |  |
+|  | govulncheck, gosec  |   | (--remove-buildinfo)|   | .rpm (rpmbuild)       |   | cleanup intermediate    |  |
 |  +---------------------+   +---------------------+   +-----------------------+   +-------------------------+  |
 |                                                                                                               |
 |  Sources: build.inc (Constants, Exit Codes, Host OS Detection, Logging, Sanitizers, Temp Trackers)            |
@@ -38,6 +38,7 @@ This document provides the architectural specification, operational sequence bre
 
 ### Related Documentation & Toolchain Links
 * **[build.inc](build.inc)**: Shared library providing diagnostic exit codes, logging primitives, temporary directory tracking, OS detection, and cryptographic helpers.
+* **[gosanitize/README.md](gosanitize/README.md)**: Architecture and security reference for the `gosanitize` utility used when `--remove-buildinfo` is enabled.
 * **[build_orchestrate_README.md](build_orchestrate_README.md)**: Technical reference for the multi-module orchestrator, parallel workpool scheduler, and template governance engine.
 * **[build_SIGNING.md](build_SIGNING.md)**: Complete guide covering OpenSSH release artifact signing and verification workflows.
 
@@ -74,10 +75,10 @@ graph TD
     end
 
     subgraph CompilePhase ["Static Compilation Engine"]
-        CompilePhase --> Flags["Resolve LDFLAGS (-X version, -X git_hash) & -trimpath"]
+        CompilePhase --> Flags["Resolve LDFLAGS (-X v<ver>-YYYYmmdd, -X git_hash), -trimpath, -buildmode=pie, -buildvcs=false"]
         Flags --> TargetBuild{"Target Platforms"}
-        TargetBuild -->|Linux| BuildLinux["CGO_ENABLED=0 GOOS=linux go build -> ../bin/<app>"]
-        TargetBuild -->|Windows| BuildWin["CGO_ENABLED=0 GOOS=windows go build -> ../bin/<app>.exe"]
+        TargetBuild -->|Linux| BuildLinux["CGO_ENABLED=0 GOOS=linux go build -> optional gosanitize -> ../bin/<app>"]
+        TargetBuild -->|Windows| BuildWin["CGO_ENABLED=0 GOOS=windows go build -> optional gosanitize -> ../bin/<app>.exe"]
     end
 
     CompilePhase --> PkgCheck{"Packaging Requested? (--archive, --rpm, --deb, --all-pkg)"}
@@ -107,7 +108,7 @@ graph TD
 3. **Multi-Engine Fallback JSON Parser:** [parse_json_field](build.inc#L469-L506) queries JSON fields using `jq`, falling back to `python3`, `python`, or a native `awk` stream scanner if dedicated tools are unavailable on minimal build nodes.
 4. **Per-Archive Checksum Generation:** Replaces monolithic `SHA256SUMS` files with individual `<archive>.sha256` files generated concurrently alongside each package in `../distrib/`. This eliminates race conditions during parallel module orchestration.
 5. **OpenSSH Cryptographic Signing:** Creates `<archive>.sig` signatures using native `ssh-keygen -Y sign -f <key> -n file <artifact>`, establishing cryptographic publisher identity verifiable without GPG/PGP dependencies.
-6. **Path Trimming & Symbol Stripping:** Uses `-trimpath` to eliminate host filesystem paths from stack traces and embeds `-ldflags="-s -w"` to strip debug symbols, reducing final binary footprint by 40–60%.
+6. **Path Trimming, PIE Hardening & Symbol Stripping:** Uses `-trimpath`, `-buildmode=pie`, and `-buildvcs=false` alongside `-ldflags="-s -w"` (stamping `v<sanitized_version>-<UTC YYYYmmdd>` via `-X`), reducing final binary footprint and hardening executables; `--remove-buildinfo` optionally strips embedded Go `buildinfo` via [`gosanitize`](gosanitize/README.md).
 7. **Intermediate Binary Cleanup:** When release packaging is requested, intermediate uncompressed binaries in `../bin/` are packed into release artifacts in `../distrib/` and then cleanly deleted, preventing stale build artifacts.
 
 ---
@@ -369,6 +370,7 @@ checkcert (0.2.1-1) stable; urgency=low
 | `--testsuite` | Execute automated Go test suite with coverage (`go test -v -cover ./...`) and exit immediately. | Flag | `false` |
 | `--update-modules` | Force updating all dependencies to the latest release (`go get -u -t ./...`). | Flag | `false` |
 | `--vendor` | Synchronize module vendor directory (`go mod vendor`). | Flag | `false` |
+| `--remove-buildinfo` | Compile `gosanitize` and strip embedded Go `buildinfo` metadata before packaging/signing. | Flag | `false` |
 | `--main-path=<path>` | Override the source code entrypoint path defined in `build.json`. | String | From `build.json` |
 | `--log=<file>` | Append structured NDJSON execution logs to the specified file. | String | *Disabled* |
 | `--help` | Display command line usage manual and exit. | Flag | `false` |
@@ -549,5 +551,6 @@ WSL uses its native Linux `gcc` toolchain to compile the binary, producing a gen
 ## 10. References & Related Documentation
 
 * **[build.inc](build.inc)**: Shared library providing diagnostic exit codes, logging primitives, temporary directory tracking, OS detection, and cryptographic helpers.
+* **[gosanitize/README.md](gosanitize/README.md)**: Architecture and security reference for the `gosanitize` utility used when `--remove-buildinfo` is enabled.
 * **[build_orchestrate_README.md](build_orchestrate_README.md)**: Technical reference for the multi-module orchestrator, parallel workpool scheduler, and template governance engine.
 * **[build_SIGNING.md](build_SIGNING.md)**: Complete guide covering OpenSSH release artifact signing and verification workflows.

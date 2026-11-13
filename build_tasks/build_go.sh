@@ -2,8 +2,8 @@
 # ==============================================================================
 #  Go Compilation & Quality Pipeline Engine
 #  File      : build_go.sh
-#  Version   : 2.2.0
-#  Date      : 2026-10-22
+#  Version   : 2.2.1
+#  Date      : 2026-11-12
 #  Author    : Critical Systems / XDG
 # ==============================================================================
 #  Objective:
@@ -67,7 +67,8 @@
 #                  [--archive] [--rpm] [--deb] [--all-pkg] [--verify-pkg]
 #                  [--clean] [--compile-only] [--lint-only] [--ignore-audit] [--testsuite]
 #                  [--sign[=<key>]] [--genkey[=<path>]] [--identity=<id>]
-#                  [--update-modules] [--vendor] [--main-path=<path>] [--log=<file>]
+#                  [--update-modules] [--vendor] [--remove-buildinfo]
+#                  [--main-path=<path>] [--log=<file>]
 # ==============================================================================
 
 set -euo pipefail
@@ -267,6 +268,7 @@ Operational Options:
   --vendor            Synchronize vendor directory (go mod vendor)
   --main-path=<path>  Override entrypoint path defined in build.json
   --verify-pkg        Verify package metadata, checksums, and integrity (additive or standalone)
+  --remove-buildinfo  Strip Go buildinfo metadata from compiled binaries (via gosanitize)
   --log=<file>        Append all operations to an NDJSON audit log file
   --help              Show this help message
 
@@ -352,6 +354,8 @@ RUN_TESTSUITE=false
 UPDATE_MODULES=false
 SYNC_VENDOR=false
 MAIN_PATH_OVERRIDE=""
+REMOVE_BUILDINFO=false
+GOSANITIZE_BIN=""
 DO_CLEAN=false
 HAS_ACTION=false
 
@@ -432,6 +436,10 @@ while [ $# -gt 0 ]; do
     --vendor)
       SYNC_VENDOR=true
       HAS_ACTION=true
+      shift
+      ;;
+    --remove-buildinfo)
+      REMOVE_BUILDINFO=true
       shift
       ;;
     --main-path=*)
@@ -567,6 +575,7 @@ build_wsl_forwarded_args() {
   [ "${RUN_TESTSUITE}" = true ] && WSL_FORWARDED_ARGS+=("--testsuite")
   [ "${UPDATE_MODULES}" = true ] && WSL_FORWARDED_ARGS+=("--update-modules")
   [ "${SYNC_VENDOR}" = true ] && WSL_FORWARDED_ARGS+=("--vendor")
+  [ "${REMOVE_BUILDINFO}" = true ] && WSL_FORWARDED_ARGS+=("--remove-buildinfo")
   [ -n "${MAIN_PATH_OVERRIDE}" ] && WSL_FORWARDED_ARGS+=("--main-path=${MAIN_PATH_OVERRIDE}")
   if [ "${DO_CLEAN}" = true ] && [ "${TARGET_WIN}" = false ]; then
     WSL_FORWARDED_ARGS+=("--clean")
@@ -579,6 +588,9 @@ build_wsl_forwarded_args() {
   fi
 }
 
+# Consistent UTC build datestamp across host and WSL delegation runs
+BUILD_DATESTAMP="${BUILD_DATESTAMP:-$(date -u +"%Y%m%d")}"
+
 # If only Linux is targeted and WSL delegation is active on Windows, dispatch immediately
 if [ "${DELEGATE_LINUX_TO_WSL}" = true ] && [ "${TARGET_WIN}" = false ]; then
   log_info "Delegating Linux build and packaging to WSL (default distribution)..."
@@ -587,7 +599,7 @@ if [ "${DELEGATE_LINUX_TO_WSL}" = true ] && [ "${TARGET_WIN}" = false ]; then
   wsl_bindir="$(mixed_to_wsl_path "${BINDIR}")"
   wsl_distdir="$(mixed_to_wsl_path "${DISTDIR}")"
   build_wsl_forwarded_args
-  run_in_wsl "${wsl_cwd}" env BIN_DIR="${wsl_bindir}" DIST_DIR="${wsl_distdir}" bash "${wsl_script}" "${WSL_FORWARDED_ARGS[@]}"
+  run_in_wsl "${wsl_cwd}" env BIN_DIR="${wsl_bindir}" DIST_DIR="${wsl_distdir}" BUILD_DATESTAMP="${BUILD_DATESTAMP}" bash "${wsl_script}" "${WSL_FORWARDED_ARGS[@]}"
   exit $?
 fi
 
@@ -620,7 +632,7 @@ if [ ! -f "${CONFIG_FILE}" ]; then
 fi
 
 APP_NAME="$(parse_json_field "${CONFIG_FILE}" "name" "$(basename "$(pwd)")")"
-VERSION="$(parse_json_field "${CONFIG_FILE}" "version" "${DEFAULT_VERSION}")"
+VERSION="$(sanitize_version "$(parse_json_field "${CONFIG_FILE}" "version" "${DEFAULT_VERSION}")" "${DEFAULT_VERSION}")"
 RELEASE="$(parse_json_field "${CONFIG_FILE}" "release" "${DEFAULT_RELEASE}")"
 CHANNEL="$(parse_json_field "${CONFIG_FILE}" "channel" "${DEFAULT_CHANNEL}")"
 export CHANNEL
@@ -654,6 +666,7 @@ if command -v git &> /dev/null && git rev-parse --is-inside-work-tree &> /dev/nu
 fi
 
 # Release & Version Tags
+GO_VERSION="v${VERSION}-${BUILD_DATESTAMP}"
 RPM_RELEASE="${RELEASE}"
 DEB_VERSION="${VERSION}-${RELEASE}"
 DIST_BASE="${DISTDIR}/${APP_NAME}-${VERSION}"
@@ -802,10 +815,47 @@ fi
 # All Linux binaries are 100% static (CGO_ENABLED=0) for single-binary parity
 # across all distros, archives, RPMs, and DEBs.
 # ------------------------------------------------------------------------------
-LDFLAGS="${DEFAULT_GO_LDFLAGS} -X ${VERSION_PKG}=${VERSION}"
+LDFLAGS="${DEFAULT_GO_LDFLAGS} -X ${VERSION_PKG}=${GO_VERSION}"
 if [ -n "${BUILD_PKG}" ]; then
   LDFLAGS="${LDFLAGS} -X ${BUILD_PKG}=${GIT_HASH}"
 fi
+
+# ------------------------------------------------------------------------------
+# Function: prepare_gosanitize
+# Objective: Ensures the gosanitize helper binary is built for the host OS in a
+#            tracked temporary directory (or resolved from PATH) once per run.
+# Exit Code: Halts with EXIT_COMPILE (7) or EXIT_DEPENDENCY (4) on failure.
+# ------------------------------------------------------------------------------
+prepare_gosanitize() {
+  if [ -n "${GOSANITIZE_BIN:-}" ] && [ -x "${GOSANITIZE_BIN}" ]; then
+    return 0
+  fi
+
+  local src_dir="${SCRIPT_DIR}/gosanitize"
+  if [ -f "${src_dir}/main.go" ]; then
+    local tmp_dir exe_ext=""
+    tmp_dir="$(make_temp_dir "gosanitize")"
+    if [ "${HOST_OS}" == "WIN" ]; then
+      tmp_dir="$(normalize_to_mixed_path "${tmp_dir}")"
+      exe_ext=".exe"
+    fi
+    GOSANITIZE_BIN="${tmp_dir}/gosanitize${exe_ext}"
+    log_info "Building gosanitize helper from ${src_dir}"
+    if ! (cd "${src_dir}" && GOWORK=off CGO_ENABLED=0 go build -mod=readonly -trimpath -buildmode=pie -buildvcs=false -ldflags "${DEFAULT_GO_LDFLAGS}" -o "${GOSANITIZE_BIN}" .); then
+      log_error "Failed to build gosanitize helper."
+      exit "${EXIT_COMPILE}"
+    fi
+    return 0
+  fi
+
+  if command -v gosanitize &> /dev/null; then
+    GOSANITIZE_BIN="$(command -v gosanitize)"
+    return 0
+  fi
+
+  log_error "gosanitize source (${src_dir}) and binary not found."
+  exit "${EXIT_DEPENDENCY}"
+}
 
 # ------------------------------------------------------------------------------
 # Function: compile_target_binary
@@ -834,11 +884,11 @@ compile_target_binary() {
     host_match="WIN"
   fi
 
-  log_info "Compiling ${target_desc}: ${bin_name} (Version: ${VERSION}, Entrypoint: ${MAIN_PATH})"
+  log_info "Compiling ${target_desc}: ${bin_name} (Version: ${GO_VERSION}, Entrypoint: ${MAIN_PATH})"
   local bin_path="${BINDIR}/${bin_name}"
   local tmp_bin="${BINDIR}/${bin_name}.tmp.$$"
 
-  local cmd=(go build -v -buildvcs=false -ldflags "${LDFLAGS}" -trimpath)
+  local cmd=(go build -v -trimpath -buildmode=pie -buildvcs=false -ldflags "${LDFLAGS}")
   [ -n "${extra_flags}" ] && cmd+=("${extra_flags}")
   cmd+=(-o "${tmp_bin}")
   [ -n "${MAIN_PATH}" ] && cmd+=("${MAIN_PATH}")
@@ -855,6 +905,15 @@ compile_target_binary() {
   fi
 
   chmod 755 "${tmp_bin}"
+  if [ "${REMOVE_BUILDINFO}" = true ]; then
+    prepare_gosanitize
+    log_info "Removing Go buildinfo from ${bin_name}"
+    if ! "${GOSANITIZE_BIN}" -remove-buildinfo -inplace "${tmp_bin}"; then
+      rm -f "${tmp_bin}" 2> /dev/null || true
+      log_error "Failed to remove buildinfo from ${bin_name}."
+      exit "${EXIT_COMPILE}"
+    fi
+  fi
   mv -f "${tmp_bin}" "${bin_path}"
   log_success "Compiled: ${bin_path}"
 
@@ -1101,7 +1160,7 @@ if [ "${DELEGATE_LINUX_TO_WSL}" = true ] && [ "${TARGET_WIN}" = true ]; then
   wsl_bindir="$(mixed_to_wsl_path "${BINDIR}")"
   wsl_distdir="$(mixed_to_wsl_path "${DISTDIR}")"
   build_wsl_forwarded_args
-  if ! run_in_wsl "${wsl_cwd}" env BIN_DIR="${wsl_bindir}" DIST_DIR="${wsl_distdir}" bash "${wsl_script}" "${WSL_FORWARDED_ARGS[@]}"; then
+  if ! run_in_wsl "${wsl_cwd}" env BIN_DIR="${wsl_bindir}" DIST_DIR="${wsl_distdir}" BUILD_DATESTAMP="${BUILD_DATESTAMP}" bash "${wsl_script}" "${WSL_FORWARDED_ARGS[@]}"; then
     log_error "WSL Linux packaging build failed."
     exit "${EXIT_PACKAGE}"
   fi

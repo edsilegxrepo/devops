@@ -496,6 +496,7 @@ Operational Flags (forwarded to build_go.sh):
   --testsuite        Execute Go test suite with coverage
   --update-modules   Update Go modules to latest release
   --vendor           Sync vendor directory
+  --remove-buildinfo Strip Go buildinfo metadata from compiled binaries
   --log=<file>       Append all operations to an NDJSON audit log file
 
 Exit Codes:

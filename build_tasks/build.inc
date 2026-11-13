@@ -2,8 +2,8 @@
 # ==============================================================================
 #  Central Build & Toolchain Configuration Include
 #  File      : build.inc
-#  Version   : 2.0.0
-#  Date      : 2026-10-22
+#  Version   : 2.0.1
+#  Date      : 2026-11-12
 #  Author    : Critical Systems / XDG
 # ==============================================================================
 #  Objective:
@@ -150,7 +150,7 @@ export DEFAULT_DESC_SUFFIX="command-line application written in Go."
 export DEFAULT_GOPROXY="https://proxy.golang.org,direct"
 export DEFAULT_XZ_OPT="-T0"
 export DEFAULT_GO_LDFLAGS="-s -w"
-export DEFAULT_LINUX_EXTRA_FLAGS="-buildmode=pie"
+export DEFAULT_LINUX_EXTRA_FLAGS=""
 
 # Standard Documentation Files Included in Release Packages
 DEFAULT_DOC_FILES=(
@@ -582,6 +582,26 @@ parse_json_history() {
 # ------------------------------------------------------------------------------
 # 13. Packaging Metadata Sanitizers & Changelog Formatters
 # ------------------------------------------------------------------------------
+# Function: sanitize_version
+# Objective: Extracts a normalized dotted numeric version (major[.minor[.patch...]])
+#            after stripping optional leading whitespace and 'v'/'V', falling back
+#            to DEFAULT_VERSION when no valid leading numeric version exists.
+# Arguments:
+#   $1 - Raw version string
+#   $2 - Fallback version (optional, defaults to DEFAULT_VERSION)
+# Outputs: Prints sanitized version string to stdout.
+sanitize_version() {
+  local raw="${1:-}"
+  local fallback="${2:-${DEFAULT_VERSION}}"
+  raw="${raw#"${raw%%[![:space:]]*}"}"
+  raw="${raw#[vV]}"
+  if [[ "${raw}" =~ ^([0-9]+(\.[0-9]+)*) ]]; then
+    echo "${BASH_REMATCH[1]}"
+  else
+    echo "${fallback}"
+  fi
+}
+
 # Function: sanitize_rpm_spec_string
 # Objective: Escapes percent signs (%) to %% to prevent RPM spec macro expansions.
 # Arguments:
@@ -902,7 +922,7 @@ verify_package_artifacts() {
   fi
 
   local exp_version exp_release exp_group exp_section exp_priority exp_license
-  exp_version="$(parse_json_field "${config_file}" "version" "${DEFAULT_VERSION}")"
+  exp_version="$(sanitize_version "$(parse_json_field "${config_file}" "version" "${DEFAULT_VERSION}")" "${DEFAULT_VERSION}")"
   exp_release="$(parse_json_field "${config_file}" "release" "${DEFAULT_RELEASE}")"
   exp_group="$(parse_json_field "${config_file}" "group" "${DEFAULT_GROUP}")"
   exp_section="$(parse_json_field "${config_file}" "section" "${DEFAULT_SECTION}")"
