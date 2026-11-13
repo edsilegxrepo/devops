@@ -1249,9 +1249,12 @@ for entry in "${PACKAGES[@]}"; do
     strip_base_directory "$linux_unpack"
     prune_directory_artifacts "$linux_unpack"
 
-    final_linux_name="${linux_name%.tar.gz}.tar.xz"
-    final_linux_name="${final_linux_name%.tgz}.tar.xz"
-    [[ "$final_linux_name" =~ \.tar\.xz$ ]] || final_linux_name="${final_linux_name}.tar.xz"
+    case "${linux_name,,}" in
+        *.tar.xz) final_linux_name="$linux_name" ;;
+        *.tar.gz) final_linux_name="${linux_name:0:${#linux_name}-7}.tar.xz" ;;
+        *.tgz) final_linux_name="${linux_name:0:${#linux_name}-4}.tar.xz" ;;
+        *) final_linux_name="${linux_name}.tar.xz" ;;
+    esac
 
     if ! repack_directory_to_tar_xz "$linux_unpack" "${CURRENT_BUILD_DIR}/${final_linux_name}"; then
         log_error "Failed to recompress Linux archive to xz: $final_linux_name"
