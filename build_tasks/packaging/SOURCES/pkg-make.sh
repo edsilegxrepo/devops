@@ -1,8 +1,28 @@
 #!/bin/bash
 # ==============================================================================
-# Script:      /usr/src/redhat/SOURCES/pkg-make.sh
+# Script:      /usr/src/packages/TEMPLATE/SOURCES/pkg-make.sh
 # Purpose:     Universal package scaffold generator for Rust and Go specfiles.
 # Applicability: Automates creation of 100% static musl RPM & Debian packages.
+#
+# Objectives:
+#   Generate ready-to-build <topdir>/SPECS/<name>-xg.spec files, canonical
+#   -src.zip source archives, synced toolchain helpers, and systemd daemon files
+#   from master TEMPLATE/ templates with zero manual boilerplate.
+#
+# Core Components:
+#   - Section 1 (CLI Parser)         : Collects platform, metadata, CGO/SQLite, exclusion & daemon options.
+#   - Section 2 (Validation)         : Normalizes platform, --exclude targets, goipath, git hash & Debian deps.
+#   - Section 3 (Source Repackaging) : Repackages arbitrary source tarballs/zips into canonical `<name>-main/` zips.
+#   - Section 4 (Helper Sync)        : Copies required *.inc/*.sh helpers into TOPDIR/SOURCES/ via sync_helper().
+#   - Section 5 (Python Renderer)    : Substitutes template placeholders, renders daemon configs & target gates.
+#   - Section 6 (rpmlint & Summary)  : Runs initial rpmlint validation and prints build instructions.
+#
+# Functionality & Data Flows:
+#   1. Parses CLI flags -> validates required args and normalizes derived metadata.
+#   2. Optionally converts `--source-arch` to `<topdir>/SOURCES/<name>-<ver>-<hash>-src.zip`.
+#   3. Syncs shared helpers -> exports normalized PKG_* env vars -> inline Python renders
+#      TEMPLATE/SPECS/pkg-<platform>-template-xg.spec and template.{service,sysusers.conf,tmpfiles.conf,env}.
+#   4. Validates generated spec with `rpmlint` and outputs ready-to-run `rpmbuild` commands.
 #
 # Synopsis:
 #   pkg-make.sh --platform <rust|go> --name <pkg> --version <ver> [options]
@@ -50,6 +70,10 @@ set -eo pipefail
 TOPDIR="${RPM_TOPDIR:-/usr/src/redhat}"
 SPECS_DIR="${TOPDIR}/SPECS"
 SOURCES_DIR="${TOPDIR}/SOURCES"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+TEMPLATE_ROOT="$(cd "${SCRIPT_DIR}/.." &>/dev/null && pwd)"
+TEMPLATE_SPECS_DIR="${TEMPLATE_ROOT}/SPECS"
+TEMPLATE_SOURCES_DIR="${TEMPLATE_ROOT}/SOURCES"
 
 PLATFORM=""
 NAME=""
@@ -62,9 +86,18 @@ DESC=""
 LICENSE="Apache-2.0"
 GROUP="Applications/System"
 GIT_HASH=""
+SRC_ROOT=""
+BIN_NAME=""
+LICENSE_FILE=""
+COMPLETION_CMD=""
+VERSION_FLAG="--version"
+VERSION_LDFLAGS=""
+DOCLIST=""
 BUILD_REQUIRES=()
 REQUIRES=()
 DEB_DEPENDS=""
+DEB_SECTION=""
+CHECK_VERSION=""
 EXCLUDES=()
 IS_DAEMON=0
 
@@ -79,6 +112,7 @@ BUILD_TAGS=""
 # Rust specific flags
 CARGO_FEATURES=""
 
+# Show detailed CLI help message and exit non-zero
 usage() {
   cat << EOF
 Usage: $(basename "$0") --platform <rust|go> --name <package> --version <version> [options]
@@ -102,6 +136,7 @@ Package Metadata:
   --buildrequires <pkg...>    Additional BuildRequires package (repeatable or space-separated)
   --requires <pkg...>         Additional Requires package (repeatable or space-separated)
   --deb-depends <deps>        Explicit Debian runtime dependencies (e.g. "systemd (>= 239)")
+  --deb-section <section>     Debian package section (default: utils, e.g. net, httpd)
   --exclude <targets...>      Exclude packaging targets (comma-separated: windows, deb, rpm, archive)
 
 Daemon & Service Scaffolding:
@@ -120,6 +155,15 @@ Go Specific Options:
 
 Rust Specific Options:
   --features <features>       Cargo feature flags (e.g. "clipboard,pcre2")
+
+  --version-flag <flag>       Version flag for %check (default: --version, or 'none')
+  --check-version <ver>       Expected version substring in %check (default: %{version})
+  --version-ldflags <flags>   Extra Go -ldflags version injection (e.g. "-X 'main.version=%{pkgver}'")
+  --src-root <dir>            Top-level folder name inside source archive (default: <name>-main)
+  --bin-name <name>           Compiled executable basename if different from <name>
+  --license-file <file>       License filename inside source tree (default: LICENSE)
+  --completion-cmd <cmd>      CLI subcommand emitting completions (e.g. "completion" -> stages bash/zsh/fish)
+  --doclist <files>           Space-separated doc files for %doc (default: README.md)
 
 Help:
   -h, --help                  Show this help message
@@ -180,6 +224,14 @@ while [ $# -gt 0 ]; do
       DEB_DEPENDS="$2"
       shift 2
       ;;
+    --deb-section)
+      DEB_SECTION="$2"
+      shift 2
+      ;;
+    --check-version)
+      CHECK_VERSION="$2"
+      shift 2
+      ;;
     --exclude)
       shift
       while [ $# -gt 0 ] && [[ "$1" != --* ]]; do
@@ -223,6 +275,34 @@ while [ $# -gt 0 ]; do
       ;;
     --features)
       CARGO_FEATURES="$2"
+      shift 2
+      ;;
+    --version-flag)
+      VERSION_FLAG="$2"
+      shift 2
+      ;;
+    --version-ldflags)
+      VERSION_LDFLAGS="$2"
+      shift 2
+      ;;
+    --src-root)
+      SRC_ROOT="$2"
+      shift 2
+      ;;
+    --bin-name)
+      BIN_NAME="$2"
+      shift 2
+      ;;
+    --license-file)
+      LICENSE_FILE="$2"
+      shift 2
+      ;;
+    --completion-cmd)
+      COMPLETION_CMD="$2"
+      shift 2
+      ;;
+    --doclist)
+      DOCLIST="$2"
       shift 2
       ;;
     --buildrequires)
@@ -272,7 +352,7 @@ for item in "${EXCLUDES[@]}"; do
   esac
 done
 
-[ -z "$SUMMARY" ] && SUMMARY="${NAME} application"
+[ -z "$SUMMARY" ] && SUMMARY="Static ${PLATFORM^} service and utility"
 if [ -z "$DESC" ]; then
   DESC="${NAME} - packaged via Antigravity static packaging framework."
 elif [[ "$DESC" == @* ]]; then
@@ -295,10 +375,13 @@ if [ "$PLATFORM" = "go" ] && [ -z "$GOIPATH" ]; then
   GOIPATH="$(echo "$REPO_URL" | sed -e 's|https://||' -e 's|http://||' -e 's|\.git$||')"
 fi
 
-# Auto-detect or generate git commit hash
+# Auto-detect or generate git commit hash (strip package name/version prefix first)
 if [ -z "$GIT_HASH" ]; then
   if [ -n "$SOURCE_ARCH" ]; then
-    detected="$(basename "$SOURCE_ARCH" | grep -o -E '[0-9a-f]{7,8}' | tail -n 1 || true)"
+    base_arch="$(basename "$SOURCE_ARCH")"
+    stripped="${base_arch#"${NAME}"-}"
+    stripped="${stripped#"${VERSION}"-}"
+    detected="$(echo "$stripped" | grep -o -E '[0-9a-f]{7,8}' | tail -n 1 || true)"
     if [ -n "$detected" ]; then
       GIT_HASH="$detected"
     else
@@ -308,6 +391,8 @@ if [ -z "$GIT_HASH" ]; then
     GIT_HASH="main"
   fi
 fi
+
+[ -z "$SRC_ROOT" ] && SRC_ROOT="${NAME}-main"
 
 # Default Debian dependencies if not explicitly specified
 if [ -z "$DEB_DEPENDS" ] && [ "$IS_DAEMON" -eq 1 ]; then
@@ -322,10 +407,17 @@ echo "==> Scaffolding ${PLATFORM^^} package: ${NAME} (${VERSION}-${RELEASE})"
 # ------------------------------------------------------------------------------
 # 3. Source Archive Handling
 # ------------------------------------------------------------------------------
+# Safely remove temporary source repackaging workspace if defined
+cleanup_tmp_src() {
+  if [ -n "${TMP_SRC_DIR:-}" ] && [ "${TMP_SRC_DIR}" != "/" ] && [ -d "${TMP_SRC_DIR}" ]; then
+    rm -rf -- "${TMP_SRC_DIR}"
+  fi
+}
+
 if [ -n "$SOURCE_ARCH" ] && [ -f "$SOURCE_ARCH" ]; then
   echo "==> Preparing canonical source zip with ${NAME}-main root..."
   TMP_SRC_DIR="$(mktemp -d -t "src_convert_XXXXXX")"
-  trap 'rm -rf "${TMP_SRC_DIR}"' EXIT
+  trap cleanup_tmp_src EXIT
   if [[ "$SOURCE_ARCH" == *.zip ]]; then
     unzip -q "$SOURCE_ARCH" -d "$TMP_SRC_DIR"
   else
@@ -343,7 +435,7 @@ if [ -n "$SOURCE_ARCH" ] && [ -f "$SOURCE_ARCH" ]; then
     done
   fi
   (cd "$TMP_SRC_DIR" && zip -9qr "$TARGET_SOURCE" .)
-  rm -rf "$TMP_SRC_DIR"
+  cleanup_tmp_src
   trap - EXIT
   echo "==> Created canonical source zip: $TARGET_SOURCE"
 else
@@ -354,8 +446,35 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# 4. Optional Daemon Scaffolding Setup
+# 4. Sync Shared Helpers & Optional Daemon Scaffolding Setup
 # ------------------------------------------------------------------------------
+mkdir -p "${SPECS_DIR}" "${SOURCES_DIR}"
+
+# Copy a shared helper from TEMPLATE/SOURCES into TOPDIR/SOURCES if distinct
+sync_helper() {
+  local fname="$1"
+  local src_file=""
+  if [ -f "${TEMPLATE_SOURCES_DIR}/${fname}" ]; then
+    src_file="${TEMPLATE_SOURCES_DIR}/${fname}"
+  fi
+  if [ -n "$src_file" ] && [ "$src_file" != "${SOURCES_DIR}/${fname}" ]; then
+    cp -af "$src_file" "${SOURCES_DIR}/${fname}"
+  fi
+}
+
+sync_helper "pkg-common.inc"
+sync_helper "pkg-verify.sh"
+if [ "$PLATFORM" = "rust" ]; then
+  sync_helper "rust-toolchain.inc"
+  sync_helper "zig-musl.sh"
+else
+  sync_helper "go-toolchain.inc"
+  [ "$USE_CGO" -eq 1 ] && sync_helper "zig-musl.sh"
+fi
+if [[ ! " ${EXCLUDES[*]} " =~ " deb " ]] && [[ ! " ${EXCLUDES[*]} " =~ " debian " ]]; then
+  sync_helper "pkg-deb.sh"
+fi
+
 if [ "$IS_DAEMON" -eq 1 ]; then
   SVC_OUT="${SOURCES_DIR}/${NAME}.service"
   SYS_OUT="${SOURCES_DIR}/${NAME}.sysusers.conf"
@@ -367,12 +486,22 @@ fi
 # 5. Spec & Service Generation from Templates via Python Engine
 # ------------------------------------------------------------------------------
 if [ "$PLATFORM" = "rust" ]; then
-  TEMPLATE_FILE="${SPECS_DIR}/pkg-rust-template-xg.spec"
+  TEMPLATE_BASENAME="pkg-rust-template-xg.spec"
 else
-  TEMPLATE_FILE="${SPECS_DIR}/pkg-go-template-xg.spec"
+  TEMPLATE_BASENAME="pkg-go-template-xg.spec"
+fi
+
+if [ -f "${TEMPLATE_SPECS_DIR}/${TEMPLATE_BASENAME}" ]; then
+  TEMPLATE_FILE="${TEMPLATE_SPECS_DIR}/${TEMPLATE_BASENAME}"
+elif [ -f "${SPECS_DIR}/${TEMPLATE_BASENAME}" ]; then
+  TEMPLATE_FILE="${SPECS_DIR}/${TEMPLATE_BASENAME}"
+else
+  echo "ERROR: Template '${TEMPLATE_BASENAME}' not found in ${TEMPLATE_SPECS_DIR} or ${SPECS_DIR}" >&2
+  exit 1
 fi
 
 export PKG_SOURCES_DIR="${SOURCES_DIR}"
+export PKG_TEMPLATE_SOURCES_DIR="${TEMPLATE_SOURCES_DIR}"
 export PKG_TEMPLATE_FILE="${TEMPLATE_FILE}"
 export PKG_TARGET_SPEC="${TARGET_SPEC}"
 export PKG_PLATFORM="${PLATFORM}"
@@ -384,6 +513,17 @@ export PKG_DESC="${DESC}"
 export PKG_LICENSE="${LICENSE}"
 export PKG_REPO_URL="${REPO_URL}"
 export PKG_GIT_HASH="${GIT_HASH}"
+export PKG_SRC_ROOT="${SRC_ROOT}"
+export PKG_BIN_NAME="${BIN_NAME}"
+export PKG_LICENSE_FILE="${LICENSE_FILE}"
+export PKG_COMPLETION_CMD="${COMPLETION_CMD}"
+export PKG_VERSION_FLAG="${VERSION_FLAG}"
+export PKG_CHECK_VERSION="${CHECK_VERSION}"
+export PKG_VERSION_LDFLAGS="${VERSION_LDFLAGS}"
+export PKG_DOCLIST="${DOCLIST}"
+export PKG_DEB_SECTION="${DEB_SECTION}"
+PKG_CHANGELOG_DATE="$(LC_ALL=C date '+%a %b %d %Y')"
+export PKG_CHANGELOG_DATE
 export PKG_GROUP="${GROUP}"
 export PKG_CARGO_FEATURES="${CARGO_FEATURES}"
 export PKG_GOIPATH="${GOIPATH}"
@@ -412,6 +552,16 @@ desc          = os.environ["PKG_DESC"]
 license_str   = os.environ["PKG_LICENSE"]
 repo_url      = os.environ["PKG_REPO_URL"]
 git_hash      = os.environ["PKG_GIT_HASH"]
+src_root      = os.environ["PKG_SRC_ROOT"]
+bin_name      = os.environ.get("PKG_BIN_NAME", "").strip()
+license_file  = os.environ.get("PKG_LICENSE_FILE", "").strip()
+completion_cmd = os.environ.get("PKG_COMPLETION_CMD", "").strip()
+version_flag  = os.environ["PKG_VERSION_FLAG"]
+check_version = os.environ["PKG_CHECK_VERSION"]
+ver_ldflags   = os.environ["PKG_VERSION_LDFLAGS"]
+doclist       = os.environ["PKG_DOCLIST"]
+deb_section   = os.environ["PKG_DEB_SECTION"]
+chg_date      = os.environ["PKG_CHANGELOG_DATE"]
 group         = os.environ["PKG_GROUP"]
 cargo_feat    = os.environ["PKG_CARGO_FEATURES"]
 goipath       = os.environ["PKG_GOIPATH"]
@@ -425,6 +575,15 @@ b_reqs        = os.environ["PKG_EXTRA_BUILD_REQUIRES"].split()
 reqs          = os.environ["PKG_EXTRA_REQUIRES"].split()
 deb_depends   = os.environ["PKG_DEB_DEPENDS"]
 raw_excludes  = os.environ.get("PKG_EXCLUDES", "").split()
+
+# Read maintainer from pkg-common.inc if present
+maintainer = "Mis Center <support@criticalsys.net>"
+common_inc = os.path.join(os.environ["PKG_SOURCES_DIR"], "pkg-common.inc")
+if os.path.exists(common_inc):
+    with open(common_inc, "r") as cf:
+        m = re.search(r"^%global\s+maintainer\s+(.+)$", cf.read(), re.MULTILINE)
+        if m:
+            maintainer = m.group(1).strip()
 
 excludes = set()
 for e in raw_excludes:
@@ -441,20 +600,46 @@ for e in raw_excludes:
 with open(template_file, "r") as f:
     content = f.read()
 
+# Normalize RPM %global pkg_summary / pkg_desc percent signs so RPM avoids macro expansion errors
+def escape_rpm_pct(s):
+    return re.sub(r"%(?![{%])", "%%", s)
+
 # Replace metadata
+safe_summary = escape_rpm_pct(summary)
 content = content.replace("<name>", name)
 content = content.replace("<version>", version)
 content = content.replace("<release_num>", release)
-content = content.replace("<summary>", summary)
+content = content.replace("<summary>", safe_summary)
 content = content.replace("<license>", license_str)
 content = content.replace("<url>", repo_url)
 content = content.replace("<git_hash>", git_hash)
+content = content.replace("<changelog_date>", chg_date)
+content = content.replace("<maintainer>", maintainer)
 deb_replacement = deb_depends if deb_depends else "%{nil}"
 content = content.replace("<deb_depends>", deb_replacement)
 content = content.replace("Group:          Applications/System", f"Group:          {group}")
+if src_root != f"{name}-main":
+    content = re.sub(r"%global src_root\s+\S+", f"%global src_root        {src_root}", content)
+if bin_name:
+    content = re.sub(r"%global bin_name\s+\S+", f"%global bin_name        {bin_name}", content)
+if license_file:
+    content = re.sub(r"%global license_file\s+\S+", f"%global license_file    {license_file}", content)
+if completion_cmd:
+    content = re.sub(r"%global completion_cmd\s+\S+", f"%global completion_cmd  {completion_cmd}", content)
+if version_flag != "--version":
+    content = re.sub(r"%global version_flag\s+\S+", f"%global version_flag    {version_flag}", content)
+extra_globals = []
+if check_version:
+    extra_globals.append(f"%global check_version   {check_version}")
+if doclist:
+    extra_globals.append(f"%global doclist         {doclist}")
+if deb_section:
+    extra_globals.append(f"%global deb_section     {deb_section}")
+if extra_globals:
+    content = re.sub(r"(%global pkgver[^\n]+\n)", r"\1" + "\n".join(extra_globals) + "\n", content, count=1)
 
 # Multi-line description formatting with backslashes
-desc_lines = [l.replace("\\", "") for l in desc.strip().splitlines()]
+desc_lines = [escape_rpm_pct(l.replace("\\", "")) for l in desc.strip().splitlines()]
 formatted_desc = "\\\n".join(desc_lines)
 desc_replacement = f"%global pkg_desc        {formatted_desc}"
 
@@ -467,13 +652,14 @@ content = re.sub(
 
 # Platform specific substitutions
 if platform == "rust":
-    feat_repl = f"--features \"{cargo_feat}\"" if cargo_feat else ""
+    feat_repl = f"--features \"{cargo_feat}\"" if cargo_feat else "%{nil}"
     content = content.replace("<cargo_features>", feat_repl)
     content = re.sub(r"%global use_sqlite\s+\d+", f"%global use_sqlite         {use_sqlite}", content)
 else:
     content = content.replace("<goipath>", goipath)
     content = content.replace("<cmd_path>", cmd_path)
-    content = content.replace("<build_tags>", build_tags)
+    content = content.replace("<build_tags>", build_tags if build_tags else "%{nil}")
+    content = content.replace("<version_ldflags>", ver_ldflags if ver_ldflags else "%{nil}")
     content = re.sub(r"%global use_cgo\s+\d+", f"%global use_cgo            {use_cgo}", content)
     content = re.sub(r"%global use_sqlite\s+\d+", f"%global use_sqlite         {use_sqlite}", content)
     content = re.sub(r"%global use_bundled_c_lib\s+\d+", f"%global use_bundled_c_lib  {use_clib}", content)
@@ -486,33 +672,39 @@ for r in reqs:
     extra_deps.append(f"Requires:       {r}")
 if extra_deps:
     inject_str = "\n".join(extra_deps) + "\n"
-    content = content.replace("BuildRequires:  tar\n", inject_str + "BuildRequires:  tar\n", 1)
+    content = content.replace("%pkg_common_buildrequires", inject_str + "%pkg_common_buildrequires", 1)
 
 # Daemon systemd services & directives activation
 if is_daemon == 1:
     sources_dir = os.environ["PKG_SOURCES_DIR"]
+    tmpl_sources_dir = os.environ["PKG_TEMPLATE_SOURCES_DIR"]
+    def find_tmpl(fname):
+        p = os.path.join(sources_dir, fname)
+        return p if os.path.exists(p) else os.path.join(tmpl_sources_dir, fname)
+
     svc_out = os.path.join(sources_dir, f"{name}.service")
     sys_out = os.path.join(sources_dir, f"{name}.sysusers.conf")
     tmp_out = os.path.join(sources_dir, f"{name}.tmpfiles.conf")
 
     # Render template.service
-    with open(os.path.join(sources_dir, "template.service"), "r") as f:
+    with open(find_tmpl("template.service"), "r") as f:
         svc_txt = f.read()
     svc_txt = svc_txt.replace("<name>", name).replace("<summary_description>", summary).replace("<url>", repo_url)
     with open(svc_out, "w") as f:
         f.write(svc_txt)
     os.chmod(svc_out, 0o644)
 
-    # Render template.sysusers.conf
-    with open(os.path.join(sources_dir, "template.sysusers.conf"), "r") as f:
+    # Render template.sysusers.conf (sanitize quotes inside GECOS)
+    gecos_summary = summary.replace('"', "'")
+    with open(find_tmpl("template.sysusers.conf"), "r") as f:
         sys_txt = f.read()
-    sys_txt = sys_txt.replace("<name>", name).replace("<summary_description>", summary).replace("<description_of_daemon>", summary)
+    sys_txt = sys_txt.replace("<name>", name).replace("<summary_description>", gecos_summary).replace("<description_of_daemon>", gecos_summary)
     with open(sys_out, "w") as f:
         f.write(sys_txt)
     os.chmod(sys_out, 0o644)
 
     # Render template.tmpfiles.conf
-    with open(os.path.join(sources_dir, "template.tmpfiles.conf"), "r") as f:
+    with open(find_tmpl("template.tmpfiles.conf"), "r") as f:
         tmp_txt = f.read()
     tmp_txt = tmp_txt.replace("<name>", name)
     with open(tmp_out, "w") as f:
@@ -521,69 +713,27 @@ if is_daemon == 1:
 
     # Render template.env
     env_out = os.path.join(sources_dir, f"{name}.env")
-    with open(os.path.join(sources_dir, "template.env"), "r") as f:
+    with open(find_tmpl("template.env"), "r") as f:
         env_txt = f.read()
     env_txt = env_txt.replace("<name>", name)
     with open(env_out, "w") as f:
         f.write(env_txt)
     os.chmod(env_out, 0o644)
 
-    # Activate daemon directives in specfile
-    content = re.sub(r"# Source20:\s+(\S+)", "Source20:       %{name}.service", content)
-    content = re.sub(r"# Source21:\s+(\S+)", "Source21:       %{name}.sysusers.conf", content)
-    content = re.sub(r"# Source22:\s+(\S+)", "Source22:       %{name}.tmpfiles.conf", content)
-    content = re.sub(r"# Source23:\s+(\S+)", "Source23:       %{name}.env", content)
-    content = re.sub(
-        r"#\s*(install -D -p -m 0644\s+)%%\{(SOURCE2[0-2])\}\s+%%\{buildroot\}%%\{(_unitdir|_sysusersdir|_tmpfilesdir)\}/%%\{name\}\.(service|conf)",
-        r"\1%{\2} %{buildroot}%{\3}/%{name}.\4",
-        content
-    )
-    content = content.replace(
-        "# install -D -p -m 0640 %%{SOURCE23} %%{buildroot}%%{_sysconfdir}/%%{name}/%%{name}.env",
-        "install -D -p -m 0640 %{SOURCE23} %{buildroot}%{_sysconfdir}/%{name}/%{name}.env"
-    )
-    content = content.replace("# %%{_unitdir}/%%{name}.service", "%{_unitdir}/%{name}.service")
-    content = content.replace("# %%{_sysusersdir}/%%{name}.conf", "%{_sysusersdir}/%{name}.conf")
-    content = content.replace("# %%{_tmpfilesdir}/%%{name}.conf", "%{_tmpfilesdir}/%{name}.conf")
-    content = content.replace(
-        "# %%dir %%attr(0750,%%{name},%%{name}) %%{_sysconfdir}/%%{name}",
-        "%dir %attr(0750,%{name},%{name}) %{_sysconfdir}/%{name}"
-    )
-    content = content.replace(
-        "# %%config(noreplace) %%attr(0640,%%{name},%%{name}) %%{_sysconfdir}/%%{name}/%%{name}.env",
-        "%config(noreplace) %attr(0640,%{name},%{name}) %{_sysconfdir}/%{name}/%{name}.env"
-    )
-    content = content.replace("# %%post\n# %%systemd_post %%{name}.service", "%post\n%systemd_post %{name}.service")
-    content = content.replace("# %%preun\n# %%systemd_preun %%{name}.service", "%preun\n%systemd_preun %{name}.service")
-    content = content.replace("# %%postun\n# %%systemd_postun_with_restart %%{name}.service", "%postun\n%systemd_postun_with_restart %{name}.service")
-    content = content.replace(
-        '  --bin "bin/%{name}" \\\n',
-        '  --bin "bin/%{name}" \\\n  --dir "/etc/%{name}:0750" \\\n  --service %{SOURCE20} \\\n  --sysusers %{SOURCE21} \\\n  --tmpfiles %{SOURCE22} \\\n  --conffile %{SOURCE23}:etc/%{name}/%{name}.env \\\n'
-    )
+    # Activate daemon toggle in specfile
+    content = re.sub(r"%global is_daemon\s+\d+", "%global is_daemon          1", content)
 
 # ------------------------------------------------------------------------------
 # Handle Packaging Exclusions (--exclude windows,deb,rpm,archive)
 # ------------------------------------------------------------------------------
 if "windows" in excludes:
-    content = re.sub(r"%bcond_with windows\n+", "", content)
-    content = re.sub(r"# Early Windows target toolchain validation.*?\n%endif\n+", "", content, flags=re.DOTALL)
-    content = re.sub(r"%if %\{with windows\}\s*\nBuildRequires:\s+zip unix2dos\s*\n%endif\n+", "", content)
-    content = re.sub(r"# (?:2\.\s+)?If conditional Windows target is set, cross-compile for Windows PE\s*\n%if %\{with windows\}.*?\n(?:mkdir -p bin/windows\s*\n)?cp -af [^\n]+bin/windows[^\n]*\n%endif\n+", "", content, flags=re.DOTALL)
-    content = re.sub(r"# If conditional Windows target is set, package Windows ZIP archive\s*\n%if %\{with windows\}.*?%endif\n+", "", content, flags=re.DOTALL)
-    content = re.sub(r"%if %\{with windows\}\s*\n%\{SOURCE10\} check-win \"[^\"]+\"\s*\n%endif\n+", "", content)
+    content = re.sub(r"%global enable_windows\s+\d+", "%global enable_windows     0", content)
 
 if "deb" in excludes:
-    content = re.sub(r"%bcond_with deb\n+", "", content)
-    content = re.sub(r"# Debian Package Runtime Dependencies.*?\n%global deb_depends.*?\n+", "", content)
-    content = re.sub(r"Source11:\s+pkg-deb\.sh\n+", "", content)
-    content = re.sub(r"%if %\{with deb\}\s*\nBuildRequires:\s+dpkg\s*\n%endif\n+", "", content)
-    content = content.replace("chmod +x %{SOURCE10} %{SOURCE11}", "chmod +x %{SOURCE10}")
-    content = re.sub(r"# If conditional DEB target is set, package Debian \.deb\s*\n%if %\{with deb\}.*?%endif\n+", "", content, flags=re.DOTALL)
+    content = re.sub(r"%global enable_deb\s+\d+", "%global enable_deb         0", content)
 
 if "archive" in excludes:
-    content = re.sub(r"%bcond_with archive\n+", "", content)
-    content = re.sub(r"%if %\{with archive\}\s*\nBuildRequires:\s+xz\s*\n%endif\n+", "", content)
-    content = re.sub(r"# If conditional archive target is set, package Linux generic tarball\s*\n%if %\{with archive\}.*?%endif\n+", "", content, flags=re.DOTALL)
+    content = re.sub(r"%global enable_archive\s+\d+", "%global enable_archive     0", content)
 
 if "rpm" in excludes:
     content = content.replace("%bcond_without rpm\n", "%bcond_with rpm\n")
@@ -612,6 +762,7 @@ if "windows" not in excludes: active_flags.append("--with windows")
 if active_flags:
     flag_str = " ".join(active_flags)
     inst_lines.append(f"#   {inst_idx}. Build All Active Targets:\n#        rpmbuild {flag_str} -ba SPECS/{name}-xg.spec")
+inst_lines.append("#   Optional QA / Dependency Flags:\n#        --with testsuite, --with lint, --with audit, --with update_deps")
 
 inst_block = "\n".join(inst_lines)
 content = re.sub(r"# BUILDING INSTRUCTIONS:.*?(?=# TECHNICAL ARCHITECTURE:)", inst_block + "\n#\n", content, flags=re.DOTALL)
@@ -631,6 +782,9 @@ if command -v rpmlint > /dev/null 2>&1; then
   rpmlint "$TARGET_SPEC" || true
 fi
 
+# ------------------------------------------------------------------------------
+# 7. Active Target Summary & Build Command Output
+# ------------------------------------------------------------------------------
 # Calculate active release targets and build flags
 active_targets=()
 build_flags=()

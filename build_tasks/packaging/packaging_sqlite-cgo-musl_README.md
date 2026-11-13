@@ -67,6 +67,10 @@ By utilizing **Zig 0.17+** as a static cross-compiler via the [`zig-musl.sh`](./
 
 ## 3. Step-by-Step Implementation Guide
 
+> [!TIP]
+> **Using the Master Spec Template (`pkg-go-template-xg.spec`):**
+> For new packages, [`pkg-go-template-xg.spec`](./SPECS/pkg-go-template-xg.spec) (or [`pkg-make.sh --platform go --sqlite`](./SOURCES/pkg-make.sh)) automates all steps below via `%global use_cgo 1`, `%global use_sqlite 1`, `%go_build_target`, `%go_run_tests`, and `%pkg_check_bins` (`pkg-verify.sh`). The walkthrough below documents the underlying mechanics for custom specs and debugging.
+
 Follow this exact blueprint when packaging any Go project that imports `mattn/go-sqlite3`.
 
 ### Step 1: Ingest Common Includes & Validate Toolchains
@@ -176,7 +180,7 @@ go mod edit -dropreplace='github.com/slingdata-io/sling' go.mod 2>/dev/null || :
 go mod edit -droprequire='github.com/slingdata-io/sling' go.mod 2>/dev/null || :
 
 # Unpack SQLite amalgamation into parent build tree
-rm -rf ../%{sqlitedir}
+[ -n "%{sqlitedir}" ] && rm -rf -- "../%{sqlitedir}"
 unzip -q %{SOURCE1} -d ../%{sqlitedir}
 ```
 
@@ -224,7 +228,7 @@ build_target() {
     local cgo_ldflags="-L${target_libdir} -lsqlite3"
 
     # Ensure a pristine library output directory for this target
-    rm -rf "${target_libdir}"
+    [ -n "${target_libdir}" ] && rm -rf -- "${target_libdir}"
     mkdir -p "${target_libdir}"
 
     if [ "$target_os" = "windows" ]; then
@@ -418,11 +422,11 @@ When Go external linking invokes `zig-musl.sh cc -target x86_64-linux-musl`, the
 - Bypasses redundant options to prevent linker syntax errors.
 
 ### Structural ELF Verification (`check` subcommand)
-During `%check`, `zig-musl.sh check <binary> [version]` verifies:
+During `%check`, `pkg-verify.sh check <binary> [version] [version_flag]` (also reachable via legacy `zig-musl.sh check` delegation) verifies:
 1. Binary exists and is non-empty.
 2. File output matches `ELF (64|32)-bit.*static(ally|-pie)? linked`.
 3. `readelf -l <binary>` contains **zero occurrences of `INTERP`** (verifying that no dynamic linker dependency exists).
-4. Executes `<binary> --version` and asserts that the semantic version string is present.
+4. Unless `version_flag` is `none`, executes `<binary> <version_flag>` (default `--version`) and asserts that the semantic version string is present.
 
 ---
 

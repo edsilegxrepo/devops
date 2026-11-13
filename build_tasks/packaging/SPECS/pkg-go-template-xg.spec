@@ -9,31 +9,13 @@
 #   Manual Steps:
 #   1. Copy this template to SPECS/<name>-xg.spec:
 #        cp SPECS/pkg-go-template-xg.spec SPECS/<name>-xg.spec
-#   2. Choose your compilation mode via the toggles below:
-#        use_cgo:            Set to 0 for pure Go (default, like Caddy, fzf, Hugo)
-#                            Set to 1 if Go requires C libraries (like SFTPGo, PKCS#11)
-#                            NOTE: Zig is ONLY used when use_cgo is set to 1.
-#                            Pure Go builds (use_cgo 0) compile directly with native Go
-#                            and do NOT invoke, require, or depend on Zig.
-#        use_sqlite:         Set to 1 to build embedded SQLite amalgamation via Zig (requires use_cgo 1)
-#        use_bundled_c_lib:  Set to 1 to statically compile an autotools C lib via Zig (e.g. libxcrypt, requires use_cgo 1)
-#   3. Replace all placeholder tags:
-#        <name>             Package name (lowercase, e.g. caddy, sftpgo, fzf)
-#        <version>          Upstream semantic version (e.g. 2.7.6)
-#        <release_num>      Internal package revision number (e.g. 10)
-#        <summary>          Single-line short summary
-#        <description>      Multi-line detailed description
-#        <license>          SPDX license identifier (e.g. Apache-2.0, MIT, AGPL-3.0-only)
-#        <url>              Upstream project homepage or GitHub repository
-#        <git_hash>         Short git commit hash (e.g. 9712163)
-#        <goipath>          Go import path (e.g. github.com/owner/repo/v2)
-#        <cmd_path>         Relative path to main package (e.g. . or ./cmd/<name>)
-#        <build_tags>       Optional Go build tags (e.g. "libsqlite3"), or leave empty
-#   4. Optional Daemon Setup:
-#        If packaging a daemon service (like Caddy or SFTPGo), copy template.service,
-#        template.sysusers.conf, and template.tmpfiles.conf to <name>.service/conf,
-#        enable Source20-22, and uncomment the systemd sections in %%install, %%files, and scriptlets.
-#   5. Place source archive in SOURCES/<name>-<version>-<git_hash>-src.zip
+#   2. Set feature toggles below:
+#        use_cgo:            0 = pure Go (CGO_ENABLED=0, Zig NOT used/required)
+#                            1 = static CGO musl via Zig (e.g. SQLite / C libs)
+#        use_sqlite:         1 = build embedded SQLite amalgamation via Zig
+#        use_bundled_c_lib:  1 = build bundled autotools C lib (e.g. libxcrypt) via Zig
+#        is_daemon:          1 = enable systemd service/sysusers/tmpfiles/.env + deb hooks
+#   3. Replace all <placeholder> tags and place SOURCES/<name>-<version>-<git_hash>-src.zip
 #
 # BUILDING INSTRUCTIONS:
 #   1. Default Linux Target Build (produces Linux binary and RPM package):
@@ -46,51 +28,35 @@
 #        rpmbuild --with deb -ba SPECS/<name>-xg.spec
 #   5. Build All Targets (RPM + Linux Tarball + Windows Zipball + Debian Package):
 #        rpmbuild --with windows --with archive --with deb -ba SPECS/<name>-xg.spec
+#   Optional QA / Dependency Flags:
+#        --with testsuite (Go unit tests via %%go_run_tests), --with lint,
+#        --with audit, --with update_deps (run go get -u && go mod tidy)
 #
 # TECHNICAL ARCHITECTURE:
-#   - Pure Go Mode (use_cgo 0):
-#       * Builds 100% static binaries via CGO_ENABLED=0 using ONLY the native Go compiler.
-#       * Zig is NEVER used, invoked, or required in Pure Go mode.
-#       * Windows cross-compilation is built directly into Go (GOOS=windows).
-#   - CGO + Zig Musl Mode (use_cgo 1):
-#       * Zig is ONLY used when CGO_ENABLED=1 and/or if C amalgamations (e.g. SQLite)
-#         or dependent C libraries (e.g. PKCS#11/HSM, libxcrypt) are required.
-#       * Cross-compiles C/C++ dependencies using Zig 0.17+ as a static cross-compiler:
-#           Linux:   zig cc -target %%{_arch}-linux-musl with -extldflags '-static'
-#           Windows: zig cc -target %%{_arch}-windows-gnu
-#       * Generates 100% static musl ELF binary deployable on all Linux distros
-#         (RHEL 8-9-10, Ubuntu 24.04/26.04) with zero runtime glibc/shared lib dependencies.
-#   - Bundled C Libraries (SQLite amalgamation & autotools C libraries):
-#       * Demonstrates compiling embedded SQLite amalgamation (sqlite3.c -> libsqlite3.a)
-#         and standalone autotools C libraries (e.g. libxcrypt) on-the-fly via Zig
-#         strictly when use_cgo 1 and use_sqlite 1 / use_bundled_c_lib 1 are active.
-#   - Binary Verification vs Testsuite:
-#       * %%check executes binary wellness validation by default (inspects static ELF
-#         structure, asserts absence of PT_INTERP dynamic linker segment, and validates
-#         --version execution output).
-#       * Upstream unit testsuite (go test) is DISABLED by default (enable via --with testsuite).
-#
+#   - Shared lifecycle macros (%%pkg_*) come from pkg-common.inc; Go build/patch
+#     macros (%%go_build_target, %%go_run_tests, %%go_vendor_local_mod,
+#     %%go_update_tree, %%go_lint_checks, %%go_security_audit) come from go-toolchain.inc.
+#   - %%check executes binary wellness validation via pkg-verify.sh by default;
+#     linting, security audit, unit tests, and dependency updates are opt-in via --with flags.
 # ==============================================================================
 
 # Common Go toolchain validation, completion paths, and package definitions
 %include %{_sourcedir}/go-toolchain.inc
 
-# ==============================================================================
-# Compilation Mode Configuration Toggles
-# ==============================================================================
-# IMPORTANT: Zig is ONLY used when use_cgo is set to 1 (and/or if C amalgamations
-# like SQLite or dependent C libraries are used). When use_cgo is 0, the build is
-# pure Go (CGO_ENABLED=0) and Zig is completely bypassed and never invoked.
+# Feature toggles & build target gates (overriding defaults in pkg-common.inc / go-toolchain.inc)
+%global is_daemon          0
+# 0 = Pure Go (CGO_ENABLED=0, no Zig, no -buildmode=pie on Linux); 1 = Static CGO via Zig (musl static-pie on Linux)
 %global use_cgo            0
+# Enable static-pie on Linux CGO by default; set 0 only if non-PIC C/asm archives fail linking
+%global go_cgo_pie         1
 %global use_sqlite         0
 %global use_bundled_c_lib  0
+%global enable_archive     1
+%global enable_deb         1
+%global enable_windows     1
 
-# Zig is strictly required ONLY when CGO is enabled (use_cgo 1)
-%if %{use_cgo}
-%global has_zig %(command -v zig >/dev/null 2>&1 || [ -x /var/opt/zig/zig ] || [ -x /u01/zig/zig ] || [ -x /usr/local/bin/zig ] || [ -x /opt/zig/zig ] && echo 1 || echo 0)
-%if ! %{has_zig}
+%if %{use_cgo} && ! %{has_zig}
 %{error:Zig compiler (0.17+) not found in PATH for static CGO musl linking}
-%endif
 %endif
 
 # Build condition flags
@@ -100,9 +66,11 @@
 %bcond_with deb
 %bcond_without check
 %bcond_with testsuite
+%bcond_with lint
+%bcond_with audit
+%bcond_with update_deps
 
 # Package Descriptions (Shared between RPM and Debian control)
-# Note: Use single backslash '\' at line ends to preserve line wrapping without leaking literal backslashes.
 %global pkg_summary     <summary>
 %global pkg_desc        <description>\
 <description_line_2>\
@@ -111,34 +79,28 @@
 # Package Metadata
 Name:           <name>
 Version:        <version>
-Release:        <release_num>%(echo %{?dist} | sed 's|[0-9]||g').%{__channel}
+Release:        <release_num>%{pkg_rel_suffix}
 Summary:        %{pkg_summary}
 Group:          Applications/System
 License:        <license>
 URL:            <url>
 Provides:       %{name} = %{version}-%{release}
 
-# Go Import Path & Versioning Metadata
+# Go Import Path, Binary, Source Root & Versioning Metadata
 %global goipath         <goipath>
 %global gh_tag          <git_hash>
 %global pkgver          %{version}-%{gh_tag}
-%global dist_base       %{distpath}/%{name}-%{pkgver}
-%global rel_num         %(echo %{release} | cut -d. -f1)
-
-# Debian Package Runtime Dependencies (passed to pkg-deb.sh --depends)
+%global src_root        %{name}-main
+%global bin_name        %{name}
+%global license_file    LICENSE
+%global completion_cmd  %{nil}
+%global version_flag    --version
+%global go_cmd_path     <cmd_path>
+# Package pattern passed to %%go_run_tests (e.g. ./... or ./cmd/...)
+%global go_test_pkgs    ./...
+%global go_build_tags   <build_tags>
+%global go_version_ldflags <version_ldflags>
 %global deb_depends     <deb_depends>
-
-# Go Compiler Flags (go_opts and go_ldflags_core default from go-toolchain.inc)
-%global go_ldflags      %{go_ldflags_core} -X '%{goipath}/internal/version.version=%{version}' -X '%{goipath}/internal/version.commit=%{gh_tag}'
-%{!?go_opts:%global go_opts -buildmode=pie -trimpath -buildvcs=false}
-
-# Optional SQLite Amalgamation Settings (if use_sqlite is 1)
-%global sqlitever       3540100
-%global sqlitedir       sqlite-src-%(echo %{sqlitever} | cut -c1-3)
-%global sqlitedotver    %(echo %{sqlitever} | awk '{maj=substr($0,1,1); min=substr($0,2,2)+0; rel=substr($0,4,2)+0; patch=substr($0,6,2)+0; print maj "." min "." rel (patch > 0 ? "." patch : "")}')
-
-# Optional Bundled C Library Settings (e.g. libxcrypt, if use_bundled_c_lib is 1)
-%global xcryptver       4.5.2
 
 # Package Sources and Shared Helpers
 Source0:        %{name}-%{version}-%{gh_tag}-src.zip
@@ -149,286 +111,123 @@ Source1:        sqlite-amalgamation-%{sqlitever}.zip
 Source2:        libxcrypt-%{xcryptver}.tar.xz
 %endif
 
-# Shared tooling helpers from SOURCES
+%if %{use_cgo}
 Source10:       zig-musl.sh
+%endif
+%if %{enable_deb}
 Source11:       pkg-deb.sh
+%endif
 Source12:       go-toolchain.inc
 Source13:       pkg-common.inc
+Source14:       pkg-verify.sh
 
-# Optional systemd / configuration sources
-# Source20:       %%{name}.service
-# Source21:       %%{name}.sysusers.conf
-# Source22:       %%{name}.tmpfiles.conf
-# Source23:       %%{name}.env
+%if %{is_daemon}
+Source20:       %{name}.service
+Source21:       %{name}.sysusers.conf
+Source22:       %{name}.tmpfiles.conf
+Source23:       %{name}.env
+%endif
 
-BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildRequires:  golang >= 1.22
-BuildRequires:  tar
-BuildRequires:  file binutils
-%if %{use_cgo}
-BuildRequires:  make
-%endif
-%if %{with archive}
-BuildRequires:  xz
-%endif
-%if %{with deb}
-BuildRequires:  dpkg
-%endif
-%if %{with windows}
-BuildRequires:  zip unix2dos
-%endif
+%pkg_common_buildrequires
 
 %description
 %{pkg_desc}
 
 
 %prep
-%autosetup -p1 -n %{name}-main
+%autosetup -p1 -n %{src_root}
 
-# Optional: Unpack SQLite amalgamation into parent directory
 %if %{use_sqlite}
-rm -rf ../%{sqlitedir}
+[ -n "%{sqlitedir}" ] && rm -rf -- "../%{sqlitedir}"
 unzip -q %{SOURCE1} -d ../%{sqlitedir}
 %endif
 
-# Optional: Unpack bundled C library (e.g. libxcrypt) into parent directory
 %if %{use_bundled_c_lib}
-rm -rf ../libxcrypt-%{xcryptver}
+[ -n "%{xcryptver}" ] && rm -rf -- "../libxcrypt-%{xcryptver}"
 tar -xf %{SOURCE2} -C ..
 %endif
 
 
 %build
-chmod +x %{SOURCE10} %{SOURCE11} 2>/dev/null || :
 export GOPROXY="%{go_proxy}"
 
-# Security compliance: auto-update Go dependencies within module constraints
-%{go_update_tree}
-
-mkdir -p bin
-
-# ------------------------------------------------------------------------------
-# Build Dispatch Function (handles Linux static musl and Windows PE)
-# ------------------------------------------------------------------------------
-build_target() {
-    local target_os="$1"
-    local ext=""
-    [ "$target_os" = "windows" ] && ext=".exe"
-
-%if ! %{use_cgo}
-    # --------------------------------------------------------------------------
-    # PATTERN A: Pure Go (CGO_ENABLED=0, zero external C dependencies)
-    # Zig is NOT used, NOT invoked, and NOT required for Pure Go mode.
-    # --------------------------------------------------------------------------
-    echo "==> [${target_os}] Compiling pure Go binary (CGO_ENABLED=0, native Go only)..."
-    local opts="%{go_opts}"
-    # On Linux under CGO_ENABLED=0, strip -buildmode=pie to ensure static ELF (avoid dynamic PT_INTERP)
-    [ "$target_os" = "linux" ] && opts="$(echo "${opts}" | sed 's/-buildmode=pie//g')"
-    [ "$target_os" = "windows" ] && [[ "${opts}" != *"-buildmode=pie"* ]] && opts="${opts} -buildmode=pie"
-    CGO_ENABLED=0 GOOS="${target_os}" go build ${opts} \
-        -ldflags "%{go_ldflags}" \
-        -o "bin/%{name}${ext}" <cmd_path>
-
+%if %{with update_deps}
+%if %{with testsuite}
+%{go_update_tree_tests}
 %else
-    # --------------------------------------------------------------------------
-    # PATTERN B: Static CGO with Zig + Bundled C Libraries (SQLite / libxcrypt)
-    # Zig is strictly engaged here ONLY because CGO=1 and/or dependent C libraries
-    # or C amalgamations are being compiled into the binary.
-    # --------------------------------------------------------------------------
-    export CGO_ENABLED=1
-    export GOOS="${target_os}"
-    local cc_target=""
-    local cxx_target=""
-    local extra_ldflags=""
-    local cgo_cflags=""
-    local cgo_ldflags=""
-    local tags="<build_tags>"
-    local target_libdir="$(pwd)/.clibs_${target_os}"
-    mkdir -p "${target_libdir}"
-
-    if [ "$target_os" = "windows" ]; then
-        cc_target="%{_arch}-windows-gnu"
-        extra_ldflags="%{go_cgo_ldflags_win}"
-    else
-        cc_target="%{_arch}-linux-musl"
-        extra_ldflags="%{go_cgo_ldflags_linux}"
-    fi
-    cxx_target="${cc_target}"
-
-    # Example 1: Compile embedded SQLite amalgamation on-the-fly via Zig
-%if %{use_sqlite}
-    local sqlite_src="$(cd ../%{sqlitedir}/sqlite-amalgamation-* 2>/dev/null && pwd)"
-    echo "==> [${target_os}] Compiling static SQLite %{sqlitedotver} via Zig (target: ${cc_target})..."
-    zig cc -target "${cc_target}" %{sqlite_amalgamation_cflags} \
-        -c "${sqlite_src}/sqlite3.c" -o "${target_libdir}/sqlite3.o"
-    zig ar rcs "${target_libdir}/libsqlite3.a" "${target_libdir}/sqlite3.o"
-    cgo_cflags="${cgo_cflags} -I${sqlite_src}"
-    cgo_ldflags="${cgo_ldflags} -L${target_libdir} -lsqlite3"
-    tags="${tags:+$tags }libsqlite3"
+%{go_update_tree}
+%endif
 %endif
 
-    # Example 2: Compile bundled C library (e.g. libxcrypt) via Zig
-%if %{use_bundled_c_lib}
-    if [ "$target_os" = "linux" ]; then
-        local clib_src="$(cd ../libxcrypt-%{xcryptver} 2>/dev/null && pwd)"
-        local clib_build="${clib_src}/build-${target_os}"
-        echo "==> [${target_os}] Compiling static libxcrypt %{xcryptver} via Zig (target: ${cc_target})..."
-        rm -rf "${clib_build}"
-        mkdir -p "${clib_build}"
-        pushd "${clib_build}" >/dev/null
-        CC="zig cc -target ${cc_target}" \
-        CFLAGS="-O2 -fPIC" \
-        ../configure --host="${cc_target}" \
-            --prefix="$(pwd)/install" \
-            --libdir="$(pwd)/install/lib" \
-            --enable-static \
-            --disable-shared \
-            --enable-hashes=all \
-            --disable-werror >/dev/null 2>&1
-        make -j$(nproc) >/dev/null 2>&1
-        make install >/dev/null 2>&1
-        popd >/dev/null
-        cgo_cflags="${cgo_cflags} -I${clib_build}/install/include"
-        cgo_ldflags="${cgo_ldflags} -L${clib_build}/install/lib -lcrypt"
-    fi
+%if %{with audit}
+%go_security_audit
 %endif
 
-    echo "==> [${target_os}] Compiling static CGO binary with Zig (target: ${cc_target})..."
-    CGO_CFLAGS="${cgo_cflags}" \
-    CGO_LDFLAGS="${cgo_ldflags}" \
-    CC="zig cc -target ${cc_target}" \
-    CXX="zig c++ -target ${cxx_target}" \
-    go build ${tags:+-tags "${tags}"} %{go_opts} \
-        -ldflags "-s -w ${extra_ldflags} %{go_ldflags}" \
-        -o "bin/%{name}${ext}" <cmd_path>
-%endif
-}
+%go_build_target linux
+%pkg_stage_completions
 
-# 1. Compile Linux binary (100% static musl or pure Go)
-build_target linux
-chmod 0755 "bin/%{name}"
-
-# 2. If conditional Windows target is set, cross-compile for Windows PE
-%if %{with windows}
-mkdir -p bin/windows
-build_target windows
-cp -af "bin/%{name}.exe" "bin/windows/"
+%if %{enable_windows} && %{with windows}
+%go_build_target windows
 %endif
 
-# Prepare release staging directory and shared changelog
-mkdir -p %{distpath}
-%generate_changelog
-
-# If conditional archive target is set, package Linux generic tarball
-%if %{with archive}
-rm -f %{dist_archive}
-rm -rf staging_archive
-mkdir -p staging_archive/doc
-cp -af bin/%{name} staging_archive/
-chmod 0755 staging_archive/%{name}
-# cp -af %%{SOURCE20} staging_archive/doc/ 2>/dev/null || :
-cp -af LICENSE %{doclist} changelog.txt staging_archive/doc/ 2>/dev/null || :
-(cd staging_archive && tar -Jcvf %{dist_archive} *)
-rm -rf staging_archive
+%if %{enable_archive} && %{with archive}
+%pkg_stage_archive
 %endif
 
-# If conditional Windows target is set, package Windows ZIP archive
-%if %{with windows}
-rm -f %{dist_zip}
-rm -rf staging_windows
-mkdir -p staging_windows/doc
-cp -af bin/windows/%{name}.exe staging_windows/
-cp -af LICENSE %{doclist} changelog.txt staging_windows/doc/ 2>/dev/null || :
-unix2dos -k -q staging_windows/doc/* 2>/dev/null || :
-(cd staging_windows && zip -9r %{dist_zip} *)
-rm -rf staging_windows
+%if %{enable_windows} && %{with windows}
+%pkg_stage_zip
 %endif
 
-# If conditional DEB target is set, package Debian .deb
-%if %{with deb}
-%{SOURCE11} \
-  --name "%{name}" \
-  --version "%{pkgver}-%{release}" \
-  --arch "%{plat_arch}" \
-  --maintainer "%{maintainer}" \
-  --summary "%{pkg_summary}" \
-  --desc "%{pkg_desc}" \
-  --homepage "%{url}" \
-  --bin "bin/%{name}" \
-  %{?deb_depends:--depends "%{deb_depends}"} \
-  --doc LICENSE %{doclist} \
-  --changelog changelog.txt \
-  --out "%{dist_deb}"
+%if %{enable_deb} && %{with deb}
+%pkg_build_deb
 %endif
 
 
 %install
-[ "%{buildroot}" != "/" ] && [ -d "%{buildroot}" ] && rm -rf "%{buildroot}"
+%pkg_clean_buildroot
 
 %if %{with rpm}
-mkdir -p %{buildroot}%{_bindir}
-cp -af bin/%{name} %{buildroot}%{_bindir}/%{name}
-chmod 0755 %{buildroot}%{_bindir}/%{name}
-
-# Optional: Install systemd service, sysusers, tmpfiles, and environment config
-# install -D -p -m 0644 %%{SOURCE20} %%{buildroot}%%{_unitdir}/%%{name}.service
-# install -D -p -m 0644 %%{SOURCE21} %%{buildroot}%%{_sysusersdir}/%%{name}.conf
-# install -D -p -m 0644 %%{SOURCE22} %%{buildroot}%%{_tmpfilesdir}/%%{name}.conf
-# install -D -p -m 0640 %%{SOURCE23} %%{buildroot}%%{_sysconfdir}/%%{name}/%%{name}.env
-
-# Optional: Shell completion generation (for tools supporting completion subcommands)
-# install -d -m 0755 %%{buildroot}%%{bash_completions_dir} %%{buildroot}%%{zsh_completions_dir} %%{buildroot}%%{fish_completions_dir}
-# ./bin/%%{name} completion bash > %%{buildroot}%%{bash_completions_dir}/%%{name} 2>/dev/null || :
-# ./bin/%%{name} completion zsh  > %%{buildroot}%%{zsh_completions_dir}/_%%{name} 2>/dev/null || :
-# ./bin/%%{name} completion fish > %%{buildroot}%%{fish_completions_dir}/%%{name}.fish 2>/dev/null || :
+%pkg_install_bin
+%pkg_install_completions
+%pkg_install_daemon
 %endif
 
 
 %if %{with check}
 %check
-# 1. Binary wellness validation (structural static ELF integrity and execution)
-%{SOURCE10} check "bin/%{name}" "%{version}"
-%if %{with windows}
-%{SOURCE10} check-win "bin/windows/%{name}.exe"
+%pkg_check_bins
+
+%if %{with lint}
+%go_lint_checks
 %endif
 
-# 2. Optional: Upstream unit testsuite (DISABLED by default; enable with --with testsuite)
 %if %{with testsuite}
-go test -short ./...
+%go_run_tests
 %endif
 %endif
 
 
 %clean
-[ "%{buildroot}" != "/" ] && [ -d "%{buildroot}" ] && rm -rf "%{buildroot}"
+%pkg_clean_buildroot
 
 
 %if %{with rpm}
+%if "%{?completion_cmd}" != ""
+%files -f completions.files
+%else
 %files
+%endif
 %defattr(-,root,root,-)
-%license LICENSE
+%license %{license_file}
 %doc %{doclist}
-%{_bindir}/%{name}
-
-# Optional: Package systemd, sysusers, tmpfiles, and environment config
-# %%{_unitdir}/%%{name}.service
-# %%{_sysusersdir}/%%{name}.conf
-# %%{_tmpfilesdir}/%%{name}.conf
-# %%dir %%attr(0750,%%{name},%%{name}) %%{_sysconfdir}/%%{name}
-# %%config(noreplace) %%attr(0640,%%{name},%%{name}) %%{_sysconfdir}/%%{name}/%%{name}.env
+%{_bindir}/%{bin_name}
+%pkg_files_daemon
 %endif
 
-# Optional: Systemd RPM scriptlets for daemon packages
-# %%post
-# %%systemd_post %%{name}.service
-#
-# %%preun
-# %%systemd_preun %%{name}.service
-#
-# %%postun
-# %%systemd_postun_with_restart %%{name}.service
+%pkg_systemd_scriptlets
 
 
 %changelog
-* Mon Nov 02 2026 %{maintainer} - %{version}-%{rel_num}
+* <changelog_date> <maintainer> - <version>-<release_num>
 - Updated to latest upstream release

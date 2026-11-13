@@ -1,10 +1,29 @@
 #!/bin/bash
 # ==============================================================================
-# Script:      /usr/src/redhat/SOURCES/zig-musl.sh
+# Script:      /usr/src/packages/TEMPLATE/SOURCES/zig-musl.sh
 # Purpose:     Multi-call Zig wrapper providing static musl compilation,
-#              Windows PE cross-compilation, linking, static archiving, cargo
-#              environment configuration, and structural ELF/PE verification.
-#              Honors $CC / $CXX / $AR fallback if Zig is unavailable.
+#              Windows PE cross-compilation, static C/SQLite archiving, Cargo
+#              environment setup, and legacy ELF/PE verification forwarding.
+#
+# Objectives:
+#   Provide hermetic C/C++/linker/archiver shims over Zig (`zig cc`, `zig c++`,
+#   `zig ar`, `zig ranlib`) so Go CGO and Rust builds emit static musl Linux or
+#   Windows GNU binaries without host glibc/toolchain leakage.
+#
+# Core Components:
+#   - find_zig()      : Locates zig across $PATH and standard enterprise paths.
+#   - cargo           : Exports CARGO_TARGET_* / CC_* / CXX_* / AR_* and runs cargo.
+#   - build-sqlite    : Compiles static `libsqlite3.a` from amalgamation source.
+#   - build-autotools : Static cross-compile + install for autotools C libraries.
+#   - check/check-win : Legacy verification aliases delegating to `pkg-verify.sh`.
+#   - ar/ranlib/cc/c++: Multi-call compiler/linker dispatcher normalizing targets.
+#
+# Functionality & Data Flows:
+#   1. Resolves ZIG_BIN up front; falls back to $CC/$CXX/$AR/MinGW when appropriate.
+#   2. Subcommand dispatch (`$1`) routes `cargo`, `build-sqlite`, `build-autotools`,
+#      or `check*`; otherwise argv[0]/`$1` acts as `ar`, `ranlib`, `c++`, or `cc`.
+#   3. Compiler dispatch strips incompatible flags (`-Wl,--unresolved-symbols*`),
+#      deduplicates `--target`/`-target` args, and execs `zig <subcmd> -target ...`.
 #
 # Synopsis:
 #   1. Cargo Build Wrapper:
@@ -13,19 +32,22 @@
 #           CC_<target>, CXX_<target>, and AR_<target>, then invokes cargo.
 #           Seamlessly handles both Linux musl and Windows PE targets.
 #
-#   2. Linux Binary Structural Verification:
-#        zig-musl.sh check <binary_path> [expected_version_string]
-#        -> Asserts that <binary_path> is a 100% statically linked or static-pie
-#           ELF executable, confirms the absence of PT_INTERP dynamic linker segment,
-#           and optionally runs '<binary_path> --version' to verify execution.
+#   2. Static SQLite Amalgamation Helper:
+#        zig-musl.sh build-sqlite <target_triple> <sqlite_src_dir> <out_libdir> [cflags...]
+#        -> Compiles sqlite3.c and archives libsqlite3.a via Zig for the target.
 #
-#   3. Windows PE Executable Verification:
+#   3. Static Autotools C Library Helper:
+#        zig-musl.sh build-autotools <target_triple> <src_dir> <install_dir> [configure_args...]
+#        -> Cross-compiles an autotools C project statically via Zig and installs into <install_dir>.
+#
+#   4. Linux / Windows Binary Verification (legacy wrapper; delegates to pkg-verify.sh):
+#        zig-musl.sh check <binary_path> [expected_version_string] [version_flag]
 #        zig-musl.sh check-win <pe_binary_path>
-#        -> Validates that <pe_binary_path> is a valid 64-bit Windows PE executable.
 #
-#   4. Multi-call Compiler / Linker / Archiver:
+#   5. Multi-call Compiler / Linker / Archiver:
 #        Invoked directly as a linker, compiler, or archiver (via symlink or argument):
 #        - ar                  -> runs 'zig ar "$@"' (or $AR)
+#        - ranlib              -> runs 'zig ranlib "$@"' (or $RANLIB)
 #        - c++ | *clang++*     -> runs 'zig c++ -target <arch>-<os> "$@"' (or $CXX)
 #        - cc  | * (default)   -> runs 'zig cc  -target <arch>-<os> "$@"' (or $CC)
 #
@@ -36,6 +58,9 @@
 # ==============================================================================
 set -eo pipefail
 
+# ------------------------------------------------------------------------------
+# 0. Toolchain Discovery
+# ------------------------------------------------------------------------------
 CMD="$(basename "$0")"
 
 # Locate zig binary across PATH and standard enterprise system locations
@@ -86,10 +111,11 @@ if [ "$1" = "cargo" ]; then
 
   if [[ "$TARGET_TRIPLE" == *windows* ]]; then
     # For Rust Windows target, allow cargo to link via MinGW GCC if available
-    if command -v x86_64-w64-mingw32-gcc > /dev/null 2>&1; then
-      export "CC_${TARGET_SNAKE}=x86_64-w64-mingw32-gcc"
-      export "CXX_${TARGET_SNAKE}=x86_64-w64-mingw32-g++"
-      export "AR_${TARGET_SNAKE}=x86_64-w64-mingw32-ar"
+    WIN_ARCH_PREFIX="${TARGET_TRIPLE%%-*}"
+    if command -v "${WIN_ARCH_PREFIX}-w64-mingw32-gcc" > /dev/null 2>&1; then
+      export "CC_${TARGET_SNAKE}=${WIN_ARCH_PREFIX}-w64-mingw32-gcc"
+      export "CXX_${TARGET_SNAKE}=${WIN_ARCH_PREFIX}-w64-mingw32-g++"
+      export "AR_${TARGET_SNAKE}=${WIN_ARCH_PREFIX}-w64-mingw32-ar"
     fi
   else
     export "CARGO_TARGET_${CARGO_TARGET_KEY}_RUSTFLAGS=-C linker=${SELF} -C link-self-contained=no"
@@ -105,34 +131,125 @@ if [ "$1" = "cargo" ]; then
 fi
 
 # ------------------------------------------------------------------------------
-# 2. Linux Binary Inspection Subcommand
+# 2. Static SQLite Amalgamation Helper
 # ------------------------------------------------------------------------------
-# Validates that a binary is 100% static musl ELF (standard or static-pie)
-# with no PT_INTERP headers
+if [ "$1" = "build-sqlite" ]; then
+  shift
+  CC_TARGET="$1"
+  SQLITE_SRC="$2"
+  OUT_LIBDIR="$3"
+  shift 3 || {
+    echo "Usage: $(basename "$0") build-sqlite <target_triple> <sqlite_src_dir> <out_libdir> [cflags...]" >&2
+    exit 1
+  }
+  if [ -z "$ZIG_BIN" ]; then
+    echo "ERROR: zig compiler not found in PATH for build-sqlite!" >&2
+    exit 1
+  fi
+  if [ ! -f "${SQLITE_SRC}/sqlite3.c" ]; then
+    echo "ERROR: sqlite3.c not found in '${SQLITE_SRC}'!" >&2
+    exit 1
+  fi
+  mkdir -p "${OUT_LIBDIR}"
+  "$ZIG_BIN" cc -target "${CC_TARGET}" "$@" -c "${SQLITE_SRC}/sqlite3.c" -o "${OUT_LIBDIR}/sqlite3.o"
+  "$ZIG_BIN" ar rcs "${OUT_LIBDIR}/libsqlite3.a" "${OUT_LIBDIR}/sqlite3.o"
+  exit 0
+fi
+
+# ------------------------------------------------------------------------------
+# 2b. Static Autotools Cross-Compile Helper
+# ------------------------------------------------------------------------------
+if [ "$1" = "build-autotools" ]; then
+  shift
+  CC_TARGET="$1"
+  CLIB_SRC="$2"
+  INSTALL_DIR="$3"
+  shift 3 || {
+    echo "Usage: $(basename "$0") build-autotools <target_triple> <src_dir> <install_dir> [configure_args...]" >&2
+    exit 1
+  }
+  if [ -z "$ZIG_BIN" ]; then
+    echo "ERROR: zig compiler not found in PATH for build-autotools!" >&2
+    exit 1
+  fi
+  if [ -z "$CC_TARGET" ] || [ -z "$INSTALL_DIR" ]; then
+    echo "ERROR: build-autotools requires non-empty <target_triple> and <install_dir>!" >&2
+    exit 1
+  fi
+  # Guard against destructive rm -rf on empty or system-critical paths
+  case "$INSTALL_DIR" in
+    "/"|"."|".."|"/bin"|"/boot"|"/dev"|"/etc"|"/home"|"/lib"|"/lib64"|"/opt"|"/proc"|"/root"|"/run"|"/sbin"|"/sys"|"/tmp"|"/u01"|"/usr"|"/var")
+      echo "ERROR: Refusing unsafe INSTALL_DIR '${INSTALL_DIR}'!" >&2
+      exit 1
+      ;;
+  esac
+  if [ ! -f "${CLIB_SRC}/configure" ]; then
+    echo "ERROR: configure script not found in '${CLIB_SRC}'!" >&2
+    exit 1
+  fi
+  CLIB_BUILD="${CLIB_SRC}/build-${CC_TARGET}"
+  rm -rf -- "${CLIB_BUILD}" "${INSTALL_DIR}"
+  mkdir -p "${CLIB_BUILD}" "${INSTALL_DIR}"
+  pushd "${CLIB_BUILD}" >/dev/null
+  # Default -fPIC so generated static archives link cleanly under Linux CGO -static-pie
+  CC="${ZIG_BIN} cc -target ${CC_TARGET}" \
+  CXX="${ZIG_BIN} c++ -target ${CC_TARGET}" \
+  AR="${ZIG_BIN} ar" \
+  RANLIB="${ZIG_BIN} ranlib" \
+  CFLAGS="${CFLAGS:--O2 -fPIC}" \
+  "${CLIB_SRC}/configure" --host="${CC_TARGET}" \
+    --prefix="${INSTALL_DIR}" \
+    --libdir="${INSTALL_DIR}/lib" \
+    --enable-static \
+    --disable-shared \
+    "$@" >/dev/null 2>&1
+  make -j"$(nproc)" >/dev/null 2>&1
+  make install >/dev/null 2>&1
+  popd >/dev/null
+  exit 0
+fi
+
+# ------------------------------------------------------------------------------
+# 3. Binary Verification Subcommands (delegates to pkg-verify.sh when present)
+# ------------------------------------------------------------------------------
+if [ "$1" = "check" ] || [ "$1" = "check-win" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "$0")" &>/dev/null && pwd)"
+  if [ -x "${SCRIPT_DIR}/pkg-verify.sh" ]; then
+    exec "${SCRIPT_DIR}/pkg-verify.sh" "$@"
+  elif [ -f "${SCRIPT_DIR}/pkg-verify.sh" ]; then
+    exec bash "${SCRIPT_DIR}/pkg-verify.sh" "$@"
+  fi
+fi
+
 if [ "$1" = "check" ]; then
   shift
   BIN="$1"
   EXP_VER="$2"
+  VER_FLAG="${3:---version}"
   if [ -z "$BIN" ] || [ ! -f "$BIN" ]; then
     echo "ERROR: Binary '$BIN' not found!" >&2
     exit 1
   fi
   echo "==> Verifying Linux binary structure ($BIN)..."
-  file "$BIN" | grep -E -q "ELF (64|32)-bit.*static(ally|-pie)? linked" || {
+  FILE_OUT="$(file "$BIN")"
+  grep -E -q "ELF (64|32)-bit.*static(ally|-pie)? linked" <<< "$FILE_OUT" || {
     echo "ERROR: $BIN is not a statically linked ELF binary!" >&2
-    file "$BIN" >&2
+    echo "$FILE_OUT" >&2
     exit 1
   }
-  if readelf -l "$BIN" 2> /dev/null | grep -q "INTERP"; then
+  INTERP_OUT="$(readelf -l "$BIN" 2> /dev/null || true)"
+  if grep -q "INTERP" <<< "$INTERP_OUT"; then
     echo "ERROR: $BIN contains a dynamic linker (PT_INTERP) segment!" >&2
-    readelf -l "$BIN" | grep "INTERP" >&2
+    grep "INTERP" <<< "$INTERP_OUT" >&2
     exit 1
   fi
-  if [ -n "$EXP_VER" ]; then
-    echo "==> Verifying binary execution ($BIN --version)..."
-    [[ "$("$BIN" --version 2>&1)" == *"$EXP_VER"* ]] || {
-      echo "ERROR: $BIN version output does not contain expected version '$EXP_VER'!" >&2
-      "$BIN" --version >&2
+  if [ -n "$EXP_VER" ] && [ "$VER_FLAG" != "none" ]; then
+    echo "==> Verifying binary execution ($BIN $VER_FLAG)..."
+    read -r -a FLAG_ARGS <<< "$VER_FLAG"
+    OUT="$("$BIN" "${FLAG_ARGS[@]}" 2>&1 || true)"
+    [[ "$OUT" == *"$EXP_VER"* ]] || {
+      echo "ERROR: $BIN $VER_FLAG output does not contain expected version '$EXP_VER'!" >&2
+      echo "$OUT" >&2
       exit 1
     }
   fi
@@ -140,10 +257,6 @@ if [ "$1" = "check" ]; then
   exit 0
 fi
 
-# ------------------------------------------------------------------------------
-# 3. Windows PE Binary Inspection Subcommand
-# ------------------------------------------------------------------------------
-# Validates that a cross-compiled binary is a 64-bit Windows PE executable
 if [ "$1" = "check-win" ]; then
   shift
   BIN="$1"
@@ -152,9 +265,10 @@ if [ "$1" = "check-win" ]; then
     exit 1
   fi
   echo "==> Verifying Windows binary structure ($BIN)..."
-  file "$BIN" | grep -E -q "PE32\+ executable.*for MS Windows" || {
+  FILE_OUT="$(file "$BIN")"
+  grep -E -q "PE32\+ executable.*for MS Windows" <<< "$FILE_OUT" || {
     echo "ERROR: $BIN is not a valid 64-bit Windows PE executable!" >&2
-    file "$BIN" >&2
+    echo "$FILE_OUT" >&2
     exit 1
   }
   echo "==> Windows binary verification passed for $BIN"
@@ -274,6 +388,6 @@ elif command -v "$FALLBACK_CC" > /dev/null 2>&1; then
   echo "NOTICE: zig not found; falling back to system ${FALLBACK_CC}" >&2
   exec "$FALLBACK_CC" "${ARGS[@]}"
 else
-  echo "ERROR: zig compiler not found in PATH (/var/opt/zig, /u01/zig) and no CC fallback available!" >&2
+  echo "ERROR: zig compiler not found in PATH (/var/opt/zig, /u01/zig, /usr/local/bin, /opt/zig) and no CC fallback available!" >&2
   exit 1
 fi
