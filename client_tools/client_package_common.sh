@@ -546,43 +546,6 @@ download_asset() {
 # ------------------------------------------------------------------------------
 # Section 9: Archive Manipulation & Pruning Utilities
 # ------------------------------------------------------------------------------
-# is_artifact_file <filename>
-# Checks if a filename matches redundant packaging files to prune:
-# LICENSE*, *LICENCE*, NOTICE*, ATTRIBUTION*, OFL-*.txt, ASSETS.md, portable.txt (case-insensitive)
-is_artifact_file() {
-    local fname="$1"
-    local lower="${fname,,}"
-    if [[ "$lower" == license* || "$lower" == *licence* || "$lower" == notice* || "$lower" == attribution* || "$lower" == ofl-*.txt || "$lower" == ofl.txt || "$lower" == assets.md || "$lower" == portable.txt ]]; then
-        return 0
-    fi
-    return 1
-}
-
-# clean_zip_artifacts <zip_path>
-# Removes matching artifact files directly from a zip archive without full repacking.
-clean_zip_artifacts() {
-    local zip_path="$1"
-    [[ -f "$zip_path" ]] || return 1
-
-    local entries_to_remove=()
-    while IFS= read -r entry || [[ -n "$entry" ]]; do
-        [[ -z "$entry" ]] && continue
-        local base="${entry##*/}"
-        if is_artifact_file "$base" || [[ "${entry,,}" =~ (^|/)licenses(/|$) || "${entry,,}" =~ (^|/)license(/|$) ]]; then
-            entries_to_remove+=("$entry")
-        fi
-    done < <(unzip -Z1 "$zip_path" 2> /dev/null || true)
-
-    if [[ ${#entries_to_remove[@]} -gt 0 ]]; then
-        log_info "Removing ${#entries_to_remove[@]} artifact file(s) from $(basename "$zip_path")..."
-        if command -v zip > /dev/null 2>&1; then
-            zip -q -d "$zip_path" "${entries_to_remove[@]}" > /dev/null 2>&1 || true
-        elif command -v 7za > /dev/null 2>&1; then
-            7za d "$zip_path" "${entries_to_remove[@]}" > /dev/null 2>&1 || true
-        fi
-    fi
-}
-
 # strip_base_directory <target_dir>
 # If target_dir contains exactly one directory entry and no files, moves all contents
 # of that directory up into target_dir and removes the now-empty wrapper folder.
@@ -607,29 +570,6 @@ strip_base_directory() {
         shopt -u nullglob dotglob
         rmdir "$tmp_mv" 2> /dev/null || rm -rf "$tmp_mv" 2> /dev/null || true
     fi
-}
-
-# prune_directory_artifacts <target_dir>
-# Recursively removes artifact files (licenses, notices, attributions, OFL,
-# ASSETS.md, portable.txt) and any licenses subfolder.
-prune_directory_artifacts() {
-    local target_dir="$1"
-    [[ -d "$target_dir" ]] || return 0
-
-    # 1. Remove licenses/ or license/ subfolders wherever they exist
-    find "$target_dir" -type d \( -iname "licenses" -o -iname "license" \) -prune -exec rm -rf {} + 2> /dev/null || true
-
-    # 2. Remove packaging artifact files
-    find "$target_dir" -type f \( \
-        -iname "license*" -o \
-        -iname "*licence*" -o \
-        -iname "notice*" -o \
-        -iname "attribution*" -o \
-        -iname "ofl-*.txt" -o \
-        -iname "ofl.txt" -o \
-        -iname "assets.md" -o \
-        -iname "portable.txt" \
-        \) -delete 2> /dev/null || true
 }
 
 # repack_directory_to_zip <content_dir> <dest_zip>

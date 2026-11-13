@@ -53,7 +53,7 @@ flowchart TD
     subgraph AssetsAndArchives ["3. Download & Archive Transformation"]
         DownloadHelper["download_asset\n(curl + sha512sum / sha256sum verification)"]
         ArchiveExtractor["extract_archive\n(zip, tar.gz, tar.xz, tar)"]
-        Debloater["Debloating Utilities\n(prune_root_licenses, prune_electron_locales, clean_zip_artifacts)"]
+        Debloater["Debloating Utilities\n(prune_root_licenses, prune_electron_locales)"]
         Recompressor["recompress_folder_to_tar_xz\n(xz -9 -T0, owner=0:group=0)"]
         Verifiers["Integrity Checkers\n(verify_zip_integrity, verify_tar_xz_integrity)"]
     end
@@ -346,26 +346,8 @@ download_asset "https://example.com/app.exe" "/tmp/app.exe" "abcdef12345..." "sh
   - `$1`: Path to archive file.
   - `$2`: Destination extraction directory.
 
-#### `is_artifact_file <filename>`
-- **Description**: Evaluates if a filename matches redundant packaging files (licenses, notices, OFL font declarations, asset documentation, portable markers).
-- **Matching Rules** (case-insensitive):
-  - `license*`, `*licence*`, `notice*`, `attribution*`, `ofl-*.txt`, `ofl.txt`, `assets.md`, `portable.txt`
-- **Exit Code**: `0` if file is an artifact to prune; `1` otherwise.
-
-#### `clean_zip_artifacts <zip_path>`
-- **Description**: Inspects table of contents of an existing `.zip` archive via `unzip -Z1` and purges matching artifact files or `licenses/` subfolders in place using `zip -q -d` or `7za d` without full extraction.
-- **Parameters**:
-  - `$1`: Target `.zip` file path.
-
 #### `strip_base_directory <target_dir>`
 - **Description**: Inspects an unpacked archive directory. If the directory contains exactly one top-level folder entry and no files (e.g. `pdfcraft-0.21.0-windows-x64-portable/`), it automatically moves all nested items up into `target_dir` and removes the wrapper folder.
-- **Parameters**:
-  - `$1`: Target unpacked directory path.
-
-#### `prune_directory_artifacts <target_dir>`
-- **Description**: Recursively scans an unpacked directory tree:
-  1. Recursively finds and purges any `licenses/` or `license/` subfolders (e.g. in app root or `share/doc/<app>/licenses/`).
-  2. Recursively deletes redundant packaging files: `LICENSE*`, `*LICENCE*`, `NOTICE*`, `ATTRIBUTION*`, `OFL*.txt`, `ASSETS.md`, and `portable.txt`.
 - **Parameters**:
   - `$1`: Target unpacked directory path.
 

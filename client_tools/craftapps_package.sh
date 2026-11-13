@@ -7,8 +7,9 @@
 #
 # When packaging (--action build):
 #   1. Downloads Linux (x86_64 tar.gz/tar.xz) and Windows (x86_64 zip) binaries.
-#   2. Prunes packaging artifacts (LICENSE*, *LICENCE*, NOTICE*, ATTRIBUTION*, OFL-*.txt).
-#   3. Decompresses Linux archive, deletes artifacts, and recompresses to .tar.xz.
+#   2. Extracts each archive, strips single base directory, and prunes
+#      packaging artifacts (ARTIFACT_DIR_NAMES / ARTIFACT_FILE_PATTERNS).
+#   3. Repacks Windows .zip and recompresses Linux archive to .tar.xz.
 #   4. Repackages both archives directly into a combined zip: <app>-<ver>-<suffix>.zip.
 #   5. Deletes the previous version from --source and replaces it with the new version.
 #   6. Removes any prior version from --target and stages the new zip in --target.
@@ -52,11 +53,11 @@
 #   6. Semantic Version Evaluator:
 #      GNU sort -V based version comparator supporting semantic versioning.
 #   7. Transactional Repackager & Atomic Stager (--action build):
-#      Downloads to temp, verifies archive integrity (tar -tzf, unzip -tq),
-#      prunes packaging/licensing artifacts in-place, decompresses Linux tar.gz,
-#      prunes artifacts, recompresses with xz -9 -T0 to .tar.xz, bundles archives into
-#      combined zip, verifies output, moves to source library, and atomically stages
-#      to target pending directory via .tmp rename.
+#      Downloads to temp, verifies archive integrity (tar -tzf/-tJf, unzip -tq),
+#      extracts Windows/Linux archives, strips enclosing base folders, prunes
+#      packaging artifacts, repacks Windows .zip and Linux .tar.xz (xz -9 -T0),
+#      bundles archives into combined zip, verifies output, moves to source library,
+#      and atomically stages to target pending directory via .tmp rename.
 #   8. Extraction & Installation Engine (--action deploy):
 #      Discovers packages from local folders or remote URLs, auto-detects host OS,
 #      extracts binaries, strips base folder, deploys flattened (executables only)
@@ -75,8 +76,9 @@
 #        │           ├─► Compare Versions: If remote > local (or missing locally):
 #        │           │     ├─► Download Linux tar.gz & Windows zip to Temp
 #        │           │     ├─► Verify Download Integrity: tar -tzf & unzip -tq
-#        │           │     ├─► Prune Artifacts (LICENSE*, NOTICE*, ATTRIBUTION*, OFL-*)
-#        │           │     ├─► Decompress Linux tar.gz, prune artifacts, recompress to .tar.xz
+#        │           │     ├─► Extract Windows & Linux Archives, Strip Base Folder
+#        │           │     ├─► Prune Artifacts (licenses/, LICENSE*, ASSETS.md, portable*)
+#        │           │     ├─► Repack Windows .zip & Linux .tar.xz (xz -9 -T0)
 #        │           │     ├─► Package cleaned archives into Combined Zip: zip -q
 #        │           │     ├─► Verify Packaged Zip Integrity: unzip -tq
 #        │           │     ├─► Update Source: Delete older versions, mv package to --source
@@ -436,10 +438,78 @@ extract_asset_urls() {
 # ------------------------------------------------------------------------------
 # Section 8b: Artifact Cleanup & Recompression Engine
 # ------------------------------------------------------------------------------
-# Archive extraction, base folder stripping, artifact pruning (licenses subfolder,
-# ASSETS.md, portable.txt), and zip/xz recompression utilities are provided
-# by client_package_common.sh (strip_base_directory, prune_directory_artifacts,
-# repack_directory_to_zip, repack_directory_to_tar_xz).
+# Archive extraction, base folder stripping, and zip/xz recompression utilities
+# are provided by client_package_common.sh (extract_archive,
+# strip_base_directory, repack_directory_to_zip, repack_directory_to_tar_xz).
+
+ARTIFACT_DIR_NAMES=("licenses" "license")
+ARTIFACT_FILE_PATTERNS=(
+    "license*"
+    "*licence*"
+    "notice*"
+    "attribution*"
+    "ofl-*.txt"
+    "ofl.txt"
+    "assets.md"
+    "portable.txt"
+    "portable"
+)
+
+# _prune_by_iname <target_dir> <d|f> <pattern...>
+# Removes directories (-type d) or files (-type f) matching any -iname pattern.
+_prune_by_iname() {
+    local target_dir="$1"
+    local find_type="$2"
+    shift 2
+    [[ $# -gt 0 ]] || return 0
+
+    local expr=() pat
+    for pat in "$@"; do
+        [[ ${#expr[@]} -gt 0 ]] && expr+=(-o)
+        expr+=(-iname "$pat")
+    done
+
+    if [[ "$find_type" == "d" ]]; then
+        find "$target_dir" -type d \( "${expr[@]}" \) -prune -exec rm -rf {} + 2> /dev/null || true
+    else
+        find "$target_dir" -type f \( "${expr[@]}" \) -delete 2> /dev/null || true
+    fi
+}
+
+# prune_directory_artifacts <target_dir>
+# Recursively removes ARTIFACT_DIR_NAMES folders and ARTIFACT_FILE_PATTERNS files.
+prune_directory_artifacts() {
+    local target_dir="$1"
+    [[ -d "$target_dir" ]] || return 0
+
+    _prune_by_iname "$target_dir" d "${ARTIFACT_DIR_NAMES[@]}"
+    _prune_by_iname "$target_dir" f "${ARTIFACT_FILE_PATTERNS[@]}"
+}
+
+# _normalize_archive <platform_label> <src_name> <dest_name> <repack_fn>
+# Extracts CURRENT_BUILD_DIR/<src_name>, strips single enclosing base folder,
+# prunes packaging artifacts, and repacks into CURRENT_BUILD_DIR/<dest_name>.
+_normalize_archive() {
+    local label="$1"
+    local src_name="$2"
+    local dest_name="$3"
+    local repack_fn="$4"
+
+    local unpack_dir="${CURRENT_BUILD_DIR}/${label,,}_unpacked"
+    mkdir -p "$unpack_dir"
+    if ! extract_archive "${CURRENT_BUILD_DIR}/${src_name}" "$unpack_dir"; then
+        log_error "Failed to extract ${label} archive: $src_name"
+        return 1
+    fi
+    safe_rm_f "${CURRENT_BUILD_DIR}/${src_name}"
+    strip_base_directory "$unpack_dir"
+    prune_directory_artifacts "$unpack_dir"
+    if ! "$repack_fn" "$unpack_dir" "${CURRENT_BUILD_DIR}/${dest_name}"; then
+        log_error "Failed to repackage ${label} archive: $dest_name"
+        return 1
+    fi
+    safe_rm_rf "$unpack_dir"
+}
 
 # ------------------------------------------------------------------------------
 # Section 8c: Application Deployment Pipeline (--action deploy)
@@ -1213,57 +1283,27 @@ for entry in "${PACKAGES[@]}"; do
 
     # Step 5e: Normalize Windows Archive (Extract, Strip Base Folder, Prune Artifacts & Repackage)
     log_info "Normalizing Windows archive for $app_name (stripping base folder & pruning artifacts)..."
-    win_unpack="${CURRENT_BUILD_DIR}/win_unpacked"
-    mkdir -p "$win_unpack"
-    if ! extract_archive "${CURRENT_BUILD_DIR}/${win_name}" "$win_unpack"; then
-        log_error "Failed to extract Windows archive: $win_name"
+    if ! _normalize_archive "Windows" "$win_name" "$win_name" repack_directory_to_zip; then
         safe_rm_rf "$CURRENT_BUILD_DIR"
         CURRENT_BUILD_DIR=""
         ERROR_COUNT=$((ERROR_COUNT + 1))
         continue
     fi
-    safe_rm_f "${CURRENT_BUILD_DIR}/${win_name}"
-    strip_base_directory "$win_unpack"
-    prune_directory_artifacts "$win_unpack"
-    if ! repack_directory_to_zip "$win_unpack" "${CURRENT_BUILD_DIR}/${win_name}"; then
-        log_error "Failed to repackage Windows archive: $win_name"
-        safe_rm_rf "$CURRENT_BUILD_DIR"
-        CURRENT_BUILD_DIR=""
-        ERROR_COUNT=$((ERROR_COUNT + 1))
-        continue
-    fi
-    safe_rm_rf "$win_unpack"
 
     # Step 5f: Normalize Linux Archive (Extract, Strip Base Folder, Prune Artifacts & Recompress to xz)
     log_info "Normalizing Linux archive for $app_name (stripping base folder, pruning artifacts & transcoding to xz)..."
-    linux_unpack="${CURRENT_BUILD_DIR}/linux_unpacked"
-    mkdir -p "$linux_unpack"
-    if ! extract_archive "${CURRENT_BUILD_DIR}/${linux_name}" "$linux_unpack"; then
-        log_error "Failed to extract Linux archive: $linux_name"
-        safe_rm_rf "$CURRENT_BUILD_DIR"
-        CURRENT_BUILD_DIR=""
-        ERROR_COUNT=$((ERROR_COUNT + 1))
-        continue
-    fi
-    safe_rm_f "${CURRENT_BUILD_DIR}/${linux_name}"
-    strip_base_directory "$linux_unpack"
-    prune_directory_artifacts "$linux_unpack"
-
     case "${linux_name,,}" in
         *.tar.xz) final_linux_name="$linux_name" ;;
         *.tar.gz) final_linux_name="${linux_name:0:${#linux_name}-7}.tar.xz" ;;
         *.tgz) final_linux_name="${linux_name:0:${#linux_name}-4}.tar.xz" ;;
         *) final_linux_name="${linux_name}.tar.xz" ;;
     esac
-
-    if ! repack_directory_to_tar_xz "$linux_unpack" "${CURRENT_BUILD_DIR}/${final_linux_name}"; then
-        log_error "Failed to recompress Linux archive to xz: $final_linux_name"
+    if ! _normalize_archive "Linux" "$linux_name" "$final_linux_name" repack_directory_to_tar_xz; then
         safe_rm_rf "$CURRENT_BUILD_DIR"
         CURRENT_BUILD_DIR=""
         ERROR_COUNT=$((ERROR_COUNT + 1))
         continue
     fi
-    safe_rm_rf "$linux_unpack"
     linux_name="$final_linux_name"
 
     # Step 5g: Repackage combined zip in tmp

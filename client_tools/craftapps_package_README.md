@@ -14,7 +14,7 @@ The **Storytold Craft Apps Packaging & Deployment Utility** (`craftapps_package.
 ### 1.2 Core Business & Technical Objectives
 - **Multi-Platform Archive Unification**: Bundle corresponding 64-bit Linux (`.tar.xz`) and Windows (`.zip`) release binaries into a single, standardized archive (`<app>-<version>-win-lnx.zip`) for distribution.
 - **Base Folder Normalization**: Automatically strips redundant top-level wrapper directories (e.g. `<app>-<ver>-windows-x64-portable/` or `<app>-<ver>-linux-x86_64/`), guaranteeing all binaries, models, and assets sit directly at the root of their respective distribution archives.
-- **Packaging Artifact De-Bloating**: Recursively prunes redundant license files (`LICENSE*`, `*LICENCE*`, `NOTICE*`, `ATTRIBUTION*`, `OFL-*.txt`, `ASSETS.md`, `portable.txt`) and deletes `licenses/` subfolders to minimize package bloat and unclutter runtime folders.
+- **Packaging Artifact De-Bloating**: Recursively prunes redundant license files (`LICENSE*`, `*LICENCE*`, `NOTICE*`, `ATTRIBUTION*`, `OFL-*.txt`, `OFL.txt`, `ASSETS.md`, `portable.txt`, `portable`) and deletes `licenses/` subfolders to minimize package bloat and unclutter runtime folders.
 - **Linux XZ Transcoding**: Decompresses `.tar.gz` and recompresses using multi-threaded `xz -9 -T0` to produce high-compression `.tar.xz` tarballs with standardized `0:0` (`root/root`) ownership.
 - **Zero-Corruption Guarantee (Transactional Staging)**: Protect destination directories against partial writes, download corruptions, or interrupted operations by performing all extraction, repackaging, and integrity checks within an isolated temporary workspace before touching production libraries.
 - **End-to-End Portable Deployment**: Rapidly install and deploy binaries into target directories with flexible formatting options (`--flatten` for executable binaries only, or structured extraction without the versioned archive root folder).
@@ -53,8 +53,8 @@ flowchart TD
         Decision -- No --> Skip["Log Up-To-Date & Continue"]
         Decision -- Yes --> Download["Download Assets: download_asset()"]
         Download --> VerifyIn["Verify Download Integrity: verify_tar_xz / verify_zip"]
-        VerifyIn --> CleanupArtifacts["Artifact Cleanup: clean_zip_artifacts / clean tar"]
-        CleanupArtifacts --> RecompressXZ["Transcode Linux tar to .tar.xz (xz -9 -T0)"]
+        VerifyIn --> CleanupArtifacts["Normalize: extract, strip_base_directory, prune_directory_artifacts()"]
+        CleanupArtifacts --> RecompressXZ["Repack Windows .zip & Linux .tar.xz (xz -9 -T0)"]
         RecompressXZ --> Repackage["zip -q Combined Bundle: <app>-<ver>-win-lnx.zip"]
         Repackage --> VerifyBundle["Verify Bundle Integrity: verify_zip_integrity"]
         VerifyBundle --> UpdateSource["Transactional Staging: atomic_stage_package()"]
@@ -122,8 +122,7 @@ flowchart TD
      - Evaluates local version in `--source` vs. remote GitHub release tag via `sort -V`.
      - Downloads Linux (`.tar.gz`/`.tar.xz`) and Windows (`.zip`) binary assets using `download_asset()`.
      - Verifies archive integrity (`verify_tar_xz_integrity`, `verify_zip_integrity`).
-     - **Artifact Cleanup**: Prunes `LICENSE*`, `*LICENCE*`, `NOTICE*`, `ATTRIBUTION*`, and `OFL-*.txt` directly from the Windows zip (`clean_zip_artifacts()`).
-     - **Linux XZ Transcoding**: Decompresses `.tar.gz`, strips base directory, prunes licensing/packaging artifacts, and recompresses using multi-threaded `xz -9 -T0` to produce `.tar.xz`.
+     - **Windows & Linux Normalization**: Extracts each archive, strips single enclosing base directories (`strip_base_directory()`), prunes `licenses/` subfolders and redundant packaging files (`ARTIFACT_FILE_PATTERNS` via `prune_directory_artifacts()`), and repacks Windows `.zip` (`repack_directory_to_zip()`) and Linux `.tar.xz` using multi-threaded `xz -9 -T0` (`repack_directory_to_tar_xz()`).
      - Packages cleaned `.tar.xz` and `.zip` into combined bundle (`<app>-<ver>-win-lnx.zip`).
      - Verifies bundle integrity (`verify_zip_integrity`).
      - Atomically updates `--source` and stages to `--target` via `atomic_stage_package()`.
@@ -178,12 +177,11 @@ sequenceDiagram
             GH-->>FS_Temp: Write win.zip
             Script->>FS_Temp: verify_zip_integrity (Verify)
 
-            Note over Script,FS_Temp: Artifact Cleanup & XZ Transcoding
-            Script->>FS_Temp: clean_zip_artifacts win.zip (Prune artifacts)
-            Script->>FS_Temp: extract_archive & strip_base_directory
-            Script->>FS_Temp: prune_directory_artifacts (Prune artifacts)
-            Script->>FS_Temp: repack_directory_to_tar_xz (xz -9 -T0)
-            Script->>FS_Temp: verify_tar_xz_integrity & verify_zip_integrity
+            Note over Script,FS_Temp: Archive Normalization & XZ Transcoding
+            Script->>FS_Temp: extract_archive & strip_base_directory (win & linux)
+            Script->>FS_Temp: prune_directory_artifacts (licenses/, LICENSE*, ASSETS.md, portable*)
+            Script->>FS_Temp: repack_directory_to_zip & repack_directory_to_tar_xz (xz -9 -T0)
+            Script->>FS_Temp: verify_zip_integrity & verify_tar_xz_integrity
             
             Script->>FS_Temp: zip -q bundle.zip linux.tar.xz win.zip
             Script->>FS_Temp: verify_zip_integrity bundle.zip
