@@ -124,26 +124,8 @@ source "$COMMON_LIB"
 #   DEFAULT_ORG    : GitHub organization namespace hosting application source/releases.
 DEFAULT_ORG="storytold"
 
-if [[ "$PLATFORM" == "linux" || "$PLATFORM" == "wsl" ]]; then
-    if [[ -d "/mnt/n/softlib/software/public" ]]; then
-        DEFAULT_SOURCE="/mnt/n/softlib/software/public"
-    elif [[ -d "/media/n/softlib/software/public" ]]; then
-        DEFAULT_SOURCE="/media/n/softlib/software/public"
-    else
-        DEFAULT_SOURCE="n:/softlib/software/public"
-    fi
-
-    if [[ -d "/mnt/f/stage/upload/pending" ]]; then
-        DEFAULT_TARGET="/mnt/f/stage/upload/pending"
-    elif [[ -d "/media/f/stage/upload/pending" ]]; then
-        DEFAULT_TARGET="/media/f/stage/upload/pending"
-    else
-        DEFAULT_TARGET="f:/stage/upload/pending"
-    fi
-else
-    DEFAULT_SOURCE="n:/softlib/software/public"
-    DEFAULT_TARGET="f:/stage/upload/pending"
-fi
+DEFAULT_SOURCE="$(resolve_default_path "n" "softlib/software/public")"
+DEFAULT_TARGET="$(resolve_default_path "f" "stage/upload/pending")"
 
 # Active execution path and organization variables (overridable via CLI arguments)
 SOURCE_PATH="$DEFAULT_SOURCE"
@@ -155,8 +137,8 @@ GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 # Without authentication, GitHub API rate limits anonymous callers to 60 requests/hr.
 # Authenticated callers receive 5,000 requests/hr. Probing the `gh` CLI credentials
 # enables seamless high-capacity querying without manual token configuration.
-if [[ -z "$GITHUB_TOKEN" ]] && command -v gh >/dev/null 2>&1; then
-    GITHUB_TOKEN=$(gh auth token 2>/dev/null || true)
+if [[ -z "$GITHUB_TOKEN" ]] && command -v gh > /dev/null 2>&1; then
+    GITHUB_TOKEN=$(gh auth token 2> /dev/null || true)
 fi
 
 # Execution Control Flags:
@@ -255,13 +237,13 @@ PACKAGES=(
 #   Prints human-readable category string (e.g. "Audio", "Imaging > CAD", "Development > UX").
 get_category_label() {
     case "$1" in
-        apps/audio)              echo "Audio" ;;
-        apps/imaging/cad)        echo "Imaging > CAD" ;;
-        apps/imaging/draw)       echo "Imaging > Draw" ;;
-        apps/imaging/video)      echo "Imaging > Video" ;;
-        apps/office)             echo "Office" ;;
-        apps/text/pdf/editor)    echo "Text > PDF Editor" ;;
-        devel/ux)                echo "Development > UX" ;;
+        apps/audio) echo "Audio" ;;
+        apps/imaging/cad) echo "Imaging > CAD" ;;
+        apps/imaging/draw) echo "Imaging > Draw" ;;
+        apps/imaging/video) echo "Imaging > Video" ;;
+        apps/office) echo "Office" ;;
+        apps/text/pdf/editor) echo "Text > PDF Editor" ;;
+        devel/ux) echo "Development > UX" ;;
         *)
             local clean="${1#apps/}"
             clean="${clean//\// > }"
@@ -357,68 +339,7 @@ EOF
 # ------------------------------------------------------------------------------
 # Section 7: Version Evaluation & Local Discovery
 # ------------------------------------------------------------------------------
-# (is_version_newer is provided by client_package_common.sh)
-
-# ------------------------------------------------------------------------------
-# Find Local Package Version in Source Directory
-# ------------------------------------------------------------------------------
-# find_local_version <base_dir> <rel_dir> <app_name> <suffix>
-# Scans the local source library folder for existing package archives matching
-# the specified application name and suffix patterns.
-#
-# Arguments:
-#   $1 - Base source library directory (POSIX cygpath format)
-#   $2 - Relative directory under source (e.g. "apps/audio")
-#   $3 - Application name (e.g. "soundcraft")
-#   $4 - Package suffix (e.g. "win-lnx")
-# Outputs:
-#   Prints two space-separated values: "<latest_version> <canonical_file_path>"
-#   Returns "none" and an empty string if no matching archive exists.
-# Key Behaviors:
-#   - Filename regex captures versions matching both "win-lnx" and legacy "lnx-win"
-#     so existing historical packages in the library are correctly identified.
-#   - If multiple matching zips exist, iterates through all and selects the
-#     highest version determined by is_version_newer.
-#   - Normalizes the returned file path to canonical drive:/path/sub format.
-find_local_version() {
-    local base_dir="$1"
-    local rel_dir="$2"
-    local app_name="$3"
-    local suffix="$4"
-
-    local search_dir="${base_dir}/${rel_dir}"
-    if [[ ! -d "$search_dir" ]]; then
-        echo "none" ""
-        return 0
-    fi
-
-    # Find matching zip files
-    local latest_ver="none"
-    local latest_file=""
-
-    shopt -s nullglob
-    local files=("${search_dir}/${app_name}-"*.zip)
-    shopt -u nullglob
-
-    for f in "${files[@]}"; do
-        local fname
-        fname=$(basename "$f")
-        # Extract version: <app_name>-<version>-<suffix>.zip
-        if [[ "$fname" =~ ^${app_name}-([0-9]+(\.[0-9]+)*([a-zA-Z0-9._-]*))-(${suffix}|win-lnx|lnx-win)\.zip$ ]]; then
-            local ver="${BASH_REMATCH[1]}"
-            if [[ "$latest_ver" == "none" ]] || is_version_newer "$ver" "$latest_ver"; then
-                latest_ver="$ver"
-                latest_file="$f"
-            fi
-        fi
-    done
-
-    if [[ -n "$latest_file" ]]; then
-        latest_file=$(enforce_drive_path "$latest_file")
-    fi
-
-    echo "$latest_ver" "$latest_file"
-}
+# (is_version_newer and find_local_version are provided by client_package_common.sh)
 
 # ------------------------------------------------------------------------------
 # Section 8: GitHub API Discovery & Asset Extraction Engine
@@ -452,7 +373,7 @@ fetch_github_release() {
     response=$(curl -sSL --connect-timeout 10 --max-time 30 "${auth_header[@]}" \
         -H "Accept: application/vnd.github+json" \
         -H "User-Agent: craftapps-packager" \
-        "$url" 2>/dev/null || true)
+        "$url" 2> /dev/null || true)
 
     # Fallback to /releases?per_page=1 if /releases/latest returns Not Found (e.g. pre-releases)
     if [[ "$response" == *"Not Found"* ]] || [[ -z "$response" ]]; then
@@ -461,10 +382,10 @@ fetch_github_release() {
         fallback_resp=$(curl -sSL --connect-timeout 10 --max-time 30 "${auth_header[@]}" \
             -H "Accept: application/vnd.github+json" \
             -H "User-Agent: craftapps-packager" \
-            "$fallback_url" 2>/dev/null || true)
+            "$fallback_url" 2> /dev/null || true)
         if [[ "$fallback_resp" =~ ^[[:space:]]*\[ ]]; then
             local first_rel
-            first_rel=$(echo "$fallback_resp" | jq '.[0] // empty' 2>/dev/null)
+            first_rel=$(echo "$fallback_resp" | jq '.[0] // empty' 2> /dev/null)
             [[ -n "$first_rel" && "$first_rel" != "null" ]] && response="$first_rel"
         fi
     fi
@@ -585,7 +506,7 @@ run_deploy_pipeline() {
     local url_index_html=""
     if [[ "$SOURCE_IS_URL" == true ]]; then
         log_info "Fetching remote directory index from $SOURCE_PATH..."
-        url_index_html=$(curl -sSL --connect-timeout 10 --max-time 30 "$SOURCE_PATH" 2>/dev/null || true)
+        url_index_html=$(curl -sSL --connect-timeout 10 --max-time 30 "$SOURCE_PATH" 2> /dev/null || true)
         if [[ -z "$url_index_html" ]]; then
             log_error "Failed to retrieve directory index from URL: $SOURCE_PATH"
             return 1
@@ -684,7 +605,7 @@ run_deploy_pipeline() {
         local inner_files=()
         while IFS= read -r l || [[ -n "$l" ]]; do
             [[ -n "$l" ]] && inner_files+=("$l")
-        done < <(unzip -Z1 "$archive_file" 2>/dev/null || true)
+        done < <(unzip -Z1 "$archive_file" 2> /dev/null || true)
 
         if [[ "$target_os" == "windows" ]]; then
             local win_inner=""
@@ -760,12 +681,12 @@ run_deploy_pipeline() {
                     local bname
                     bname=$(basename "$exe_file")
                     local bname_lower="${bname,,}"
-                    if [[ "$NO_CLI" == true && ( "$bname_lower" == *-cli.exe || "$bname_lower" == *-cli ) ]]; then
+                    if [[ "$NO_CLI" == true && ("$bname_lower" == *-cli.exe || "$bname_lower" == *-cli) ]]; then
                         log_info "Excluding CLI binary (--no-cli): $bname"
                         continue
                     fi
                     cp -f "$exe_file" "${DEPLOY_TARGET_CYG}/${bname}"
-                    chmod 755 "${DEPLOY_TARGET_CYG}/${bname}" 2>/dev/null || true
+                    chmod 755 "${DEPLOY_TARGET_CYG}/${bname}" 2> /dev/null || true
                     deployed_bins=$((deployed_bins + 1))
                 done < <(find "$content_root" -type f -iname "*.exe" -print0)
             else
@@ -777,13 +698,13 @@ run_deploy_pipeline() {
                     if [[ "$bname_lower" =~ \.so(\.[0-9]+)*$ ]]; then
                         continue
                     fi
-                    if [[ "$NO_CLI" == true && ( "$bname_lower" == *-cli.exe || "$bname_lower" == *-cli ) ]]; then
+                    if [[ "$NO_CLI" == true && ("$bname_lower" == *-cli.exe || "$bname_lower" == *-cli) ]]; then
                         log_info "Excluding CLI binary (--no-cli): $bname"
                         continue
                     fi
-                    if [[ -x "$bin_file" ]] || file "$bin_file" 2>/dev/null | grep -qi "elf"; then
+                    if [[ -x "$bin_file" ]] || file "$bin_file" 2> /dev/null | grep -qi "elf"; then
                         cp -f "$bin_file" "${DEPLOY_TARGET_CYG}/${bname}"
-                        chmod 755 "${DEPLOY_TARGET_CYG}/${bname}" 2>/dev/null || true
+                        chmod 755 "${DEPLOY_TARGET_CYG}/${bname}" 2> /dev/null || true
                         deployed_bins=$((deployed_bins + 1))
                     fi
                 done < <(find "$content_root" -type f -print0)
@@ -799,11 +720,11 @@ run_deploy_pipeline() {
             # Non-flattened deployment: copy all files preserving structure, excluding CLI if --no-cli
             if [[ "$NO_CLI" == true ]]; then
                 log_info "Removing CLI binaries before deployment (--no-cli)..."
-                find "$content_root" -type f \( -iname "*-cli.exe" -o -name "*-cli" \) -exec rm -f {} + 2>/dev/null || true
+                find "$content_root" -type f \( -iname "*-cli.exe" -o -name "*-cli" \) -exec rm -f {} + 2> /dev/null || true
             fi
             log_info "Deploying archive contents to $(enforce_drive_path "$DEPLOY_TARGET_CYG")..."
             cp -rf "$content_root"/. "$DEPLOY_TARGET_CYG/"
-            chmod -R a+rX "$DEPLOY_TARGET_CYG" 2>/dev/null || true
+            chmod -R a+rX "$DEPLOY_TARGET_CYG" 2> /dev/null || true
             deploy_success=true
             log_ok "Deployed contents for $app_name."
         fi
@@ -901,7 +822,7 @@ while [[ $# -gt 0 ]]; do
             GITHUB_TOKEN="$2"
             shift 2
             ;;
-        --name|--app)
+        --name | --app)
             SPECIFIC_APP="$2"
             shift 2
             ;;
@@ -933,7 +854,7 @@ while [[ $# -gt 0 ]]; do
             LIST_APPS=true
             shift
             ;;
-        -h|--help)
+        -h | --help)
             show_help
             exit 0
             ;;
@@ -983,7 +904,7 @@ if [[ -z "$ACTION" ]]; then
 fi
 
 case "$ACTION" in
-    build|deploy)
+    build | deploy)
         ;;
     *)
         log_error "Invalid action '$ACTION'. Must be 'build' or 'deploy'."
@@ -1009,25 +930,7 @@ fi
 # Checks for curl (HTTP), zip & unzip (archive packaging), jq (JSON parser),
 # tar, gzip, and xz (Linux archive compression and verification).
 # ------------------------------------------------------------------------------
-for tool in curl zip unzip jq tar gzip xz; do
-    if ! command -v "$tool" >/dev/null 2>&1; then
-        case "$PLATFORM" in
-            cygwin)
-                log_error "Required tool '$tool' not found. Please install it via Cygwin setup."
-                ;;
-            msys2)
-                log_error "Required tool '$tool' not found. Please install it via 'pacman -S $tool'."
-                ;;
-            linux|wsl)
-                log_error "Required tool '$tool' not found. Please install it via your system package manager (e.g. apt/dnf/pacman)."
-                ;;
-            *)
-                log_error "Required tool '$tool' not found. Please install it and ensure it is in PATH."
-                ;;
-        esac
-        exit 1
-    fi
-done
+verify_required_tools curl zip unzip jq tar gzip xz
 
 # ------------------------------------------------------------------------------
 # Validate Specific App (Fail early if specified app is not in package table)
@@ -1080,11 +983,7 @@ TEMP_ROOT_CYG=$(detect_temp_root)
 TEMP_ROOT_PATH=$(enforce_drive_path "$TEMP_ROOT_CYG")
 
 # Setup optional file logging (tee all stdout/stderr to specified log file)
-if [[ -n "$LOG_FILE" ]]; then
-    LOG_CYG=$(to_cygpath "$LOG_FILE")
-    mkdir -p "$(dirname "$LOG_CYG")"
-    exec > >(tee -a "$LOG_CYG") 2>&1
-fi
+init_log_file "$LOG_FILE"
 
 echo "=============================================================================="
 echo " Storytold Craft Apps Packaging & Deployment Utility"
@@ -1126,26 +1025,9 @@ if [[ "$ACTION" == "deploy" ]]; then
 fi
 
 # Ensure directories exist and initialize unique execution workspace for build
-if [[ "$DRY_RUN" == false ]]; then
-    mkdir -p "$TARGET_CYG"
-    if [[ "$UPDATE_SOURCE" == true ]]; then
-        mkdir -p "$SOURCE_CYG"
-    fi
-    mkdir -p "$TEMP_ROOT_CYG"
-
-    # Prune any stale craftapps temporary workspaces older than 1 day
-    if [[ -d "$TEMP_ROOT_CYG" && "$TEMP_ROOT_CYG" != "/" && ! "$TEMP_ROOT_CYG" =~ ^(/cygdrive/|/mnt/|/)[a-zA-Z]$ ]]; then
-        find "$TEMP_ROOT_CYG" -maxdepth 1 -type d -name "craftapps_exec_*" -mtime +1 -exec rm -rf {} + 2>/dev/null || true
-        find "$TEMP_ROOT_CYG" -maxdepth 1 -type d -name "craftapps_deploy_*" -mtime +1 -exec rm -rf {} + 2>/dev/null || true
-    fi
-
-    # Initialize a unique, isolated workspace for this execution
-    EXEC_WORKSPACE=$(mktemp -d "${TEMP_ROOT_CYG}/craftapps_exec_XXXXXX")
-    if [[ -z "$EXEC_WORKSPACE" || ! -d "$EXEC_WORKSPACE" ]]; then
-        log_error "Failed to create unique execution workspace in $TEMP_ROOT_PATH"
-        exit 1
-    fi
-    log_info "Unique execution workspace initialized: $(enforce_drive_path "$EXEC_WORKSPACE")"
+init_exec_workspace "craftapps_exec_" "$SOURCE_CYG" "$TARGET_CYG" "$DRY_RUN" "$UPDATE_SOURCE"
+if [[ "$DRY_RUN" == false && -d "$TEMP_ROOT_CYG" && "$TEMP_ROOT_CYG" != "/" && ! "$TEMP_ROOT_CYG" =~ ^(/cygdrive/|/mnt/|/)[a-zA-Z]$ ]]; then
+    find "$TEMP_ROOT_CYG" -maxdepth 1 -type d -name "craftapps_deploy_*" -mtime +1 -exec rm -rf {} + 2> /dev/null || true
 fi
 
 # Execution Counters
@@ -1175,14 +1057,14 @@ for entry in "${PACKAGES[@]}"; do
     log_step "Checking [$app_name] (repo: $GITHUB_ORG/$repo)..."
 
     # Step 1: Determine local version in source library
-    read -r local_ver local_file < <(find_local_version "$SOURCE_CYG" "$rel_dir" "$app_name" "$suffix")
+    read -r local_ver local_file < <(find_local_version "${SOURCE_CYG}/${rel_dir}" "$app_name" "${suffix}|win-lnx|lnx-win" "zip")
     log_info "Local version  : ${C_BOLD}${local_ver}${C_RESET} (${local_file:-none found})"
 
     # Step 2: Query GitHub API for latest release metadata
     release_json=$(fetch_github_release "$GITHUB_ORG" "$repo" "$GITHUB_TOKEN")
 
     # Check for GitHub errors / rate limits
-    gh_message=$(echo "$release_json" | jq -r '.message // empty' 2>/dev/null)
+    gh_message=$(echo "$release_json" | jq -r '.message // empty' 2> /dev/null)
 
     if [[ -n "$gh_message" ]]; then
         if [[ "$gh_message" == *"API rate limit exceeded"* ]]; then
@@ -1202,7 +1084,7 @@ for entry in "${PACKAGES[@]}"; do
     fi
 
     # Extract tag_name from release JSON
-    tag_name=$(echo "$release_json" | jq -r '.tag_name // empty' 2>/dev/null)
+    tag_name=$(echo "$release_json" | jq -r '.tag_name // empty' 2> /dev/null)
 
     if [[ -z "$tag_name" || "$tag_name" == "null" ]]; then
         log_warn "No published releases found for $app_name."
@@ -1216,16 +1098,12 @@ for entry in "${PACKAGES[@]}"; do
     log_info "Remote version : ${C_BOLD}${remote_ver}${C_RESET} (tag: $tag_name)"
 
     # Step 3: Check if update or repackage is needed
-    NEEDS_UPDATE=false
     if [[ "$FORCE_REPACKAGE" == true ]]; then
         log_info "Forcing repackage as requested by --force."
-        NEEDS_UPDATE=true
     elif [[ "$local_ver" == "none" ]]; then
         log_info "Package not found locally in source. New package will be created."
-        NEEDS_UPDATE=true
     elif is_version_newer "$remote_ver" "$local_ver"; then
         log_ok "New version available: ${local_ver} -> ${C_GREEN}${remote_ver}${C_RESET}"
-        NEEDS_UPDATE=true
     else
         log_info "Up to date. (${local_ver} >= ${remote_ver})"
         SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
@@ -1235,9 +1113,9 @@ for entry in "${PACKAGES[@]}"; do
     # Step 4: Extract required asset URLs (Linux x86_64 .tar.gz & Windows x86_64 .zip)
     asset_info=$(extract_asset_urls "$release_json")
     linux_name=$(echo "$asset_info" | sed -n '1p' | cut -f1)
-    linux_url=$(echo "$asset_info"  | sed -n '1p' | cut -f2)
-    win_name=$(echo "$asset_info"   | sed -n '2p' | cut -f1)
-    win_url=$(echo "$asset_info"    | sed -n '2p' | cut -f2)
+    linux_url=$(echo "$asset_info" | sed -n '1p' | cut -f2)
+    win_name=$(echo "$asset_info" | sed -n '2p' | cut -f1)
+    win_url=$(echo "$asset_info" | sed -n '2p' | cut -f2)
 
     if [[ "$VERBOSE" == true ]]; then
         log_info "Linux asset   : ${linux_name:-NOT FOUND}"
@@ -1247,7 +1125,7 @@ for entry in "${PACKAGES[@]}"; do
     if [[ -z "$linux_url" || -z "$win_url" ]]; then
         log_error "Missing required x86_64 assets for $app_name v$remote_ver!"
         [[ -z "$linux_url" ]] && log_error "  - Linux .tar.gz (x86_64) not found in release"
-        [[ -z "$win_url" ]]   && log_error "  - Windows .zip (x86_64) not found in release"
+        [[ -z "$win_url" ]] && log_error "  - Windows .zip (x86_64) not found in release"
         ERROR_COUNT=$((ERROR_COUNT + 1))
         continue
     fi
@@ -1304,7 +1182,7 @@ for entry in "${PACKAGES[@]}"; do
     if [[ "$linux_name" =~ \.tar\.xz$ ]]; then
         verify_tar_xz_integrity "${CURRENT_BUILD_DIR}/${linux_name}" && lnx_ok=true
     else
-        tar --force-local -tzf "${CURRENT_BUILD_DIR}/${linux_name}" >/dev/null 2>&1 && lnx_ok=true
+        tar --force-local -tzf "${CURRENT_BUILD_DIR}/${linux_name}" > /dev/null 2>&1 && lnx_ok=true
     fi
     if [[ "$lnx_ok" == false ]]; then
         log_error "Corrupted or invalid Linux archive downloaded: $linux_name"
