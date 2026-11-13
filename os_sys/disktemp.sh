@@ -455,7 +455,6 @@ C_RESET=""
 C_GREEN=""
 C_YELLOW=""
 C_RED=""
-C_CYAN=""
 C_GRAY=""
 
 if [[ "${USE_COLOR}" == "true" ]]; then
@@ -463,7 +462,6 @@ if [[ "${USE_COLOR}" == "true" ]]; then
     C_GREEN="\033[32m"
     C_YELLOW="\033[33m"
     C_RED="\033[1;31m"
-    C_CYAN="\033[36m"
     C_GRAY="\033[90m"
 fi
 

@@ -101,11 +101,10 @@ require_checkout_dir() {
 
 install_repo() {
     local target_dir="$1"
-    local parent_dir repo_name
+    local parent_dir
 
     target_dir="$(resolve_path "$target_dir")"
     parent_dir="$(dirname "$target_dir")"
-    repo_name="$(basename "$target_dir")"
 
     require_cmd git
     validate_node_npm
@@ -328,7 +327,7 @@ serve_repo() {
     log "Serving production build"
     (
         cd "$repo_dir/dist" || exit 1
-        npx --yes serve -s -l tcp://$host:8080 .
+        npx --yes serve -s -l "tcp://${host}:8080" .
     )
 }
 

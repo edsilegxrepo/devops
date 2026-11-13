@@ -106,7 +106,7 @@ rm -rf "${JTLSTESTER_EXTRACT_DIR}"
 mkdir -p "${JTLSTESTER_EXTRACT_DIR}"
 JTLSTESTER_ZIP=$(find "${SOURCE_DIR}" -maxdepth 1 -name "jtlstester-*-java.zip" | head -n 1)
 if [ -n "${JTLSTESTER_ZIP}" ]; then
-  JTLSTESTER_VERSION=$(echo "$(basename "${JTLSTESTER_ZIP}")" | grep -oP 'jtlstester-\K[0-9]+\.[0-9]+\.[0-9]+-[a-f0-9]+')
+  JTLSTESTER_VERSION=$(basename "${JTLSTESTER_ZIP}" | grep -oP 'jtlstester-\K[0-9]+\.[0-9]+\.[0-9]+-[a-f0-9]+')
   unzip -q -d "${JTLSTESTER_EXTRACT_DIR}" "${JTLSTESTER_ZIP}"
   echo "JTLSTester jars extracted successfully (Version: ${JTLSTESTER_VERSION})."
 else

@@ -6,7 +6,7 @@
 
 PROXMOX_UI="/usr/share/javascript/proxmox-widget-toolkit"
 
-pushd ${PROXMOX_UI} &>/dev/null
+pushd "${PROXMOX_UI}" &>/dev/null || exit 1
 
 # 1. Check if the patch has already been applied
 if grep -q "void({//" proxmoxlib.js; then
@@ -15,7 +15,7 @@ else
     echo "Applying subscription notice patch..."
 
     # Clear out old backups to ensure a clean slate
-    rm -f *.bak
+    rm -f ./*.bak
 
     # Apply the regex substitution
     sed -Ezi.dist "s/(Ext.Msg.show\(\{\s+title: gettext\('No valid sub)/void\(\{\/\/\1/g" \
@@ -25,4 +25,4 @@ else
     diff -ub proxmoxlib.js.dist proxmoxlib.js
 fi
 
-popd &>/dev/null
+popd &>/dev/null || exit 1

@@ -22,6 +22,7 @@ _RHEL_SYS_LOADED=1
 
 if [[ -z "${_SYSTEM_SH_LOADED:-}" ]]; then
     echo "[-] Fatal Error: rhel_sys.sh must not be sourced directly. Source lib/system.sh instead." >&2
+    # shellcheck disable=SC2317 # Reached when invoked directly rather than sourced
     return 1 2>/dev/null || exit 1
 fi
 

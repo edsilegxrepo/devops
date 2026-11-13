@@ -258,13 +258,15 @@ setup_build_env() {
     OPENSSL_INSTALL_ARCH="${OPENSSL_INSTALL_BASE}.tar.gz"
     OPENSSL_URL="${OPENSSL_SRC_URL_BASE}/${OPENSSL_INSTALL_ARCH}"
 
-    local build_prefix="${build_base}/${OPENSSL_INSTALL_BASE}-binaries-$(cat "$DISTRIB_INFO_FILE")-${DEFAULT_ARCH_TAG}"
+    local distrib_info
+    distrib_info=$(cat "$DISTRIB_INFO_FILE")
+    local build_prefix="${build_base}/${OPENSSL_INSTALL_BASE}-binaries-${distrib_info}-${DEFAULT_ARCH_TAG}"
     BUILD_LOG="${build_prefix}.log"
     OPENSSL_BIN_ARCH="${build_prefix}.tar.xz"
 
     # Set architecture if not inherited (Manual/Archive modes)
     if [[ -z "$SSL_ARCH" ]]; then
-      SSL_ARCH="$(rpm --eval %{_os})-$(rpm --eval %{_target_cpu})"
+      SSL_ARCH="$(rpm --eval '%{_os}')-$(rpm --eval '%{_target_cpu}')"
     fi
   fi
 }
@@ -283,8 +285,8 @@ prepare_sources() {
   rm -rf "${OPENSSL_INSTALL_BASE}"
 
   wget -qN "${OPENSSL_URL}" "${CACERT_SRC_URL}"
-  tar -zxf "${OPENSSL_INSTALL_ARCH}"
-  if [ $? -eq 0 ] && [[ "$*" =~ "--purge"  ]];then
+  tar -zxf "${OPENSSL_INSTALL_ARCH}" || return 1
+  if [[ "$*" =~ "--purge" ]]; then
     rm -f "${OPENSSL_INSTALL_ARCH}"
   fi
   cd "${OPENSSL_INSTALL_BASE}"
@@ -352,8 +354,10 @@ apply_post_install() {
 
     # Refactor internal hierarchy: Move misc scripts and prepare PKI structures
     mv -f ./${TLSDIR}/misc/* ./${BINDIR}/
-    mkdir -p -m755 ./${TLSDIR}/${CONFDIR}
-    mkdir -p -m755 ./${PKIDIR}/CA/{private,certs,crl,newcerts}
+    mkdir -p "./${TLSDIR}/${CONFDIR}"
+    chmod 755 "./${TLSDIR}/${CONFDIR}"
+    mkdir -p "./${PKIDIR}/CA/"{private,certs,crl,newcerts}
+    chmod 755 "./${PKIDIR}/CA/"{private,certs,crl,newcerts}
 
     # Update openssl.cnf to support modular includes from conf.d
     sed -i '/#.include filename/a \\n# Includes custom configuration\n.include ${__DIR__}/conf.d' ./${TLSDIR}/openssl.cnf
@@ -362,14 +366,14 @@ apply_post_install() {
   # Fix library naming and SONAMEs to support side-by-side versions
   pushd ".${OPENSSL_BASE}/${LIBDIR}" &>/dev/null
     # 1. Rename pkgconfig files to include the version tag (e.g. libcrypto36.pc)
-    mv pkgconfig/libcrypto.pc pkgconfig/libcrypto${OPENSSL_SONAME}.pc
-    mv pkgconfig/libssl.pc pkgconfig/libssl${OPENSSL_SONAME}.pc
-    mv pkgconfig/openssl.pc pkgconfig/openssl${OPENSSL_SONAME}.pc
+    mv pkgconfig/libcrypto.pc "pkgconfig/libcrypto${OPENSSL_SONAME}.pc"
+    mv pkgconfig/libssl.pc "pkgconfig/libssl${OPENSSL_SONAME}.pc"
+    mv pkgconfig/openssl.pc "pkgconfig/openssl${OPENSSL_SONAME}.pc"
 
     # 2. Update internal .pc content so downstream apps request the tagged names
-    sed -i "s|libcrypto$|libcrypto${OPENSSL_SONAME}|;s|-lcrypto|-lcrypto${OPENSSL_SONAME}|" pkgconfig/libcrypto${OPENSSL_SONAME}.pc
-    sed -i "s|libssl$|libssl${OPENSSL_SONAME}|;s|-lssl|-lssl${OPENSSL_SONAME}|;s|libcrypto|libcrypto${OPENSSL_SONAME}|g" pkgconfig/libssl${OPENSSL_SONAME}.pc
-    sed -i "s|libssl libcrypto|libssl${OPENSSL_SONAME} libcrypto${OPENSSL_SONAME}|" pkgconfig/openssl${OPENSSL_SONAME}.pc
+    sed -i "s|libcrypto$|libcrypto${OPENSSL_SONAME}|;s|-lcrypto|-lcrypto${OPENSSL_SONAME}|" "pkgconfig/libcrypto${OPENSSL_SONAME}.pc"
+    sed -i "s|libssl$|libssl${OPENSSL_SONAME}|;s|-lssl|-lssl${OPENSSL_SONAME}|;s|libcrypto|libcrypto${OPENSSL_SONAME}|g" "pkgconfig/libssl${OPENSSL_SONAME}.pc"
+    sed -i "s|libssl libcrypto|libssl${OPENSSL_SONAME} libcrypto${OPENSSL_SONAME}|" "pkgconfig/openssl${OPENSSL_SONAME}.pc"
 
     # 3. Patch internal SONAME metadata so the loader sees 'libcrypto36.so'
     patchelf --set-soname "libssl${OPENSSL_SONAME}.so" "libssl.so.${OPENSSL_VERSION_BASE}"
@@ -386,10 +390,10 @@ apply_post_install() {
     mv -f "libssl.so.${OPENSSL_VERSION_BASE}" "libssl${OPENSSL_SONAME}.so"
 
     # 6. Reconstruct the symlink chain for standard linker lookup
-    ln -sf "libssl${OPENSSL_SONAME}.so" libssl.so.${OPENSSL_VERSION}
-    ln -sf "libcrypto${OPENSSL_SONAME}.so" libcrypto.so.${OPENSSL_VERSION}
-    ln -sf "libssl.so.${OPENSSL_VERSION}" libssl.so.${OPENSSL_VERSION_BASE}
-    ln -sf "libcrypto.so.${OPENSSL_VERSION}" libcrypto.so.${OPENSSL_VERSION_BASE}
+    ln -sf "libssl${OPENSSL_SONAME}.so" "libssl.so.${OPENSSL_VERSION}"
+    ln -sf "libcrypto${OPENSSL_SONAME}.so" "libcrypto.so.${OPENSSL_VERSION}"
+    ln -sf "libssl.so.${OPENSSL_VERSION}" "libssl.so.${OPENSSL_VERSION_BASE}"
+    ln -sf "libcrypto.so.${OPENSSL_VERSION}" "libcrypto.so.${OPENSSL_VERSION_BASE}"
     ln -sf "libssl.so.${OPENSSL_VERSION_BASE}" libssl.so
     ln -sf "libcrypto.so.${OPENSSL_VERSION_BASE}" libcrypto.so
 
@@ -409,11 +413,11 @@ apply_post_install() {
 
   # Module Patching: Recursively find and patch all providers and engines
   # This ensures 'fips.so' and 'legacy.so' are also isolated.
-  find ".${OPENSSL_BASE}/${LIBDIR}/ossl-modules" ".${OPENSSL_BASE}/${LIBDIR}/engines-${OPENSSL_VERSION_BASE}" -name "*.so" -type f 2>/dev/null | xargs -r -I {} bash -c '
-    patchelf --replace-needed "libcrypto.so.${1}" "libcrypto${2}.so" "$3" 2>/dev/null || :
-    patchelf --replace-needed "libssl.so.${1}" "libssl${2}.so" "$3" 2>/dev/null || :
-    patchelf --set-rpath "${4}" "$3"
-  ' -- "${OPENSSL_VERSION_BASE}" "${OPENSSL_SONAME}" "{}" "${OPENSSL_BASE}/${LIBDIR}"
+  while IFS= read -r -d '' sofile; do
+    patchelf --replace-needed "libcrypto.so.${OPENSSL_VERSION_BASE}" "libcrypto${OPENSSL_SONAME}.so" "${sofile}" 2>/dev/null || :
+    patchelf --replace-needed "libssl.so.${OPENSSL_VERSION_BASE}" "libssl${OPENSSL_SONAME}.so" "${sofile}" 2>/dev/null || :
+    patchelf --set-rpath "${OPENSSL_BASE}/${LIBDIR}" "${sofile}"
+  done < <(find ".${OPENSSL_BASE}/${LIBDIR}/ossl-modules" ".${OPENSSL_BASE}/${LIBDIR}/engines-${OPENSSL_VERSION_BASE}" -name "*.so" -type f -print0 2>/dev/null)
 
   # Populate cacerts as reference ca-bundle
   pushd ".${OPENSSL_BASE}" &>/dev/null
@@ -443,7 +447,7 @@ main() {
   validate_input
   check_prerequisites
   setup_build_env
-  prepare_sources # Redundant in RPM mode
+  prepare_sources "$@" # Redundant in RPM mode
 
   if [[ "$BUILD_MODE_INPUT" == "ARCHIVE" ]]; then
     # Archive Mode performs the entire lifecycle in one pass
@@ -463,7 +467,7 @@ main() {
         packaging
         # Clean up registration files so they don't leak into the RPM payload
         # (The RPM should remain identical across RPM and ALL modes)
-        rm -rf "${BUILD_FOLDER}/etc"
+        rm -rf "${BUILD_FOLDER:?}/etc"
       fi
     fi
   fi

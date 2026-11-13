@@ -159,6 +159,7 @@ validate_os() {
 
     OS_ID="${ID:-unknown}"
     OS_PRETTY="${PRETTY_NAME:-${NAME:-unknown}}"
+    # shellcheck disable=SC2034 # Public library variable exposed by validate_os() for callers
     OS_VERSION="${VERSION_ID:-unknown}"
     local id_like="${ID_LIKE:-}"
 
@@ -274,7 +275,7 @@ check_storage_capacity() {
     local boot_min_mb="${2:-100}"
     local force_flag="${3:-false}"
     local is_detect="${4:-false}"
-    local script_name="${5:-$(basename "$0")}"
+    # $5 (script_name) intentionally unused; kept as positional slot before $6 (purge_hint).
     local purge_hint="${6:-}"
 
     local boot_path="/boot"

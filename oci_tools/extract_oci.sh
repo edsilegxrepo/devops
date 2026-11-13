@@ -179,8 +179,8 @@ verify_integrity() {
     log "--- Content Integrity Verification ---"
     local exit_code=0
     
-    # Use jq to parse the manifest and extract each layer's digest and SHA hash.
-    jq -r '.layers[] | "\(.digest) \(.digest | split(":")[1])"' "$manifest_path" | while read -r DIGEST SHA; do
+    # Use jq with process substitution so loop exit_code updates persist in the function scope.
+    while read -r DIGEST SHA; do
         LAYER_FILE="$layers_dir/$SHA"
         
         # OCI layers can sometimes have extensions, so we check for common ones.
@@ -209,7 +209,7 @@ verify_integrity() {
             echo "         Expected: $DIGEST" >&2
             exit_code=1 # Mark verification as failed.
         fi
-    done
+    done < <(jq -r '.layers[] | "\(.digest) \(.digest | split(":")[1])"' "$manifest_path")
     
     # Return a non-zero status if any check failed.
     if [ $exit_code -ne 0 ]; then
@@ -441,11 +441,8 @@ log "Starting layer merging..."
 
         log "Applying layer: ${TARGET_FILE##*/}"
         
-        # Extract the layer into the destination directory.
-        tar -xf "$TARGET_FILE" -C "$DEST_DIR"
-        
-        # Check the exit status of the tar command.
-        if [ $? -ne 0 ]; then
+        # Extract the layer into the destination directory and check exit status.
+        if ! tar -xf "$TARGET_FILE" -C "$DEST_DIR"; then
             echo "ERROR: tar extraction failed for ${TARGET_FILE##*/}. Aborting." >&2
             exit 1 # Exit subshell on failure.
         fi

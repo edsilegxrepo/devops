@@ -124,13 +124,13 @@ parse_args() {
                 CONF[ACTION]="install"
                 CONF[PKG_LIST]="${arg#*install:}"
                 ;;
-            --action=remove:*)
-                CONF[ACTION]="remove"
-                CONF[PKG_LIST]="${arg#*remove:}"
-                ;;
             --action=remove::*) # Handle double-colon case from request
                 CONF[ACTION]="remove"
                 CONF[PKG_LIST]="${arg#*remove::}"
+                ;;
+            --action=remove:*)
+                CONF[ACTION]="remove"
+                CONF[PKG_LIST]="${arg#*remove:}"
                 ;;
             --action=status:*)
                 CONF[ACTION]="status"
@@ -183,7 +183,8 @@ validate_env() {
     if [[ "${CONF[ACTION]}" == "restore" || "${CONF[ACTION]}" == "install" || "${CONF[ACTION]}" == "remove" ]]; then
         log "Checking writability of Python library paths..."
         # Fetch unique install paths to avoid redundant checks
-        local lib_paths=$("${CONF[PYTHON_BIN]}" -c "import sysconfig; s={sysconfig.get_path('purelib'), sysconfig.get_path('platlib')}; print('\n'.join(p for p in s if p))" | tr -d '\r')
+        local lib_paths
+        lib_paths=$("${CONF[PYTHON_BIN]}" -c "import sysconfig; s={sysconfig.get_path('purelib'), sysconfig.get_path('platlib')}; print('\n'.join(p for p in s if p))" | tr -d '\r')
         
         for path in $lib_paths; do
             if [ ! -w "$path" ]; then
@@ -195,7 +196,8 @@ validate_env() {
     # Check Registry Access
     case "${CONF[ACTION]}" in
         backup)
-            local reg_dir=$(dirname "${CONF[REGISTRY_FILE]}")
+            local reg_dir
+            reg_dir=$(dirname "${CONF[REGISTRY_FILE]}")
             if [ ! -d "$reg_dir" ]; then
                 log "Creating registry directory: $reg_dir"
                 mkdir -p "$reg_dir"
@@ -284,24 +286,26 @@ list_packages() {
 # Re-running backup_packages after install ensures the registry captures
 # the exact versions and dependencies that were just added.
 install_pkg_list() {
-    local pkgs=${CONF[PKG_LIST]//,/ }
-    log "Installing packages: $pkgs"
-    if "${CONF[PYTHON_BIN]}" -m pip install $pkgs; then
+    local -a pkg_arr=()
+    read -r -a pkg_arr <<< "${CONF[PKG_LIST]//,/ }"
+    log "Installing packages: ${pkg_arr[*]}"
+    if "${CONF[PYTHON_BIN]}" -m pip install "${pkg_arr[@]}"; then
         log "Installation successful. Refreshing registry..."
         backup_packages
     else
-        error "Failed to install packages: $pkgs"
+        error "Failed to install packages: ${pkg_arr[*]}"
     fi
 }
 
 remove_pkg_list() {
-    local pkgs=${CONF[PKG_LIST]//,/ }
-    log "Removing packages: $pkgs"
-    if "${CONF[PYTHON_BIN]}" -m pip uninstall -y $pkgs; then
+    local -a pkg_arr=()
+    read -r -a pkg_arr <<< "${CONF[PKG_LIST]//,/ }"
+    log "Removing packages: ${pkg_arr[*]}"
+    if "${CONF[PYTHON_BIN]}" -m pip uninstall -y "${pkg_arr[@]}"; then
         log "Removal successful. Refreshing registry..."
         backup_packages
     else
-        error "Failed to remove packages: $pkgs"
+        error "Failed to remove packages: ${pkg_arr[*]}"
     fi
 }
 
@@ -333,7 +337,8 @@ status_pkg_list() {
         else
             p="$line"; v=""
         fi
-        local ln=$(echo "$p" | tr '[:upper:]' '[:lower:]')
+        local ln
+        ln=$(echo "$p" | tr '[:upper:]' '[:lower:]')
         reg_map["$ln"]="$v"
     done < <( tr -d '\r' < "$data_file" )
 

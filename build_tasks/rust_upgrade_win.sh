@@ -176,7 +176,8 @@ function safe_delete() {
 # Arguments:   None
 # Returns:     None
 # -----------------------------------------------------------------------------
-function cleanup() {
+# shellcheck disable=SC2329 # Invoked indirectly via trap on EXIT/INT/TERM/HUP
+cleanup() {
   safe_delete "${TEMP_WORKSPACE}" "${DETECT_TMP_DIR}"
 }
 trap cleanup EXIT INT TERM HUP
@@ -892,16 +893,15 @@ if [ "${RUN_DETECT}" == "true" ]; then
 
     if [ -n "${resolved_path}" ]; then
       (
-        # Prepend binary and cargo folders to PATH to resolve DLL and subcommand dependencies (process-free)
-        PATH="${resolved_path%/*}:${CARGO_PATH%/*}:${PATH}"
-        export PATH
+        # Prepend binary and cargo folders to PATH per command to resolve DLL and subcommand dependencies (process-free)
+        local_path="${resolved_path%/*}:${CARGO_PATH%/*}:${PATH}"
 
         raw_version=""
         if [[ "${binary_name}" == cargo-* ]] && [ -n "${CARGO_PATH}" ] && [ -x "${CARGO_PATH}" ]; then
           subcmd="${binary_name#cargo-}"
-          raw_version=$("${CARGO_PATH}" "${subcmd}" --version 2>&1) || true
+          raw_version=$(PATH="${local_path}" "${CARGO_PATH}" "${subcmd}" --version 2>&1) || true
         else
-          raw_version=$("${resolved_path}" --version 2>&1) || true
+          raw_version=$(PATH="${local_path}" "${resolved_path}" --version 2>&1) || true
         fi
         
         # Parse version using 100% native bash builtins (0 processes spawned)

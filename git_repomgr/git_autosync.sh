@@ -164,13 +164,20 @@ cleanup() {
   local exit_code=$?
   # Kill any remaining background jobs if we're interrupted
   if [[ $exit_code -ne 0 ]]; then
-    local pids
-    pids=$(jobs -p)
-    if [[ -n "$pids" ]]; then
-      echo -e "\n[!] Interrupted. Cleaning up background jobs..."
-      # Use kill -TERM (15) for graceful exit, then wait slightly and KILL if needed
-      kill -TERM $pids 2>/dev/null
-      (sleep 1; kill -KILL $pids 2>/dev/null) &
+    local raw_pids
+    raw_pids=$(jobs -p)
+    if [[ -n "$raw_pids" ]]; then
+      local -a pids=()
+      local pid
+      while IFS= read -r pid; do
+        [[ -n "$pid" ]] && pids+=("$pid")
+      done <<< "$raw_pids"
+      if [[ ${#pids[@]} -gt 0 ]]; then
+        echo -e "\n[!] Interrupted. Cleaning up background jobs..."
+        # Use kill -TERM (15) for graceful exit, then wait slightly and KILL if needed
+        kill -TERM "${pids[@]}" 2>/dev/null
+        (sleep 1; kill -KILL "${pids[@]}" 2>/dev/null) &
+      fi
     fi
   fi
   [[ -d "$TMP_RESULTS_DIR" ]] && rm -rf "$TMP_RESULTS_DIR"
@@ -178,6 +185,16 @@ cleanup() {
 }
 
 trap cleanup EXIT SIGINT SIGTERM
+
+# Prints each line of a multiline string with a fixed prefix
+prefix_lines() {
+  local prefix="$1"
+  local text="$2"
+  local line
+  while IFS= read -r line; do
+    printf '%s%s\n' "$prefix" "$line"
+  done <<< "$text"
+}
 
 # --- Sync Function ---
 # Performs the sequential sync logic for a single repository.
@@ -203,7 +220,6 @@ sync_repo() {
     if ! pushd "$proj_dir" &> /dev/null; then
       echo "  [X] Failed to enter directory"
       echo "fail" > "$status_file"
-      popd &> /dev/null
       [[ "$VERBOSE" == true ]] && echo "------------------------------------------"
       return
     fi
@@ -216,7 +232,7 @@ sync_repo() {
     if ! git remote | grep -q "^origin$"; then
       echo "  [.] No 'origin' remote found. Skipping sync."
       echo "skip" > "$status_file"
-      popd &> /dev/null
+      popd &> /dev/null || return
       [[ "$VERBOSE" == true ]] && echo "------------------------------------------"
       return
     fi
@@ -241,7 +257,7 @@ sync_repo() {
         if ! git commit -m "$msg"; then
           echo "  [X] Error: Commit failed."
           echo "fail" > "$status_file"
-          popd &> /dev/null
+          popd &> /dev/null || return
           [[ "$VERBOSE" == true ]] && echo "------------------------------------------"
           return
         fi
@@ -256,7 +272,7 @@ sync_repo() {
     if [[ -z "$branch" ]]; then
       echo "  [X] Error: Could not detect current branch."
       echo "fail" > "$status_file"
-      popd &> /dev/null
+      popd &> /dev/null || return
       [[ "$VERBOSE" == true ]] && echo "------------------------------------------"
       return
     fi
@@ -284,13 +300,13 @@ sync_repo() {
       if [[ "$branch" == "HEAD" ]]; then
         echo "  [X] Error: Detached HEAD detected. Skipping network sync."
         echo "fail" > "$status_file"
-        popd &> /dev/null
+        popd &> /dev/null || return
         [[ "$VERBOSE" == true ]] && echo "------------------------------------------"
         return
       fi
 
       # Check if an upstream tracking branch is set
-      if ! git rev-parse --abbrev-ref --symbolic-full-name @{u} &> /dev/null; then
+      if ! git rev-parse --abbrev-ref --symbolic-full-name '@{u}' &> /dev/null; then
         echo "  [!] No upstream branch set. Attempting to set origin/$branch... <$curr_hash>"
         # Only try to set upstream if the remote branch actually exists
         if git ls-remote --exit-code --heads origin "$branch" &> /dev/null; then
@@ -306,7 +322,7 @@ sync_repo() {
       
       # In verbose mode, show the pull output
       if [[ "$VERBOSE" == true ]]; then
-        echo "$pull_output" | sed 's/^/      Pull: /'
+        prefix_lines "      Pull: " "$pull_output"
       fi
 
       # Check for conflicts immediately after pull
@@ -315,7 +331,7 @@ sync_repo() {
           echo "  [X] Error: Conflict detected during pull --rebase. Aborting..."
           git rebase --abort &> /dev/null
           echo "fail" > "$status_file"
-          popd &> /dev/null
+          popd &> /dev/null || return
           [[ "$VERBOSE" == true ]] && echo "------------------------------------------"
           return
         fi
@@ -328,7 +344,7 @@ sync_repo() {
 
       # In verbose mode, show the push output
       if [[ "$VERBOSE" == true ]]; then
-        echo "$push_output" | sed 's/^/      Push: /'
+        prefix_lines "      Push: " "$push_output"
       fi
 
       # Check if HEAD moved (meaning pull changed something or commit was made)
@@ -353,12 +369,12 @@ sync_repo() {
         fi
       else
         echo "  [X] Error: Push failed for $proj_dir. Check for conflicts or permissions."
-        echo "$push_output" | sed 's/^/      /'
+        prefix_lines "      " "$push_output"
         echo "fail" > "$status_file"
       fi
     fi
 
-    popd &> /dev/null
+    popd &> /dev/null || return
     [[ "$VERBOSE" == true ]] && echo "------------------------------------------"
   } > "$log_file" 2>&1
 

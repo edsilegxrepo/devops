@@ -294,6 +294,7 @@ check_active_processes() {
     local running_proc=""
     for proc in cargo rustc; do
         # Checks process table using pgrep, with a fallback to raw ps search (matching word boundaries + windows .exe extension)
+        # shellcheck disable=SC2009 # Fallback handles MSYS2/Cygwin .exe processes or environments without pgrep
         if pgrep -x "$proc" >/dev/null 2>&1 || ps -ef 2>/dev/null | grep -v grep | grep -E "\<${proc}(\.exe)?\>" >/dev/null; then
             running_proc="$running_proc $proc"
         fi
@@ -384,7 +385,7 @@ EOF
     # Prompt interactive confirmation if stdin is a standard terminal
     if [ -t 0 ]; then
         local confirm
-        read -p "Are you sure you want to proceed? (y/N): " confirm
+        read -r -p "Are you sure you want to proceed? (y/N): " confirm
         if [[ ! "$confirm" =~ ^[yY](es)?$ ]]; then
             echo -e "${BLUE}Aborted.${NC}"
             exit 0
@@ -445,7 +446,7 @@ EOF
 
     if [ -t 0 ]; then
         local confirm
-        read -p "Proceed with clearing extracted sources? (y/N): " confirm
+        read -r -p "Proceed with clearing extracted sources? (y/N): " confirm
         if [[ ! "$confirm" =~ ^[yY](es)?$ ]]; then
             echo -e "${BLUE}Aborted.${NC}"
             exit 0
@@ -515,7 +516,7 @@ EOF
 
     if [ -t 0 ]; then
         local confirm
-        read -p "Proceed with pruning these stale target directories? (y/N): " confirm
+        read -r -p "Proceed with pruning these stale target directories? (y/N): " confirm
         if [[ ! "$confirm" =~ ^[yY](es)?$ ]]; then
             echo -e "${BLUE}Aborted.${NC}"
             exit 0

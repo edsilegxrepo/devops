@@ -24,10 +24,11 @@
 # -----------------------------------------------------------------------------
 
 # ----- System Environment -----
+# shellcheck disable=SC1091 # Provided on target host at runtime (/opt/scripts/settings.sh)
 source /opt/scripts/settings.sh
 # set -o pipefail -o errexit
 
-ENV_SCRIPT="$(dirname $0)/python_env.inc"
+ENV_SCRIPT="$(dirname "$0")/python_env.inc"
 if [ ! -s "${ENV_SCRIPT}" ];then
   echo "ERROR: Invalid environment script [${ENV_SCRIPT}], aborting execution"
   exit 1
@@ -82,12 +83,13 @@ function argParse() {
 }
 
 # ----- Main -----
-argParse $@
-source ${ENV_SCRIPT} ${PYTHON_ID} ${PYTHON_MODEL} --env-load
+argParse "$@"
+# shellcheck source=/dev/null
+source "${ENV_SCRIPT}" "${PYTHON_ID}" "${PYTHON_MODEL}" --env-load
 
 # Discard the first 3 arguments
 shift;shift;shift
 
 # Execute the job with arguments
 echo "Executing job: [${PY_JOB_PATH}] with python version: [${PYTHON_ID}] and model: [${PYTHON_MODEL_LABEL}]"
-${PYTHON} ${PY_JOB_PATH} $@
+"${PYTHON}" "${PY_JOB_PATH}" "$@"

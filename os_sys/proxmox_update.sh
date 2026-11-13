@@ -138,6 +138,7 @@ validate_os "debian"
 # ------------------------------------------------------------------------------
 # 3. Environment & Node Identity Configuration
 # ------------------------------------------------------------------------------
+# shellcheck disable=SC2034 # Consumed by print_section_header() in lib/system.sh
 NODE_TAG="PVE|$(get_safe_hostname)"
 
 # ------------------------------------------------------------------------------

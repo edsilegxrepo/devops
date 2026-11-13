@@ -201,6 +201,7 @@ fi
 # Data Flow: Sanitizes hostname into SAFE_HOSTNAME. Stores options in APT_OPTS array.
 # ------------------------------------------------------------------------------
 # Sanitize hostname to prevent malicious word splitting or character injections
+# shellcheck disable=SC2034 # Consumed by print_section_header() in lib/system.sh
 NODE_TAG="PRD|prd|wks|$(get_safe_hostname)"
 APT_OPTS=("${DEFAULT_APT_OPTS[@]}" -o APT::Get::Always-Include-Phased-Updates=true)
 APT_REPO_BASE="/etc/apt"

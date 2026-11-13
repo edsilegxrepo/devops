@@ -117,7 +117,7 @@ if [[ "${OSTYPE:-}" == "cygwin" || "${OSTYPE:-}" == "msys" ]] && command -v cygp
     # HEURISTIC: Detect if the shell stripped backslashes (e.g., C:Users instead of C:/Users)
     if [[ "$BASE_PATH" =~ ^[a-zA-Z]:[^/\\]+ ]]; then
         echo "ERROR: Base path '$BASE_PATH' looks like its slashes were stripped by the shell."
-        echo "HINT:  Use forward slashes (E:/path/to/repo) or wrap the path in single quotes ('E:\path\to\repo')."
+        printf '%s\n' "HINT:  Use forward slashes (E:/path/to/repo) or wrap the path in single quotes ('E:\path\to\repo')."
         exit 1
     fi
     [[ -n "$BASE_PATH" ]] && BASE_PATH=$(cygpath -u "$BASE_PATH")
@@ -164,11 +164,13 @@ if [[ "$MODE" != "DISPLAY" ]]; then
     if [[ "$SAFE_RECOVER" -eq 1 ]]; then
         # Initialize the undo script with metadata (only physically created in COMMIT mode)
         if [[ "$MODE" == "COMMIT" ]]; then
-            echo "#!/bin/bash" > "$UNDO_LOG"
-            echo "################################################################################" >> "$UNDO_LOG"
-            echo "# RECOVERY SCRIPT for git_userchange.sh (Generated $(date))" >> "$UNDO_LOG"
-            echo "# Target Base Path: $BASE_PATH" >> "$UNDO_LOG"
-            echo "################################################################################" >> "$UNDO_LOG"
+            {
+                echo "#!/bin/bash"
+                echo "################################################################################"
+                echo "# RECOVERY SCRIPT for git_userchange.sh (Generated $(date))"
+                echo "# Target Base Path: $BASE_PATH"
+                echo "################################################################################"
+            } > "$UNDO_LOG"
         fi
         
         echo "--- RECOVERY ENABLED: $UNDO_LOG ---"

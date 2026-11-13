@@ -45,18 +45,19 @@ detect_os_family() {
     fi
 
     # Source OS variables reliably using the constant variable
+    # shellcheck disable=SC1090 # OS_RELEASE_FILE defaults to /etc/os-release at runtime
     source "$OS_RELEASE_FILE"
 
     # Use a case statement for clear and maintainable OS family detection
     # Checks both ID_LIKE and ID for reliable detection
     case "$ID_LIKE $ID" in
-	    # RHEL Family (AlmaLinux, Rocky, CentOS, RHEL, Fedora)
-		*rhel*|*centos*|*almalinux*|*rocky*|*fedora*|rhel|centos|almalinux|rocky|fedora)
+        # RHEL Family (AlmaLinux, Rocky, CentOS, RHEL, Fedora)
+        *rhel*|*centos*|*almalinux*|*rocky*|*fedora*)
             OS_FAMILY="RHEL"
             UPDATE_COMMAND="grub2-mkconfig -o /boot/grub2/grub.cfg"
             ;;
-		# Debian Family (Ubuntu, Debian)
-        *debian*|*ubuntu*|debian|ubuntu)
+        # Debian Family (Ubuntu, Debian)
+        *debian*|*ubuntu*)
             OS_FAMILY="DEBIAN"
             UPDATE_COMMAND="update-grub"
             ;;
