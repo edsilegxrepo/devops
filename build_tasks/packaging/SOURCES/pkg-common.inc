@@ -104,7 +104,7 @@
 %{!?dist_deb:%define dist_deb         %{dist_base}-linux_%{plat_arch}.deb}
 
 # Standard changelog generator macro (populates changelog.txt for staging payloads)
-%define generate_changelog() printf '* %%s %%s - %%s-%%s\n- Packages updated to latest upstream release\n' "$(LC_ALL=C date '+%%a %%b %%d %%Y')" '%{maintainer}' '%{version}' '%{rel_num}' > changelog.txt
+%define generate_changelog() printf '* %%s %%s - %%s-%%s\\n- Packages updated to latest upstream release\\n' "$(LC_ALL=C date '+%%a %%b %%d %%Y')" '%{maintainer}' '%{version}' '%{rel_num}' > changelog.txt
 
 # Toolchain helper: detect Zig compiler in PATH or standard enterprise locations
 %{!?has_zig:%global has_zig %(command -v zig >/dev/null 2>&1 || [ -x /var/opt/zig/zig ] || [ -x /u01/zig/zig ] || [ -x /usr/local/bin/zig ] || [ -x /opt/zig/zig ] && echo 1 || echo 0)}
