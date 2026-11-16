@@ -306,6 +306,17 @@ cleanup_workspace() {
     exit $exit_code
 }
 
+# report_unexpected_err <source_file> <line_no> <command>
+# Trapped by ERR when set -E is enabled so unexpected aborts emit diagnostics before cleanup.
+report_unexpected_err() {
+    local err_rc=$?
+    local err_src="${1:-unknown}"
+    local err_line="${2:-?}"
+    local err_cmd="${3:-}"
+    log_error "Unexpected failure (exit=${err_rc}) in $(basename "$err_src"):${err_line}: ${err_cmd}"
+}
+
+trap 'report_unexpected_err "${BASH_SOURCE[0]}" "${LINENO}" "${BASH_COMMAND}"' ERR
 trap cleanup_workspace EXIT INT TERM HUP
 
 # ------------------------------------------------------------------------------

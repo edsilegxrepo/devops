@@ -17,8 +17,8 @@
 # Designed for Cygwin, MSYS2 / Git Bash, WSL, and native Linux environments.
 # ==============================================================================
 
-# Enable strict shell execution
-set -eo pipefail
+# Enable strict shell execution (-E inherits ERR trap across functions/subshells)
+set -Eeo pipefail
 
 # ------------------------------------------------------------------------------
 # Source Shared Foundation Library
@@ -52,23 +52,71 @@ EXEC_WORKSPACE=""
 CURRENT_BUILD_DIR=""
 
 # Upstream discovery endpoints
+DOWNLOAD_PAGE_URL="https://antigravity.google/download"
+DOWNLOAD_PAGE_HTML=""
 CLI_UPDATER_BASE="https://antigravity-cli-auto-updater-974169037036.us-central1.run.app"
 HUB_UPDATER_BASE="https://antigravity-hub-auto-updater-974169037036.us-central1.run.app"
 IDE_UPDATER_BASE="https://antigravity-ide-auto-updater-974169037036.us-central1.run.app"
 
 # ------------------------------------------------------------------------------
-# Section 7: Dynamic Upstream Endpoint Discovery
+# Section 7: Resilient Fetch & Dynamic Upstream Endpoint Discovery
 # ------------------------------------------------------------------------------
+# fetch_text <url> [timeout_sec]
+# Fetches remote text/JSON with retries and logs diagnostics cleanly on failure.
+fetch_text() {
+    local url="$1"
+    local max_time="${2:-20}"
+    local err_file body rc=0
+    err_file=$(mktemp "${EXEC_WORKSPACE:-${TEMP_ROOT_CYG:-/tmp}}/ag_curl_err.XXXXXX")
+    body=$(curl -fsSL --connect-timeout 10 --max-time "$max_time" --retry 3 --retry-delay 2 "$url" 2> "$err_file") || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        local err_msg
+        err_msg=$(tr '\r\n' '  ' < "$err_file" 2> /dev/null || true)
+        rm -f "$err_file" 2> /dev/null || true
+        log_warn "Request failed (exit=${rc}) for ${url}: ${err_msg:-curl error}"
+        return "$rc"
+    fi
+    rm -f "$err_file" 2> /dev/null || true
+    printf '%s' "$body"
+}
+
+# _extract_first_match <ere_pattern> <text>
+# Returns the first regex match safely under pipefail without early-close SIGPIPE.
+_extract_first_match() {
+    local pattern="$1"
+    local input="$2"
+    grep -oE "$pattern" <<< "$input" | sed -n '1p' || true
+}
+
+# _resolve_updater_url <label> <regex_pattern> <var_name>
+# Updates <var_name> from DOWNLOAD_PAGE_HTML if matched, otherwise keeps its default.
+_resolve_updater_url() {
+    local label="$1"
+    local pattern="$2"
+    local var_name="$3"
+    local discovered=""
+    if [[ -n "$DOWNLOAD_PAGE_HTML" ]]; then
+        discovered=$(_extract_first_match "$pattern" "$DOWNLOAD_PAGE_HTML")
+    fi
+    if [[ -n "$discovered" && "$discovered" =~ ^https?:// ]]; then
+        printf -v "$var_name" '%s' "${discovered%/}"
+        log_info "Discovered ${label}: ${!var_name}"
+    else
+        log_info "Using default ${label}: ${!var_name}"
+    fi
+}
+
 # discover_endpoints
-# Inspects https://antigravity.google/cli/install.sh and https://antigravity.google/download
-# to dynamically discover active auto-updater services, falling back to known URLs.
+# Inspects https://antigravity.google/cli/install.sh and DOWNLOAD_PAGE_URL
+# to discover active auto-updater services while falling back safely to defaults.
 discover_endpoints() {
     log_info "Discovering release channels from https://antigravity.google..."
 
-    # 1. Discover CLI updater base from install.sh
-    local cli_discovered
-    cli_discovered=$(curl -sSL --max-time 10 "https://antigravity.google/cli/install.sh" 2> /dev/null |
-        sed -n 's/.*DOWNLOAD_BASE_URL="\([^"]*\)".*/\1/p' | head -n1)
+    local cli_script cli_discovered=""
+    cli_script=$(fetch_text "https://antigravity.google/cli/install.sh" 10 || true)
+    if [[ -n "$cli_script" ]]; then
+        cli_discovered=$(sed -n 's/.*DOWNLOAD_BASE_URL="\([^"]*\)".*/\1/p' <<< "$cli_script" | sed -n '1p' || true)
+    fi
     if [[ -n "$cli_discovered" && "$cli_discovered" =~ ^https?:// ]]; then
         CLI_UPDATER_BASE="${cli_discovered%/}"
         log_info "Discovered CLI updater  : $CLI_UPDATER_BASE"
@@ -76,31 +124,9 @@ discover_endpoints() {
         log_info "Using default CLI updater: $CLI_UPDATER_BASE"
     fi
 
-    # 2. Discover Hub and IDE updater bases from download page
-    local page_html
-    page_html=$(curl -sSL --max-time 15 "https://antigravity.google/download" 2> /dev/null || true)
-    if [[ -n "$page_html" ]]; then
-        local hub_discovered
-        hub_discovered=$(echo "$page_html" | grep -o 'https://antigravity-hub-auto-updater-[^`/ "]*' | head -n1)
-        if [[ -n "$hub_discovered" && "$hub_discovered" =~ ^https?:// ]]; then
-            HUB_UPDATER_BASE="${hub_discovered%/}"
-            log_info "Discovered Agent updater: $HUB_UPDATER_BASE"
-        else
-            log_info "Using default Agent updater: $HUB_UPDATER_BASE"
-        fi
-
-        local ide_discovered
-        ide_discovered=$(echo "$page_html" | grep -o 'https://antigravity-ide-auto-updater-[^`/ "]*' | head -n1)
-        if [[ -n "$ide_discovered" && "$ide_discovered" =~ ^https?:// ]]; then
-            IDE_UPDATER_BASE="${ide_discovered%/}"
-            log_info "Discovered IDE updater  : $IDE_UPDATER_BASE"
-        else
-            log_info "Using default IDE updater  : $IDE_UPDATER_BASE"
-        fi
-    else
-        log_info "Using default Agent updater: $HUB_UPDATER_BASE"
-        log_info "Using default IDE updater  : $IDE_UPDATER_BASE"
-    fi
+    DOWNLOAD_PAGE_HTML=$(fetch_text "$DOWNLOAD_PAGE_URL" 15 || true)
+    _resolve_updater_url "Agent updater" 'https://antigravity-hub-auto-updater-[^`/ "'\''<>]+' "HUB_UPDATER_BASE"
+    _resolve_updater_url "IDE updater  " 'https://antigravity-ide-auto-updater-[^`/ "'\''<>]+' "IDE_UPDATER_BASE"
 }
 
 # ------------------------------------------------------------------------------
@@ -285,10 +311,9 @@ _ag_transform_lnx_electron() {
 package_cli() {
     log_step "Checking Antigravity CLI (antigravity-cli)..."
 
-    # Query Windows manifest
     local win_manifest_url="${CLI_UPDATER_BASE}/manifests/windows_amd64.json"
     local win_manifest
-    win_manifest=$(curl -fsSL "$win_manifest_url" 2> /dev/null || true)
+    win_manifest=$(fetch_text "$win_manifest_url" || true)
     if [[ -z "$win_manifest" ]]; then
         log_error "Failed to fetch Windows CLI manifest from $win_manifest_url"
         ERROR_COUNT=$((ERROR_COUNT + 1))
@@ -296,14 +321,13 @@ package_cli() {
     fi
 
     local cli_ver win_url win_sha512
-    cli_ver=$(echo "$win_manifest" | jq -r '.version // empty')
-    win_url=$(echo "$win_manifest" | jq -r '.url // empty')
-    win_sha512=$(echo "$win_manifest" | jq -r '.sha512 // empty')
+    cli_ver=$(jq -r '.version // empty' <<< "$win_manifest" 2> /dev/null || true)
+    win_url=$(jq -r '.url // empty' <<< "$win_manifest" 2> /dev/null || true)
+    win_sha512=$(jq -r '.sha512 // empty' <<< "$win_manifest" 2> /dev/null || true)
 
-    # Query Linux manifest
     local lnx_manifest_url="${CLI_UPDATER_BASE}/manifests/linux_amd64.json"
     local lnx_manifest
-    lnx_manifest=$(curl -fsSL "$lnx_manifest_url" 2> /dev/null || true)
+    lnx_manifest=$(fetch_text "$lnx_manifest_url" || true)
     if [[ -z "$lnx_manifest" ]]; then
         log_error "Failed to fetch Linux CLI manifest from $lnx_manifest_url"
         ERROR_COUNT=$((ERROR_COUNT + 1))
@@ -311,8 +335,14 @@ package_cli() {
     fi
 
     local lnx_url lnx_sha512
-    lnx_url=$(echo "$lnx_manifest" | jq -r '.url // empty')
-    lnx_sha512=$(echo "$lnx_manifest" | jq -r '.sha512 // empty')
+    lnx_url=$(jq -r '.url // empty' <<< "$lnx_manifest" 2> /dev/null || true)
+    lnx_sha512=$(jq -r '.sha512 // empty' <<< "$lnx_manifest" 2> /dev/null || true)
+
+    if [[ -z "$cli_ver" || ! "$win_url" =~ ^https?:// || ! "$lnx_url" =~ ^https?:// ]]; then
+        log_error "Invalid or incomplete CLI manifest fields (ver='${cli_ver}', win_url='${win_url}', lnx_url='${lnx_url}')"
+        ERROR_COUNT=$((ERROR_COUNT + 1))
+        return 1
+    fi
 
     log_info "Remote latest version: ${C_BOLD}${cli_ver}${C_RESET}"
     if [[ "$VERBOSE" == true ]]; then
@@ -327,7 +357,7 @@ package_cli() {
 }
 
 # Unified packaging helper for Electron-based Antigravity applications (Agent, IDE)
-# package_electron_component <display_name> <app_key> <releases_url> <win_url_template> <lnx_url_template> <raw_folder_name> <final_folder_name>
+# package_electron_component <display_name> <app_key> <releases_url> <win_url_template> <lnx_url_template> <raw_folder_name> <final_folder_name> <html_prefix_regex>
 package_electron_component() {
     local display_name="$1"
     local app_key="$2"
@@ -336,23 +366,29 @@ package_electron_component() {
     local lnx_template="$5"
     local raw_folder_name="$6"
     local final_folder_name="$7"
+    local html_prefix_regex="${8:-}"
 
     log_step "Checking ${display_name} (${app_key})..."
 
-    local releases_json
-    releases_json=$(curl -fsSL "$releases_url" 2> /dev/null || true)
-    if [[ -z "$releases_json" ]]; then
-        log_error "Failed to fetch ${display_name} releases from $releases_url"
-        ERROR_COUNT=$((ERROR_COUNT + 1))
-        return 1
+    local app_ver="" exec_id="" releases_json=""
+    releases_json=$(fetch_text "$releases_url" || true)
+    if [[ -n "$releases_json" ]]; then
+        app_ver=$(jq -r '.[0].version // empty' <<< "$releases_json" 2> /dev/null || true)
+        exec_id=$(jq -r '.[0].execution_id // empty' <<< "$releases_json" 2> /dev/null || true)
     fi
 
-    local app_ver exec_id
-    app_ver=$(echo "$releases_json" | jq -r '.[0].version // empty')
-    exec_id=$(echo "$releases_json" | jq -r '.[0].execution_id // empty')
+    if [[ -z "$app_ver" || -z "$exec_id" ]] && [[ -n "$html_prefix_regex" && -n "$DOWNLOAD_PAGE_HTML" ]]; then
+        local html_tag
+        html_tag=$(_extract_first_match "${html_prefix_regex}[0-9]+(\.[0-9]+)+-[0-9]+" "$DOWNLOAD_PAGE_HTML")
+        if [[ "$html_tag" =~ ([0-9]+(\.[0-9]+)+)-([0-9]+)$ ]]; then
+            app_ver="${BASH_REMATCH[1]}"
+            exec_id="${BASH_REMATCH[3]}"
+            log_warn "Using fallback release metadata from ${DOWNLOAD_PAGE_URL} for ${display_name}"
+        fi
+    fi
 
     if [[ -z "$app_ver" || -z "$exec_id" ]]; then
-        log_error "Could not parse latest version or execution_id for ${display_name}"
+        log_error "Could not resolve latest version or execution_id for ${display_name} from $releases_url"
         ERROR_COUNT=$((ERROR_COUNT + 1))
         return 1
     fi
@@ -383,7 +419,8 @@ package_agent() {
         "https://storage.googleapis.com/antigravity-public/antigravity-hub/__VER__-__EXEC__/windows-x64/Antigravity-x64.exe" \
         "https://storage.googleapis.com/antigravity-public/antigravity-hub/__VER__-__EXEC__/linux-x64/Antigravity.tar.gz" \
         "Antigravity-x64" \
-        "antigravity"
+        "antigravity" \
+        "antigravity-public/antigravity-hub/"
 }
 
 # Package Antigravity IDE
@@ -395,7 +432,8 @@ package_ide() {
         "https://edgedl.me.gvt1.com/edgedl/release2/j0qc3/antigravity/stable/__VER__-__EXEC__/windows-x64/Antigravity%20IDE.exe" \
         "https://edgedl.me.gvt1.com/edgedl/release2/j0qc3/antigravity/stable/__VER__-__EXEC__/linux-x64/Antigravity%20IDE.tar.gz" \
         "Antigravity IDE" \
-        "antigravity-ide"
+        "antigravity-ide" \
+        "antigravity/stable/"
 }
 
 # ------------------------------------------------------------------------------
