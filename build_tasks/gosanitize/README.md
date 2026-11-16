@@ -16,11 +16,13 @@ While Linux ELF binaries place Go build metadata in a dedicated `.go.buildinfo` 
 * **Safe In-Place Zeroing & Backup Preservation:** Zeroes only the buildinfo byte range in-place via atomic temp-file writes (`io.Copy` + `Seek`/`Write` + `Sync` + `Rename`), preserving PE/ELF section layouts, RVAs, relocations, and code. Creates a `<binary>.buildinfo` backup by default unless `-inplace` is passed.
 * **Idempotency & Non-Clobbering Backups:** Detects already-stripped binaries and exits cleanly without rewriting the binary or overwriting an existing `<binary>.buildinfo` backup.
 * **Defense-in-Depth Safety Guards:** Rejects symlinks (`os.Lstat`), refuses Authenticode-signed Windows PE binaries (`IMAGE_DIRECTORY_ENTRY_SECURITY`), caps ELF section reads at 16 MiB, and verifies `debug/buildinfo.ReadFile` fails on the staged binary before atomic rename.
+* **Pure-Stdlib Binary Diagnostics (`-diag` / `-json`):** Inspects any Linux (`ELF`) or Windows (`PE`) binary (Go or non-Go) for format/architecture, SHA-256, linkage classification (`static`, `static-pie`, `dynamic-pie`, `dynamic`, `shared-object`, `dll`), security hardening (`NX`, `RELRO` full/partial/none, `HighEnt ASLR`, `Guard CFG`, `Authenticode`), non-system DLL dependencies, stripped/debug state, and embedded Go metadata without `file`, `readelf`, `ldd`, or `objdump`.
 * **Pipeline Integration:** Integrates directly with [`../build_go.sh`](../build_go.sh) (`--remove-buildinfo`) and [`../build_orchestrate.sh`](../build_orchestrate.sh) via `prepare_gosanitize` and `compile_target_binary`.
 
 ### Related Documentation
 * **[`main.go`](main.go):** Primary CLI and binary sanitization engine.
-* **[`main_test.go`](main_test.go):** Automated unit and integration tests for Windows PE, Linux ELF, decoy handling, CLI flags, and security guards.
+* **[`diag.go`](diag.go):** Pure-stdlib ELF/PE structure, linkage, hardening, and Go metadata diagnostics (`-diag`, `-json`).
+* **[`main_test.go`](main_test.go):** Automated unit and integration tests for Windows PE, Linux ELF, synthetic ELF variants, diagnostics, decoy handling, CLI flags, and security guards.
 * **[`../build_go_README.md`](../build_go_README.md):** Architecture reference for `build_go.sh`, which compiles and invokes `gosanitize` when `--remove-buildinfo` is passed.
 
 ---
@@ -31,22 +33,24 @@ While Linux ELF binaries place Go build metadata in a dedicated `.go.buildinfo` 
 
 ```mermaid
 flowchart TD
-    CLI["CLI Entrypoint (main -> run)"] --> Parse["Parse Flags (-remove-buildinfo, -inplace, -version, -help)"]
+    CLI["CLI Entrypoint (main -> run)"] --> Parse["Parse Flags (-remove-buildinfo, -inplace, -diag, -json, -version, -help)"]
     Parse -->|-help| Usage["Print Usage -> Exit 0"]
     Parse -->|-version| Ver["Print Version -> Exit 0"]
-    Parse -->|Invalid / Missing Args| UsageErr["Print Error & Usage -> Exit 2"]
-    Parse -->|-remove-buildinfo| Loop["Iterate Target Binary Paths"]
+    Parse -->|Invalid / -json Without -diag / Missing Target| UsageErr["Print Error & Usage -> Exit 2"]
+    Parse -->|Valid Action + Targets| Preflight["preflightTargets (os.Lstat if Sanitize, else os.Stat)"]
+    Preflight -->|Symlink on Sanitize / Non-Regular / Missing| ErrExit["Print Error -> Exit 1"]
 
-    Loop --> Lstat["filepath.Clean + os.Lstat + os.SameFile Guard"]
-    Lstat -->|Symlink or Non-Regular| ErrExit["Print Error -> Exit 1"]
-    Lstat -->|Regular File| Detect["locateBuildInfo (Magic Byte Dispatch)"]
+    Preflight -->|Regular Files| Loop["Iterate Target Binary Paths"]
+    Loop -->|-remove-buildinfo| Guard["sanitizeFile (os.Lstat + os.SameFile)"]
+    Guard -->|os.SameFile Mismatch / Err| ErrExit
+    Guard --> Detect["locateBuildInfo (Magic Byte Dispatch)"]
 
     Detect -->|"0x7F ELF"| ELF["locateELFBuildInfo (.go.buildinfo Section)"]
     Detect -->|"MZ"| PE["locatePEBuildInfo (Authenticode Guard + 4 MiB Chunk Scan)"]
     Detect -->|Other| ErrExit
 
-    ELF -->|Not Found or All Zero| Unchanged["Report Unchanged -> Next Target"]
-    PE -->|Not Found| Unchanged
+    ELF -->|Not Found or All Zero| AfterSan["Unchanged (Buffer Result if Non-JSON)"]
+    PE -->|Not Found| AfterSan
 
     ELF -->|Offset & Length Found| BackupCheck{"-inplace?"}
     PE -->|Offset & Length Found| BackupCheck
@@ -57,7 +61,13 @@ flowchart TD
 
     Scrub --> Verify["debug/buildinfo.ReadFile Must Fail"]
     Verify --> Rename["renameWithRetry (Windows AV Lock Retry)"]
-    Rename --> Done["Report Removed -> Exit 0"]
+    Rename --> AfterSan
+
+    Loop -->|-diag Only| Inspect["inspectBinary (os.Stat + os.SameFile + SHA256 + ELF/PE Parse)"]
+    AfterSan -->|-diag Also Set| Inspect
+    Inspect -->|Format / I/O Err| ErrExit
+    AfterSan -->|No -diag| DoneSan["Flush Stdout -> Exit 0"]
+    Inspect --> Emit["Flush Sanitize Log (Non-JSON) + formatBinaryDiag / writeDiagJSON -> Exit 0"]
 ```
 
 ### 2.2. Key Design Choices
@@ -72,15 +82,15 @@ flowchart TD
 ### 2.3. Assumptions, Edge Cases, Performance & Efficiency
 
 * **Assumptions:**
-  * Target binaries are standard Linux ELF or Windows PE Go executables (`go 1.18+` inline varint format or legacy pointer-header format).
-  * The destination directory permits creating temporary files (`os.CreateTemp`) and atomic same-directory `os.Rename`.
+  * `-remove-buildinfo` targets Linux ELF or Windows PE Go binaries (`go 1.18+` inline varint format or legacy pointer-header format); `-diag` inspects any ELF or PE binary (Go or non-Go executables, `.so`, `.dll`, or `ET_REL` object files).
+  * For `-remove-buildinfo`, the destination directory permits creating temporary files (`os.CreateTemp`) and atomic same-directory `os.Rename`.
 * **Edge Cases Handled:**
   * **Decoy magic bytes in `.rdata`:** `findPEBuildInfoRange` checks `ptrSize` (`4` or `8`), `flags &^ 0x03 == 0`, alignment (`idx % ptrSize == 0`), and valid uvarint payload bounds (`advanceUvarintPayload`), skipping false matches rather than aborting.
   * **Already stripped binaries:** `isAllZero` (ELF) and missing magic (PE) return `length == 0`, leaving both the binary and any existing `<binary>.buildinfo` backup untouched.
   * **Authenticode-signed PE binaries:** `hasPEAuthenticode` checks `IMAGE_DIRECTORY_ENTRY_SECURITY` (`OptionalHeader32` / `OptionalHeader64`) and refuses modification so signatures are never silently invalidated.
-  * **Symlinks & special files:** `os.Lstat` rejects symlinks, directories, and device nodes.
+  * **Symlinks & preflight validation:** `preflightTargets` validates all target paths before modifying any file—enforcing `os.Lstat` to reject symlinks when `-remove-buildinfo` is active, using `os.Stat` for read-only `-diag`, and rejecting non-regular files in both modes.
   * **Windows antivirus file locks:** `renameWithRetry` retries `os.Rename` up to 5 times (`50 ms` backoff) on Windows to ride out transient Defender locks on newly compiled `.exe` files.
-  * **Oversized/malformed ELF headers:** `maxELFBuildInfoSize` (`16 MiB`) and `math.MaxInt64` overflow checks prevent unbounded allocations or integer truncation (`G115`).
+  * **Oversized/malformed ELF headers:** `maxELFBuildInfoSize` (`16 MiB`), `maxELFDynamicSize` (`16 MiB` for `PT_DYNAMIC`), and `math.MaxInt64` overflow checks prevent unbounded allocations or integer truncation (`G115`).
   * **Scope of removal:** Like `objcopy --remove-section .go.buildinfo` on Linux, `gosanitize` strips the `.go.buildinfo` / `"\xff Go buildinf:"` metadata read by `go version -m` and `debug/buildinfo.ReadFile`. If a Go program explicitly imports `runtime/debug`, Go's linker also retains a separate `runtime.modinfo` copy in `.rodata`/`.rdata` for `debug.ReadBuildInfo()`, which `gosanitize` intentionally leaves intact so runtime callers do not break.
 * **Performance & Efficiency:**
   * **Inspection:** Reads only the 4-byte file magic, ELF/PE headers, and (on PE) bounded `<= 4 MiB` section chunks (`1 MiB` overlap in `scanPESection`) via `io.ReaderAt`—never allocating an entire large PE section or whole binary.
@@ -143,6 +153,7 @@ sequenceDiagram
 * **`locateBuildInfo`**: Dispatches on header bytes (`\x7fELF` → `locateELFBuildInfo`, `MZ` → `locatePEBuildInfo`).
 * **`locateELFBuildInfo`**: Reads `.go.buildinfo` bounds, checks `sec.Size <= maxELFBuildInfoSize` and `math.MaxInt64` limits, and checks `isAllZero`.
 * **`locatePEBuildInfo` → `hasPEAuthenticode` → `prioritizePESections` → `scanPESection` → `findPEBuildInfoRange` → `advanceUvarintPayload`**: Verifies unsigned PE status, scans `.data` then `.rdata` then remaining sections in bounded `<= 4 MiB` (`1 MiB` overlap) chunks, parses Go 1.18+ inline uvarint payloads or legacy pointer headers, and returns the exact byte span.
+* **`inspectBinary` → `inspectELF` / `inspectPE` (`diag.go`):** Validates the target via `os.Stat` + `os.SameFile`, computes SHA-256 in streaming `O(1)` memory, classifies ELF linkage (`static`, `static-pie`, `dynamic-pie`, `dynamic`, `shared-object`, `relocatable`) using `PT_INTERP` + `SHT_DYNAMIC`/`PT_DYNAMIC` + exported dynamic symbols + `DT_FLAGS_1` (`DF_1_PIE`), resolves `DT_NEEDED` even when section headers are stripped, checks `RELRO`/`NX`, classifies PE linkage (`static` vs `dynamic` non-system DLLs vs `dll`) plus ASLR/NX/CFG/Authenticode flags, detects stripped symbol/debug sections, and detects Go `buildinfo` (`present`, `stripped`, or `absent`, including Go Build ID detection in PE `.text`).
 * **`copyReaderToAtomic` → `zeroFileRange` + `renameWithRetry`**: Creates a temporary file in `filepath.Dir(dstPath)`, rewinds and copies from the verified `*os.File`, zeroes `[offset, offset+length)`, syncs, verifies via `buildinfo.ReadFile`, invokes `beforeRename` (closing the source handle before replacing `path` on Windows), and atomically renames over `dstPath`.
 
 ---
@@ -153,9 +164,9 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-    App["gosanitize (main)"] --> StdIO["bytes, io, os, path/filepath"]
-    App --> StdBin["debug/elf, debug/pe, debug/buildinfo, encoding/binary"]
-    App --> StdCLI["errors, flag, fmt, math, runtime, time"]
+    App["gosanitize (main)"] --> StdIO["bytes, crypto/sha256, io, os, path/filepath"]
+    App --> StdBin["debug/elf, debug/pe, debug/buildinfo, encoding/binary, encoding/hex, encoding/json"]
+    App --> StdCLI["errors, flag, fmt, math, runtime, strconv, strings, time"]
 
     BuildGo["../build_go.sh (--remove-buildinfo)"] -->|Compiles & Invokes| App
     BuildOrch["../build_orchestrate.sh"] -->|Forwards --remove-buildinfo| BuildGo
@@ -165,9 +176,9 @@ flowchart LR
 | Category | Dependency | Purpose |
 | --- | --- | --- |
 | **Go Toolchain** | Go `1.21+` | Compiles `gosanitize` (tested with `go1.27.4`). |
-| **Go Standard Library** | `debug/elf`, `debug/pe`, `debug/buildinfo` | Binary section parsing and post-scrub buildinfo verification. |
-| **Go Standard Library** | `encoding/binary`, `bytes`, `math` | Safe uvarint decoding and overflow-guarded bounds math. |
-| **Go Standard Library** | `os`, `io`, `path/filepath`, `flag`, `runtime`, `time` | Symlink/file validation, streaming atomic writes, CLI parsing, Windows rename retry. |
+| **Go Standard Library** | `debug/elf`, `debug/pe`, `debug/buildinfo`, `crypto/sha256` | Binary header/section inspection, linkage/hardening diagnostics, streaming SHA-256, and post-scrub buildinfo verification. |
+| **Go Standard Library** | `encoding/binary`, `encoding/hex`, `encoding/json`, `bytes`, `math` | Safe uvarint/dynamic-table decoding, JSON serialization, and overflow-guarded bounds math. |
+| **Go Standard Library** | `os`, `io`, `path/filepath`, `flag`, `runtime`, `strconv`, `strings`, `time` | Target validation, streaming atomic writes, CLI parsing, output formatting, and Windows rename retry. |
 | **Pipeline Scripts (Optional)** | [`../build_go.sh`](../build_go.sh), [`../build.inc`](../build.inc), [`../build_orchestrate.sh`](../build_orchestrate.sh) | Builds `gosanitize` on demand into a tracked temp directory when `--remove-buildinfo` is enabled. |
 
 ---
@@ -197,7 +208,7 @@ flowchart TD
 * **Libraries & Vulnerability Status:**
   * **Zero third-party dependencies:** Only Go standard library packages are imported in [`go.mod`](go.mod).
   * **`govulncheck ./...`:** `No vulnerabilities found.`
-  * **`gosec ./...` (v2.30.0):** `0` issues (`1` documented `#nosec G304` annotation for opening the `Lstat`/`SameFile`-validated CLI target path).
+  * **`gosec ./...` (v2.30.0):** `0` issues (`3` documented `#nosec` annotations: `#nosec G304` in [`main.go`](main.go) and [`diag.go`](diag.go) for opening validated CLI target paths, and `#nosec G115` in [`diag.go`](diag.go) for bounded PE `DataDirectory` indices `1..6`).
   * **`golangci-lint run ./... --no-config`:** `0` issues (`errcheck` and default linters clean).
   * **`go vet ./...`:** Passed with `0` warnings.
 * **Execution Privilege Context:**
@@ -214,6 +225,8 @@ flowchart TD
 | --- | --- | --- | --- |
 | `-remove-buildinfo` | `bool` | `false` | Action flag enabling Go buildinfo stripping on one or more `<binary>` positional arguments. |
 | `-inplace` | `bool` | `false` | Modify the binary in place without creating or overwriting a `<binary>.buildinfo` backup. |
+| `-diag` | `bool` | `false` | Inspect ELF/PE structure, linkage (`static`, `static-pie`, `dynamic-pie`, `dynamic`, `shared-object`, `dll`, `relocatable`), hardening flags, DLL/shared-lib deps, stripped state, and Go metadata. |
+| `-json` | `bool` | `false` | Emit `-diag` output as a uniform JSON array (suppresses plaintext sanitize log lines on stdout when combined with `-remove-buildinfo`). |
 | `-version` | `bool` | `false` | Print `gosanitize <version>` (default `"dev"`, injectable via `-X main.version=...`) and exit `0`. |
 | `-help` / `-h` | `bool` | `false` | Print CLI usage and flag defaults to stdout and exit `0`. |
 
@@ -221,9 +234,9 @@ flowchart TD
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Success (buildinfo removed, already absent, `-version`, or `-help`). |
-| `1` | Runtime error (I/O failure, symlink, Authenticode-signed PE, corrupt ELF/PE, unsupported format, or post-scrub check failure). |
-| `2` | CLI usage error (unknown flag, missing action flag, or missing `<binary>` argument). |
+| `0` | Success (buildinfo removed, already absent, `-diag`, `-version`, or `-help`). |
+| `1` | Runtime or preflight error (missing/non-regular target, symlink when `-remove-buildinfo` is set, I/O failure, Authenticode-signed PE, corrupt ELF/PE, unsupported format, or post-scrub check failure). |
+| `2` | CLI usage error (unknown flag, missing action flag, `-json` without `-diag`, or missing `<binary>` argument). |
 
 ### 6.3. Pipeline Integration Flags
 
@@ -262,13 +275,17 @@ gosanitize v1.0.0-20261112
 $ gosanitize.exe -help
 Usage: gosanitize [options] <binary>...
 
-Autodetects Linux (ELF) and Windows (PE) Go binaries and strips Go buildinfo metadata.
+Inspects Linux (ELF) and Windows (PE) binaries and strips Go buildinfo metadata.
 
 Options:
+  -diag
+    	Inspect binary linkage (static/dynamic/pie/static-pie), hardening, and Go metadata
   -help
     	Show this help message and exit
   -inplace
     	Modify the binary in place without creating or overwriting a <binary>.buildinfo backup
+  -json
+    	Emit -diag output as JSON
   -remove-buildinfo
     	Remove Go buildinfo metadata from the target binary
   -version
@@ -295,7 +312,30 @@ $ gosanitize -remove-buildinfo -inplace ./bin/myapp
 Removed Go buildinfo from ./bin/myapp (ELF, in-place)
 ```
 
-### 7.5. Using `--remove-buildinfo` in the Build Pipeline
+### 7.5. Inspecting Binary Diagnostics (`-diag` / `-json`)
+
+```text
+$ gosanitize.exe -diag d:\dev\go\bin\go.exe
+File          : d:\dev\go\bin\go.exe
+Format        : PE (PE32+, x86_64, little-endian)
+Size          : 17622528 bytes
+SHA256        : 8328d44e29aafb5779e4424c639fa18cbd0a437cf71faa0b0f1ccc7b2c6fb98c
+Linkage       : static (static=true, pie=true, static_pie=false)
+Entry Point   : 0x90e80
+Subsystem     : console
+NX            : true
+HighEnt ASLR  : true
+Guard CFG     : false
+Authenticode  : false
+Stripped      : false (symtab=true, debug=false)
+Dependencies  : kernel32.dll
+Non-Sys DLLs  : none
+Go BuildInfo  : present (go1.27.4, module=(unknown), buildmode=exe, cgo=0, trimpath=true, vcs=false)
+
+$ gosanitize -diag -json ./bin/myapp ./bin/myapp.exe
+```
+
+### 7.6. Using `--remove-buildinfo` in the Build Pipeline
 
 ```bash
 # Build and package Windows + Linux artifacts with buildinfo stripped prior to packaging/signing

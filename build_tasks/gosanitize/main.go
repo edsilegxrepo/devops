@@ -8,6 +8,7 @@ import (
 	"debug/elf"
 	"debug/pe"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -40,6 +41,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	var (
 		removeBuildInfo bool
 		inplace         bool
+		diagMode        bool
+		jsonOut         bool
 		showVersion     bool
 		showHelp        bool
 	)
@@ -48,6 +51,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	fs.BoolVar(&removeBuildInfo, "remove-buildinfo", false, "Remove Go buildinfo metadata from the target binary")
 	fs.BoolVar(&inplace, "inplace", false, "Modify the binary in place without creating or overwriting a <binary>.buildinfo backup")
+	fs.BoolVar(&diagMode, "diag", false, "Inspect binary linkage (static/dynamic/pie/static-pie), hardening, and Go metadata")
+	fs.BoolVar(&jsonOut, "json", false, "Emit -diag output as JSON")
 	fs.BoolVar(&showVersion, "version", false, "Print version information and exit")
 	fs.BoolVar(&showHelp, "help", false, "Show this help message and exit")
 	fs.Usage = func() {}
@@ -71,42 +76,123 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	if !removeBuildInfo {
-		_, _ = fmt.Fprintln(stderr, "error: no action specified (use -remove-buildinfo, -version, or -help)")
+	if !removeBuildInfo && !diagMode {
+		_, _ = fmt.Fprintln(stderr, "error: no action specified (use -remove-buildinfo, -diag, -version, or -help)")
+		printUsage(fs, stderr)
+		return 2
+	}
+	if jsonOut && !diagMode {
+		_, _ = fmt.Fprintln(stderr, "error: -json requires -diag")
 		printUsage(fs, stderr)
 		return 2
 	}
 
 	targets := fs.Args()
 	if len(targets) == 0 {
-		_, _ = fmt.Fprintln(stderr, "error: -remove-buildinfo requires at least one binary path")
+		_, _ = fmt.Fprintln(stderr, "error: target action requires at least one binary path")
 		printUsage(fs, stderr)
 		return 2
 	}
 
+	if err := preflightTargets(targets, removeBuildInfo); err != nil {
+		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	var sanitizeLog bytes.Buffer
+	var diags []*BinaryDiag
 	for _, target := range targets {
-		changed, format, err := sanitizeFile(target, inplace)
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "error: %s: %v\n", target, err)
-			return 1
+		if removeBuildInfo {
+			changed, format, err := sanitizeFile(target, inplace)
+			if err != nil {
+				_, _ = fmt.Fprintf(stderr, "error: %s: %v\n", target, err)
+				return 1
+			}
+			if !jsonOut {
+				printSanitizeResult(&sanitizeLog, target, format, changed, inplace)
+			}
 		}
-		if changed {
-			if inplace {
-				_, _ = fmt.Fprintf(stdout, "Removed Go buildinfo from %s (%s, in-place)\n", target, format)
-			} else {
-				_, _ = fmt.Fprintf(stdout, "Removed Go buildinfo from %s (%s, backup: %s.buildinfo)\n", target, format, target)
+		if diagMode {
+			d, err := inspectBinary(target)
+			if err != nil {
+				_, _ = fmt.Fprintf(stderr, "error: %s: %v\n", target, err)
+				return 1
+			}
+			diags = append(diags, d)
+		}
+	}
+
+	if sanitizeLog.Len() > 0 {
+		_, _ = stdout.Write(sanitizeLog.Bytes())
+	}
+	if diagMode {
+		if jsonOut {
+			if err := writeDiagJSON(stdout, diags); err != nil {
+				_, _ = fmt.Fprintf(stderr, "error: encode diagnostics JSON: %v\n", err)
+				return 1
 			}
 		} else {
-			_, _ = fmt.Fprintf(stdout, "No Go buildinfo found in %s (%s); left unchanged\n", target, format)
+			for i, d := range diags {
+				if i > 0 || removeBuildInfo {
+					_, _ = fmt.Fprintln(stdout, "")
+				}
+				formatBinaryDiag(stdout, d)
+			}
 		}
 	}
 	return 0
 }
 
+func preflightTargets(targets []string, strictNoSymlink bool) error {
+	for _, target := range targets {
+		cleaned := filepath.Clean(target)
+		var (
+			info os.FileInfo
+			err  error
+		)
+		if strictNoSymlink {
+			info, err = os.Lstat(cleaned)
+			if err != nil {
+				return fmt.Errorf("%s: %w", target, err)
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("%s: refusing to sanitize symlink", target)
+			}
+		} else {
+			info, err = os.Stat(cleaned)
+			if err != nil {
+				return fmt.Errorf("%s: %w", target, err)
+			}
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("%s: not a regular file", target)
+		}
+	}
+	return nil
+}
+
+func printSanitizeResult(stdout io.Writer, target, format string, changed, inplace bool) {
+	if !changed {
+		_, _ = fmt.Fprintf(stdout, "No Go buildinfo found in %s (%s); left unchanged\n", target, format)
+		return
+	}
+	if inplace {
+		_, _ = fmt.Fprintf(stdout, "Removed Go buildinfo from %s (%s, in-place)\n", target, format)
+		return
+	}
+	_, _ = fmt.Fprintf(stdout, "Removed Go buildinfo from %s (%s, backup: %s.buildinfo)\n", target, format, target)
+}
+
+func writeDiagJSON(stdout io.Writer, diags []*BinaryDiag) error {
+	enc := json.NewEncoder(stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(diags)
+}
+
 func printUsage(fs *flag.FlagSet, w io.Writer) {
 	_, _ = fmt.Fprintln(w, "Usage: gosanitize [options] <binary>...")
 	_, _ = fmt.Fprintln(w, "")
-	_, _ = fmt.Fprintln(w, "Autodetects Linux (ELF) and Windows (PE) Go binaries and strips Go buildinfo metadata.")
+	_, _ = fmt.Fprintln(w, "Inspects Linux (ELF) and Windows (PE) binaries and strips Go buildinfo metadata.")
 	_, _ = fmt.Fprintln(w, "")
 	_, _ = fmt.Fprintln(w, "Options:")
 	prev := fs.Output()
