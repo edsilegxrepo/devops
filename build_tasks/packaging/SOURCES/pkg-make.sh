@@ -469,7 +469,9 @@ if [ "$PLATFORM" = "rust" ]; then
   sync_helper "zig-musl.sh"
 else
   sync_helper "go-toolchain.inc"
-  [ "$USE_CGO" -eq 1 ] && sync_helper "zig-musl.sh"
+  if [ "$USE_CGO" -eq 1 ] || [ -f "${SOURCES_DIR}/zig-musl.sh" ]; then
+    sync_helper "zig-musl.sh"
+  fi
 fi
 if [[ ! " ${EXCLUDES[*]} " =~ " deb " ]] && [[ ! " ${EXCLUDES[*]} " =~ " debian " ]]; then
   sync_helper "pkg-deb.sh"
@@ -604,6 +606,26 @@ with open(template_file, "r") as f:
 def escape_rpm_pct(s):
     return re.sub(r"%(?![{%])", "%%", s)
 
+def must_sub(pattern, repl, text, label, count=0, flags=0):
+    fn = repl if callable(repl) else (lambda _: repl)
+    new_text, n = re.subn(pattern, fn, text, count=count, flags=flags)
+    if n == 0:
+        sys.exit(f"ERROR: Template substitution failed for {label} (pattern not found: {pattern})")
+    return new_text
+
+UNRESOLVED_TOKENS = (
+    "<name>", "<version>", "<release_num>", "<summary>", "<description>",
+    "<license>", "<url>", "<git_hash>", "<changelog_date>", "<maintainer>",
+    "<deb_depends>", "<cargo_features>", "<goipath>", "<cmd_path>",
+    "<build_tags>", "<version_ldflags>", "<summary_description>",
+    "<description_of_daemon>",
+)
+
+def assert_no_placeholders(text, path):
+    found = [tok for tok in UNRESOLVED_TOKENS if tok in text]
+    if found:
+        sys.exit(f"ERROR: Unresolved template placeholder(s) in {path}: {', '.join(found)}")
+
 # Replace metadata
 safe_summary = escape_rpm_pct(summary)
 content = content.replace("<name>", name)
@@ -617,17 +639,17 @@ content = content.replace("<changelog_date>", chg_date)
 content = content.replace("<maintainer>", maintainer)
 deb_replacement = deb_depends if deb_depends else "%{nil}"
 content = content.replace("<deb_depends>", deb_replacement)
-content = content.replace("Group:          Applications/System", f"Group:          {group}")
+content = must_sub(r"^Group:\s+.*$", f"Group:          {group}", content, "group", count=1, flags=re.MULTILINE)
 if src_root != f"{name}-main":
-    content = re.sub(r"%global src_root\s+\S+", f"%global src_root        {src_root}", content)
+    content = must_sub(r"%global src_root\s+\S+", f"%global src_root        {src_root}", content, "src_root")
 if bin_name:
-    content = re.sub(r"%global bin_name\s+\S+", f"%global bin_name        {bin_name}", content)
+    content = must_sub(r"%global bin_name\s+\S+", f"%global bin_name        {bin_name}", content, "bin_name")
 if license_file:
-    content = re.sub(r"%global license_file\s+\S+", f"%global license_file    {license_file}", content)
+    content = must_sub(r"%global license_file\s+\S+", f"%global license_file    {license_file}", content, "license_file")
 if completion_cmd:
-    content = re.sub(r"%global completion_cmd\s+\S+", f"%global completion_cmd  {completion_cmd}", content)
+    content = must_sub(r"%global completion_cmd\s+\S+", f"%global completion_cmd  {completion_cmd}", content, "completion_cmd")
 if version_flag != "--version":
-    content = re.sub(r"%global version_flag\s+\S+", f"%global version_flag    {version_flag}", content)
+    content = must_sub(r"%global version_flag\s+\S+", f"%global version_flag    {version_flag}", content, "version_flag")
 extra_globals = []
 if check_version:
     extra_globals.append(f"%global check_version   {check_version}")
@@ -636,33 +658,41 @@ if doclist:
 if deb_section:
     extra_globals.append(f"%global deb_section     {deb_section}")
 if extra_globals:
-    content = re.sub(r"(%global pkgver[^\n]+\n)", r"\1" + "\n".join(extra_globals) + "\n", content, count=1)
+    content = must_sub(
+        r"(%global pkgver[^\n]+\n)",
+        lambda m: m.group(1) + "\n".join(extra_globals) + "\n",
+        content,
+        "extra_globals",
+        count=1,
+    )
 
 # Multi-line description formatting with backslashes
 desc_lines = [escape_rpm_pct(l.replace("\\", "")) for l in desc.strip().splitlines()]
 formatted_desc = "\\\n".join(desc_lines)
 desc_replacement = f"%global pkg_desc        {formatted_desc}"
 
-# Replace the entire description block
-content = re.sub(
-    r"%global pkg_desc\s+<description>\\(\r?\n)<description_line_2>\\(\r?\n)<description_line_3>",
-    desc_replacement,
-    content
+# Replace the description placeholder
+content = must_sub(
+    r"%global pkg_desc\s+<description>",
+    lambda _: desc_replacement,
+    content,
+    "pkg_desc",
+    count=1,
 )
 
 # Platform specific substitutions
 if platform == "rust":
     feat_repl = f"--features \"{cargo_feat}\"" if cargo_feat else "%{nil}"
     content = content.replace("<cargo_features>", feat_repl)
-    content = re.sub(r"%global use_sqlite\s+\d+", f"%global use_sqlite         {use_sqlite}", content)
+    content = must_sub(r"%global use_sqlite\s+\d+", f"%global use_sqlite         {use_sqlite}", content, "use_sqlite")
 else:
     content = content.replace("<goipath>", goipath)
     content = content.replace("<cmd_path>", cmd_path)
     content = content.replace("<build_tags>", build_tags if build_tags else "%{nil}")
     content = content.replace("<version_ldflags>", ver_ldflags if ver_ldflags else "%{nil}")
-    content = re.sub(r"%global use_cgo\s+\d+", f"%global use_cgo            {use_cgo}", content)
-    content = re.sub(r"%global use_sqlite\s+\d+", f"%global use_sqlite         {use_sqlite}", content)
-    content = re.sub(r"%global use_bundled_c_lib\s+\d+", f"%global use_bundled_c_lib  {use_clib}", content)
+    content = must_sub(r"%global use_cgo\s+\d+", f"%global use_cgo            {use_cgo}", content, "use_cgo")
+    content = must_sub(r"%global use_sqlite\s+\d+", f"%global use_sqlite         {use_sqlite}", content, "use_sqlite")
+    content = must_sub(r"%global use_bundled_c_lib\s+\d+", f"%global use_bundled_c_lib  {use_clib}", content, "use_bundled_c_lib")
 
 # Inject extra BuildRequires / Requires
 extra_deps = []
@@ -672,6 +702,8 @@ for r in reqs:
     extra_deps.append(f"Requires:       {r}")
 if extra_deps:
     inject_str = "\n".join(extra_deps) + "\n"
+    if "%pkg_common_buildrequires" not in content:
+        sys.exit("ERROR: Template missing %pkg_common_buildrequires anchor")
     content = content.replace("%pkg_common_buildrequires", inject_str + "%pkg_common_buildrequires", 1)
 
 # Daemon systemd services & directives activation
@@ -686,10 +718,12 @@ if is_daemon == 1:
     sys_out = os.path.join(sources_dir, f"{name}.sysusers.conf")
     tmp_out = os.path.join(sources_dir, f"{name}.tmpfiles.conf")
 
-    # Render template.service
+    # Render template.service (escape '%' as '%%' so systemd does not treat it as a unit specifier)
+    systemd_summary = summary.replace("%", "%%")
     with open(find_tmpl("template.service"), "r") as f:
         svc_txt = f.read()
-    svc_txt = svc_txt.replace("<name>", name).replace("<summary_description>", summary).replace("<url>", repo_url)
+    svc_txt = svc_txt.replace("<name>", name).replace("<summary_description>", systemd_summary).replace("<url>", repo_url)
+    assert_no_placeholders(svc_txt, svc_out)
     with open(svc_out, "w") as f:
         f.write(svc_txt)
     os.chmod(svc_out, 0o644)
@@ -699,6 +733,7 @@ if is_daemon == 1:
     with open(find_tmpl("template.sysusers.conf"), "r") as f:
         sys_txt = f.read()
     sys_txt = sys_txt.replace("<name>", name).replace("<summary_description>", gecos_summary).replace("<description_of_daemon>", gecos_summary)
+    assert_no_placeholders(sys_txt, sys_out)
     with open(sys_out, "w") as f:
         f.write(sys_txt)
     os.chmod(sys_out, 0o644)
@@ -707,6 +742,7 @@ if is_daemon == 1:
     with open(find_tmpl("template.tmpfiles.conf"), "r") as f:
         tmp_txt = f.read()
     tmp_txt = tmp_txt.replace("<name>", name)
+    assert_no_placeholders(tmp_txt, tmp_out)
     with open(tmp_out, "w") as f:
         f.write(tmp_txt)
     os.chmod(tmp_out, 0o644)
@@ -716,26 +752,29 @@ if is_daemon == 1:
     with open(find_tmpl("template.env"), "r") as f:
         env_txt = f.read()
     env_txt = env_txt.replace("<name>", name)
+    assert_no_placeholders(env_txt, env_out)
     with open(env_out, "w") as f:
         f.write(env_txt)
     os.chmod(env_out, 0o644)
 
     # Activate daemon toggle in specfile
-    content = re.sub(r"%global is_daemon\s+\d+", "%global is_daemon          1", content)
+    content = must_sub(r"%global is_daemon\s+\d+", "%global is_daemon          1", content, "is_daemon")
 
 # ------------------------------------------------------------------------------
 # Handle Packaging Exclusions (--exclude windows,deb,rpm,archive)
 # ------------------------------------------------------------------------------
 if "windows" in excludes:
-    content = re.sub(r"%global enable_windows\s+\d+", "%global enable_windows     0", content)
+    content = must_sub(r"%global enable_windows\s+\d+", "%global enable_windows     0", content, "enable_windows")
 
 if "deb" in excludes:
-    content = re.sub(r"%global enable_deb\s+\d+", "%global enable_deb         0", content)
+    content = must_sub(r"%global enable_deb\s+\d+", "%global enable_deb         0", content, "enable_deb")
 
 if "archive" in excludes:
-    content = re.sub(r"%global enable_archive\s+\d+", "%global enable_archive     0", content)
+    content = must_sub(r"%global enable_archive\s+\d+", "%global enable_archive     0", content, "enable_archive")
 
 if "rpm" in excludes:
+    if "%bcond_without rpm\n" not in content:
+        sys.exit("ERROR: Template missing '%bcond_without rpm' directive")
     content = content.replace("%bcond_without rpm\n", "%bcond_with rpm\n")
 
 # Update Building Instructions comment in spec header based on exclusions
@@ -762,11 +801,19 @@ if "windows" not in excludes: active_flags.append("--with windows")
 if active_flags:
     flag_str = " ".join(active_flags)
     inst_lines.append(f"#   {inst_idx}. Build All Active Targets:\n#        rpmbuild {flag_str} -ba SPECS/{name}-xg.spec")
-inst_lines.append("#   Optional QA / Dependency Flags:\n#        --with testsuite, --with lint, --with audit, --with update_deps")
+inst_lines.append("#   Optional QA / Dependency Flags:\n#        --with testsuite, --with lint, --with audit, --without update_deps")
 
 inst_block = "\n".join(inst_lines)
-content = re.sub(r"# BUILDING INSTRUCTIONS:.*?(?=# TECHNICAL ARCHITECTURE:)", inst_block + "\n#\n", content, flags=re.DOTALL)
+content = must_sub(
+    r"# BUILDING INSTRUCTIONS:.*?(?=# TECHNICAL ARCHITECTURE:)",
+    lambda _: inst_block + "\n#\n",
+    content,
+    "building_instructions",
+    count=1,
+    flags=re.DOTALL,
+)
 
+assert_no_placeholders(content, target_spec)
 with open(target_spec, "w") as f:
     f.write(content)
 PYEOF

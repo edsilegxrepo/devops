@@ -541,10 +541,9 @@ Daemons packaged via [`template.service`](./SOURCES/template.service) implement 
 
 ### Supply Chain Auditing & Non-Vulnerable Libraries
 
-* Both templates support opt-in dependency synchronization via `--with update_deps` (disabled by default so offline/hermetic RPM builds preserve pinned upstream `Cargo.lock` / `go.sum` lockfiles reproducibly):
+* Both templates execute dependency synchronization by default to incorporate security patches within semver boundaries at packaging time (pass `--without update_deps` to opt out for offline/hermetic RPM builds that preserve pinned upstream `Cargo.lock` / `go.sum` lockfiles):
   - Rust (`%prep`): `cargo update --recursive` (`%{cargo_update}`)
   - Go (`%build`): `go get -u ./...` and `go mod tidy` via `%{go_update_tree}` (or `%{go_update_tree_tests}` when `--with testsuite` is active)
-  Enabling `--with update_deps` incorporates security patches within semver boundaries at packaging time.
 
 ---
 
@@ -576,7 +575,7 @@ Pass build condition flags to `rpmbuild` using `--with <flag>` or `--without <fl
 | `--with testsuite` | Disabled | Runs upstream unit testsuite (`%go_run_tests` honoring CGO/SQLite/build tags, or `%rust_run_tests`); disabled by default in favor of binary wellness verification. |
 | `--with lint` | Disabled | Runs installed Rust (`cargo fmt --check`, `cargo clippy`, `cargo machete`, `cargo bloat`) or Go (`go vet`, `gofumpt -l`, `golangci-lint`, `staticcheck`) checks plus strict `lintian` on `.deb` artifacts during `%check`. |
 | `--with audit` | Disabled | Runs dependency/security audits (`cargo audit`, `cargo deny` for Rust; `govulncheck`, `gosec` for Go). |
-| `--with update_deps` | Disabled | Runs lockfile dependency updates (`go get -u && go mod tidy` / `cargo update --recursive`); off by default for hermetic reproducible builds. |
+| `--without update_deps` | Enabled | Runs lockfile dependency updates (`go get -u && go mod tidy` / `cargo update --recursive`) by default; pass `--without update_deps` to skip for hermetic/offline builds. |
 
 ### Go & Shared Spec Configuration Toggles
 
@@ -587,7 +586,7 @@ Located near lines 44–95 in [`pkg-go-template-xg.spec`](./SPECS/pkg-go-templat
 %global use_cgo            0   # 0 = Pure Go (default, Caddy-style), 1 = Static CGO (SFTPGo-style)
 %global go_cgo_pie         1   # 1 = Static-PIE (-buildmode=pie + -static-pie -s) for Linux CGO; set 0 only if non-PIC C/asm archives fail linking
 %global use_sqlite         0   # 1 = Build embedded SQLite amalgamation via Zig (requires use_cgo 1)
-%global use_bundled_c_lib  0   # 1 = Compile static autotools C library (libxcrypt) via Zig (requires use_cgo 1)
+%global use_bundled_c_lib  0   # 1 = Compile static autotools C library via Zig (defaults to libxcrypt; customize via clib_name/clib_ver/clib_archive/clib_dir/clib_link_libs/clib_configure_args/clib_linux_only)
 %global bin_name           %{name}   # Override compiled binary basename if different from RPM Name
 %global go_test_pkgs       ./...     # Package pattern passed to %go_run_tests (e.g. ./cmd/...)
 %global license_file       LICENSE   # Override license filename (e.g. LICENSE.txt, COPYING)

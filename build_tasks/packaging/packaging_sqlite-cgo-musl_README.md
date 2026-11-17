@@ -276,7 +276,7 @@ cp -af "bin/%{name}.exe" "bin/windows/"
 
 ### Step 6: Validate Binary Wellness in `%check`
 
-Because the binary is statically linked against musl libc, `zig-musl.sh check` inspects the ELF header to assert the complete absence of a dynamic linker (`PT_INTERP` segment):
+Because the binary is statically linked against musl libc, `pkg-verify.sh check` inspects the ELF header to assert the complete absence of a dynamic linker (`PT_INTERP` segment):
 
 ```spec
 # ------------------------------------------------------------------------------
@@ -439,7 +439,7 @@ Review these production specs in the repository to observe the exact methodology
    - Combines SQLite amalgamation with bundled static `libxcrypt`.
 2. **[`sling-cli-xg.spec`]**:
    - High-throughput database ETL and replication CLI tool.
-   - Uses SQLite amalgamation alongside Apache Arrow ADBC drivers and DuckDB.
+   - Uses SQLite amalgamation alongside Apache Arrow ADBC and Databricks Zerobus FFI (with a musl glibc-compat shim and Go 1.27+ LTO section stripping).
 3. **[`sq-xg.spec`]**:
    - Multi-database data wrangling CLI.
    - Links SQLite amalgamation while consuming static DuckDB from [`libduckdb-static-xg.spec`].

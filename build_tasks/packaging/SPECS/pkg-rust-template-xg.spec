@@ -27,14 +27,15 @@
 #        rpmbuild --with windows --with archive --with deb -ba SPECS/<name>-xg.spec
 #   Optional QA / Dependency Flags:
 #        --with testsuite (nextest/cargo test), --with lint, --with audit,
-#        --with update_deps (run cargo update --recursive)
+#        --without update_deps (skip cargo update --recursive)
 #
 # TECHNICAL ARCHITECTURE:
 #   - Shared lifecycle macros (%%pkg_*) come from pkg-common.inc; Rust/Cargo
 #     build/lint/audit macros (%%rust_build_target, %%rust_lint_checks,
 #     %%rust_security_audit, %%rust_run_tests) come from rust-toolchain.inc.
+#   - %%prep executes %%{cargo_update} by default; pass --without update_deps to skip.
 #   - %%check executes binary wellness validation via pkg-verify.sh by default;
-#     linting, security audit, unit tests, and dependency updates are opt-in via --with flags.
+#     linting, security audit, and unit tests are opt-in via --with flags.
 # ==============================================================================
 
 # Common toolchain definitions, architecture mappings, and sanity checks
@@ -56,13 +57,11 @@
 %bcond_with testsuite
 %bcond_with lint
 %bcond_with audit
-%bcond_with update_deps
+%bcond_without update_deps
 
 # Package Descriptions (Shared between RPM and Debian control)
 %global pkg_summary     <summary>
-%global pkg_desc        <description>\
-<description_line_2>\
-<description_line_3>
+%global pkg_desc        <description>
 
 # Package Metadata
 Name:           <name>

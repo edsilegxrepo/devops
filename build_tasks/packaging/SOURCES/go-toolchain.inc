@@ -84,7 +84,15 @@
 %{!?go_build_tags:%global go_build_tags %{nil}}
 %{!?go_version_ldflags:%global go_version_ldflags %{nil}}
 %{!?go_ldflags:%define go_ldflags %{go_ldflags_core}%{?go_version_ldflags: %{go_version_ldflags}}}
-%{!?xcryptver:%global xcryptver 4.5.2}
+
+# Bundled static autotools C library defaults (active when use_bundled_c_lib=1)
+%{!?clib_name:%global clib_name           libxcrypt}
+%{!?clib_ver:%global clib_ver             4.5.2}
+%{!?clib_archive:%define clib_archive     %{clib_name}-%{clib_ver}.tar.xz}
+%{!?clib_dir:%define clib_dir             %{clib_name}-%{clib_ver}}
+%{!?clib_link_libs:%global clib_link_libs -lcrypt}
+%{!?clib_configure_args:%global clib_configure_args --enable-hashes=all --disable-werror}
+%{!?clib_linux_only:%global clib_linux_only 1}
 
 # ------------------------------------------------------------------------------
 # 3. Module Staging & Target Compilation Macros
@@ -92,8 +100,11 @@
 # Copy a Go module from the Go module cache to a local writable directory and register go.mod replace
 %define go_vendor_local_mod() \
 [ -n "%{2}" ] && [ "%{2}" != "." ] && [ "%{2}" != ".." ] && [[ "%{2}" != /* ]] || { echo "ERROR: Invalid local vendor directory '%{2}'" >&2; exit 1; } \
+go mod download "%{1}" >/dev/null 2>&1 || : \
+_go_mod_dir="$(go list -m -f '{{.Dir}}' "%{1}" 2>/dev/null || true)" \
+[ -n "${_go_mod_dir}" ] && [ -d "${_go_mod_dir}" ] || { echo "ERROR: Module '%{1}' directory not found in GOMODCACHE" >&2; exit 1; } \
 rm -rf -- "./%{2}" \
-cp -a "$(go list -m -f '{{.Dir}}' %{1})" "./%{2}" \
+cp -a "${_go_mod_dir}" "./%{2}" \
 chmod -R u+w "./%{2}" \
 go mod edit -replace "%{1}=./%{2}"
 
@@ -126,8 +137,6 @@ CGO_ENABLED=0 GOOS="${_go_target_os}" go build ${_go_tags:+-tags "${_go_tags}"} 
     -ldflags "${_go_final_ldflags}" \\\
     -o "bin/%{bin_name}${_go_ext}" %{go_cmd_path} \
 %else \
-export CGO_ENABLED=1 \
-export GOOS="${_go_target_os}" \
 chmod +x %{SOURCE10} 2>/dev/null || : \
 if [ "${_go_target_os}" = "windows" ]; then \
   _go_cc_target="%{_arch}-windows-gnu" \
@@ -157,16 +166,18 @@ _go_cgo_ldflags="${_go_cgo_ldflags} -L${_go_libdir} -lsqlite3" \
 _go_tags="${_go_tags:+${_go_tags} }libsqlite3" \
 %endif \
 %if %{use_bundled_c_lib} \
-if [ "${_go_target_os}" = "linux" ]; then \
-  _go_clib_src="$(cd ../libxcrypt-%{xcryptver} 2>/dev/null && pwd)" \
+if [ "%{clib_linux_only}" = "0" ] || [ "${_go_target_os}" = "linux" ]; then \
+  _go_clib_src="$(cd ../%{clib_dir} 2>/dev/null && pwd)" \
   _go_clib_inst="$(pwd)/.clib_install_${_go_target_os}" \
-  echo "==> [${_go_target_os}] Compiling static libxcrypt %{xcryptver} via Zig (target: ${_go_cc_target})..." \
-  bash %{SOURCE10} build-autotools "${_go_cc_target}" "${_go_clib_src}" "${_go_clib_inst}" --enable-hashes=all --disable-werror \
+  echo "==> [${_go_target_os}] Compiling static %{clib_name} %{clib_ver} via Zig (target: ${_go_cc_target})..." \
+  bash %{SOURCE10} build-autotools "${_go_cc_target}" "${_go_clib_src}" "${_go_clib_inst}" %{clib_configure_args} \
   _go_cgo_cflags="${_go_cgo_cflags} -I${_go_clib_inst}/include" \
-  _go_cgo_ldflags="${_go_cgo_ldflags} -L${_go_clib_inst}/lib -lcrypt" \
+  _go_cgo_ldflags="${_go_cgo_ldflags} -L${_go_clib_inst}/lib %{clib_link_libs}" \
 fi \
 %endif \
 echo "==> [${_go_target_os}] Compiling static CGO binary with Zig (target: ${_go_cc_target})..." \
+CGO_ENABLED=1 \\\
+GOOS="${_go_target_os}" \\\
 CGO_CFLAGS="${_go_cgo_cflags}" \\\
 CGO_LDFLAGS="${_go_cgo_ldflags}" \\\
 CC="%{SOURCE10} cc -target ${_go_cc_target}" \\\
@@ -184,7 +195,7 @@ fi
 # ------------------------------------------------------------------------------
 # 4. Unit Test, Security Audit & Static Analysis Macros
 # ------------------------------------------------------------------------------
-# Run unit tests honoring Pure Go vs static CGO/SQLite/libxcrypt and build tags (opt-in via --with testsuite)
+# Run unit tests honoring Pure Go vs static CGO/SQLite/bundled C libs and build tags (opt-in via --with testsuite)
 %define go_run_tests \
 _go_tags="%{?go_build_tags}" \
 %if ! %{use_cgo} \
@@ -213,7 +224,7 @@ _go_tags="${_go_tags:+${_go_tags} }libsqlite3" \
 %if %{use_bundled_c_lib} \
 _go_clib_inst="$(pwd)/.clib_install_linux" \
 _go_cgo_cflags="${_go_cgo_cflags} -I${_go_clib_inst}/include" \
-_go_cgo_ldflags="${_go_cgo_ldflags} -L${_go_clib_inst}/lib -lcrypt" \
+_go_cgo_ldflags="${_go_cgo_ldflags} -L${_go_clib_inst}/lib %{clib_link_libs}" \
 %endif \
 CGO_ENABLED=1 \
 CGO_CFLAGS="${_go_cgo_cflags}" \

@@ -100,12 +100,23 @@ check_rpmspec() {
   local spec="$1"
   local spec_top="$2"
   local spec_src="$3"
-  local mode
-  for mode in "default" "--with windows --with archive --with deb --with testsuite --with lint --with audit"; do
+  local mode expanded sec_script
+  for mode in "default" "--without update_deps" "--without rpm" "--with windows --with archive --with deb --with testsuite --with lint --with audit"; do
     read -r -a mode_args <<< "${mode#default}"
-    if ! err_out="$(rpmspec -P --define "_topdir ${spec_top}" --define "_sourcedir ${spec_src}" "${mode_args[@]}" "$spec" 2>&1 >/dev/null)"; then
-      fail "rpmspec -P failed for $spec (${mode}): ${err_out}"
+    if ! expanded="$(rpmspec -P --define "_topdir ${spec_top}" --define "_sourcedir ${spec_src}" "${mode_args[@]}" "$spec" 2>&1)"; then
+      fail "rpmspec -P failed for $spec (${mode}): ${expanded}"
+      continue
     fi
+    for sec in prep build install check clean; do
+      sec_script="$(awk -v s="%${sec}" '
+        $0 == s { in_sec=1; next }
+        /^%(prep|build|install|check|clean|files|pre|post|preun|postun|changelog|description|package)([[:space:]]|$)/ { in_sec=0 }
+        in_sec { print }
+      ' <<< "$expanded")"
+      if [ -n "$sec_script" ] && ! bash -n <<< "$sec_script" 2>&1; then
+        fail "Shell syntax error in expanded %${sec} of $spec (${mode})"
+      fi
+    done
   done
 }
 

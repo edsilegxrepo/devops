@@ -81,7 +81,7 @@
 %global distpath        %{?_distpath}%{!?_distpath:%{_topdir}/STAGING}
 
 # Standard documentation files packaged across distributions (override per spec if needed)
-%global doclist         README.md
+%{!?doclist:%global doclist         README.md}
 
 # Embedded SQLite Amalgamation version metadata (used when use_sqlite is 1)
 %{!?sqlitever:%global sqlitever       3540100}
@@ -204,12 +204,15 @@ _comp_cmd="%{?1}%{!?1:%{?completion_cmd}}" \
 if [ -n "${_comp_cmd}" ]; then \
   mkdir -p staging_completions \
   read -r -a _comp_args <<< "${_comp_cmd}" \
-  ./bin/%{bin_name} "${_comp_args[@]}" bash > staging_completions/%{bin_name}.bash 2>/dev/null || : \
-  [ -s staging_completions/%{bin_name}.bash ] || rm -f -- staging_completions/%{bin_name}.bash \
-  ./bin/%{bin_name} "${_comp_args[@]}" zsh  > staging_completions/_%{bin_name} 2>/dev/null || : \
-  [ -s staging_completions/_%{bin_name} ] || rm -f -- staging_completions/_%{bin_name} \
-  ./bin/%{bin_name} "${_comp_args[@]}" fish > staging_completions/%{bin_name}.fish 2>/dev/null || : \
-  [ -s staging_completions/%{bin_name}.fish ] || rm -f -- staging_completions/%{bin_name}.fish \
+  if ! ./bin/%{bin_name} "${_comp_args[@]}" bash > staging_completions/%{bin_name}.bash 2>/dev/null || [ ! -s staging_completions/%{bin_name}.bash ]; then \
+    rm -f -- staging_completions/%{bin_name}.bash \
+  fi \
+  if ! ./bin/%{bin_name} "${_comp_args[@]}" zsh > staging_completions/_%{bin_name} 2>/dev/null || [ ! -s staging_completions/_%{bin_name} ]; then \
+    rm -f -- staging_completions/_%{bin_name} \
+  fi \
+  if ! ./bin/%{bin_name} "${_comp_args[@]}" fish > staging_completions/%{bin_name}.fish 2>/dev/null || [ ! -s staging_completions/%{bin_name}.fish ]; then \
+    rm -f -- staging_completions/%{bin_name}.fish \
+  fi \
 fi
 
 # Package Linux static binary, docs, systemd unit, and changelog into STAGING .tar.xz
@@ -220,7 +223,9 @@ rm -rf -- staging_archive \
 mkdir -p staging_archive/doc \
 cp -af bin/%{bin_name} staging_archive/ \
 chmod 0755 staging_archive/%{bin_name} \
-if [ "%{is_daemon}" = "1" ]; then %{?SOURCE20:cp -af %{SOURCE20} staging_archive/doc/ 2>/dev/null || :}; fi \
+%if %{is_daemon} \
+%{?SOURCE20:cp -af %{SOURCE20} staging_archive/doc/ 2>/dev/null || :} \
+%endif \
 cp -af %{license_file} %{doclist} changelog.txt staging_archive/doc/ 2>/dev/null || : \
 (cd staging_archive && tar -Jcvf %{dist_archive} *) \
 rm -rf -- staging_archive

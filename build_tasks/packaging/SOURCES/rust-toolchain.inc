@@ -29,11 +29,16 @@
 # ------------------------------------------------------------------------------
 # 1. Toolchain, Target Stdlib & Optional QA Tool Detection
 # ------------------------------------------------------------------------------
+# Canonical Rust target triples (overridable per spec before or via macro defaults)
+%{!?rust_target_linux:%global rust_target_linux %{_arch}-unknown-linux-musl}
+%{!?rust_target_win:%global rust_target_win     x86_64-pc-windows-gnu}
+%{!?cargo_features:%global cargo_features       %{nil}}
+
 # Validate core Rust toolchain binaries and installed target standard libraries
 %global has_cargo         %(command -v cargo >/dev/null 2>&1 && echo 1 || echo 0)
 %global has_rustc         %(command -v rustc >/dev/null 2>&1 && echo 1 || echo 0)
-%global has_musl_std      %(target_dir=$(rustc --target %{_arch}-unknown-linux-musl --print target-libdir 2>/dev/null); [ -d "${target_dir}" ] && echo 1 || echo 0)
-%global has_win_std       %(target_dir=$(rustc --target x86_64-pc-windows-gnu --print target-libdir 2>/dev/null); [ -d "${target_dir}" ] && echo 1 || echo 0)
+%global has_musl_std      %(target_dir=$(rustc --target %{rust_target_linux} --print target-libdir 2>/dev/null); [ -d "${target_dir}" ] && echo 1 || echo 0)
+%global has_win_std       %(target_dir=$(rustc --target %{rust_target_win} --print target-libdir 2>/dev/null); [ -d "${target_dir}" ] && echo 1 || echo 0)
 
 # Optional installed Rust lint, audit, and test tooling
 %global has_cargo_clippy  %(command -v cargo-clippy >/dev/null 2>&1 && echo 1 || echo 0)
@@ -49,11 +54,6 @@
 # ------------------------------------------------------------------------------
 # Standard Rust compilation flags for symbol stripping and reproducible paths
 %{!?rustflags_core:%global rustflags_core -C strip=symbols --remap-path-prefix ${PWD}=.}
-
-# Canonical Rust target triples (overridable per spec)
-%{!?rust_target_linux:%global rust_target_linux %{_arch}-unknown-linux-musl}
-%{!?rust_target_win:%global rust_target_win     x86_64-pc-windows-gnu}
-%{!?cargo_features:%global cargo_features       %{nil}}
 
 # Standard Cargo dependency update command (fault-tolerant fallback for offline/locked builds)
 %{!?cargo_update:%global cargo_update cargo update --recursive >/dev/null 2>&1 || :}

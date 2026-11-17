@@ -40,9 +40,9 @@
 #        zig-musl.sh build-autotools <target_triple> <src_dir> <install_dir> [configure_args...]
 #        -> Cross-compiles an autotools C project statically via Zig and installs into <install_dir>.
 #
-#   4. Linux / Windows Binary Verification (legacy wrapper; delegates to pkg-verify.sh):
-#        zig-musl.sh check <binary_path> [expected_version_string] [version_flag]
-#        zig-musl.sh check-win <pe_binary_path>
+#   4. Linux / Windows Binary Verification (delegated to pkg-verify.sh):
+#        pkg-verify.sh check <binary_path> [expected_version_string] [version_flag]
+#        pkg-verify.sh check-win <pe_binary_path>
 #
 #   5. Multi-call Compiler / Linker / Archiver:
 #        Invoked directly as a linker, compiler, or archiver (via symlink or argument):
@@ -192,25 +192,32 @@ if [ "$1" = "build-autotools" ]; then
   mkdir -p "${CLIB_BUILD}" "${INSTALL_DIR}"
   pushd "${CLIB_BUILD}" >/dev/null
   # Default -fPIC so generated static archives link cleanly under Linux CGO -static-pie
-  CC="${ZIG_BIN} cc -target ${CC_TARGET}" \
-  CXX="${ZIG_BIN} c++ -target ${CC_TARGET}" \
-  AR="${ZIG_BIN} ar" \
-  RANLIB="${ZIG_BIN} ranlib" \
-  CFLAGS="${CFLAGS:--O2 -fPIC}" \
-  "${CLIB_SRC}/configure" --host="${CC_TARGET}" \
-    --prefix="${INSTALL_DIR}" \
-    --libdir="${INSTALL_DIR}/lib" \
-    --enable-static \
-    --disable-shared \
-    "$@" >/dev/null 2>&1
-  make -j"$(nproc)" >/dev/null 2>&1
-  make install >/dev/null 2>&1
+  _build_log="${CLIB_BUILD}/build.log"
+  if ! (
+    CC="${ZIG_BIN} cc -target ${CC_TARGET}" \
+    CXX="${ZIG_BIN} c++ -target ${CC_TARGET}" \
+    AR="${ZIG_BIN} ar" \
+    RANLIB="${ZIG_BIN} ranlib" \
+    CFLAGS="${CFLAGS:--O2 -fPIC}" \
+    "${CLIB_SRC}/configure" --host="${CC_TARGET}" \
+      --prefix="${INSTALL_DIR}" \
+      --libdir="${INSTALL_DIR}/lib" \
+      --enable-static \
+      --disable-shared \
+      "$@" && \
+    make -j"$(nproc)" && \
+    make install
+  ) >"${_build_log}" 2>&1; then
+    echo "ERROR: autotools build failed for '${CLIB_SRC}' (target: ${CC_TARGET}); last 80 log lines:" >&2
+    tail -n 80 "${_build_log}" >&2 || true
+    exit 1
+  fi
   popd >/dev/null
   exit 0
 fi
 
 # ------------------------------------------------------------------------------
-# 3. Binary Verification Subcommands (delegates to pkg-verify.sh when present)
+# 3. Binary Verification Forwarding (canonical implementation in pkg-verify.sh)
 # ------------------------------------------------------------------------------
 if [ "$1" = "check" ] || [ "$1" = "check-win" ]; then
   SCRIPT_DIR="$(cd "$(dirname "$0")" &>/dev/null && pwd)"
@@ -218,61 +225,10 @@ if [ "$1" = "check" ] || [ "$1" = "check-win" ]; then
     exec "${SCRIPT_DIR}/pkg-verify.sh" "$@"
   elif [ -f "${SCRIPT_DIR}/pkg-verify.sh" ]; then
     exec bash "${SCRIPT_DIR}/pkg-verify.sh" "$@"
-  fi
-fi
-
-if [ "$1" = "check" ]; then
-  shift
-  BIN="$1"
-  EXP_VER="$2"
-  VER_FLAG="${3:---version}"
-  if [ -z "$BIN" ] || [ ! -f "$BIN" ]; then
-    echo "ERROR: Binary '$BIN' not found!" >&2
+  else
+    echo "ERROR: '$1' requires pkg-verify.sh in '${SCRIPT_DIR}'!" >&2
     exit 1
   fi
-  echo "==> Verifying Linux binary structure ($BIN)..."
-  FILE_OUT="$(file "$BIN")"
-  grep -E -q "ELF (64|32)-bit.*static(ally|-pie)? linked" <<< "$FILE_OUT" || {
-    echo "ERROR: $BIN is not a statically linked ELF binary!" >&2
-    echo "$FILE_OUT" >&2
-    exit 1
-  }
-  INTERP_OUT="$(readelf -l "$BIN" 2> /dev/null || true)"
-  if grep -q "INTERP" <<< "$INTERP_OUT"; then
-    echo "ERROR: $BIN contains a dynamic linker (PT_INTERP) segment!" >&2
-    grep "INTERP" <<< "$INTERP_OUT" >&2
-    exit 1
-  fi
-  if [ -n "$EXP_VER" ] && [ "$VER_FLAG" != "none" ]; then
-    echo "==> Verifying binary execution ($BIN $VER_FLAG)..."
-    read -r -a FLAG_ARGS <<< "$VER_FLAG"
-    OUT="$("$BIN" "${FLAG_ARGS[@]}" 2>&1 || true)"
-    [[ "$OUT" == *"$EXP_VER"* ]] || {
-      echo "ERROR: $BIN $VER_FLAG output does not contain expected version '$EXP_VER'!" >&2
-      echo "$OUT" >&2
-      exit 1
-    }
-  fi
-  echo "==> Binary verification passed for $BIN"
-  exit 0
-fi
-
-if [ "$1" = "check-win" ]; then
-  shift
-  BIN="$1"
-  if [ -z "$BIN" ] || [ ! -f "$BIN" ]; then
-    echo "ERROR: Windows binary '$BIN' not found!" >&2
-    exit 1
-  fi
-  echo "==> Verifying Windows binary structure ($BIN)..."
-  FILE_OUT="$(file "$BIN")"
-  grep -E -q "PE32\+ executable.*for MS Windows" <<< "$FILE_OUT" || {
-    echo "ERROR: $BIN is not a valid 64-bit Windows PE executable!" >&2
-    echo "$FILE_OUT" >&2
-    exit 1
-  }
-  echo "==> Windows binary verification passed for $BIN"
-  exit 0
 fi
 
 # ------------------------------------------------------------------------------
@@ -341,7 +297,7 @@ while [ $# -gt 0 ]; do
         DETECTED_ARCH="${TARGET_VAL%%-*}"
         [ -n "$DETECTED_ARCH" ] && ARCH="$DETECTED_ARCH"
         TARGET_OS="windows-gnu"
-      elif [[ "$TARGET_VAL" == *musl* ]] || [[ "$TARGET_VAL" == *-unknown-* ]]; then
+      elif [[ "$TARGET_VAL" == *musl* ]] || [[ "$TARGET_VAL" == *-unknown-* ]] || [[ "$TARGET_VAL" == *linux* ]]; then
         DETECTED_ARCH="${TARGET_VAL%%-*}"
         [ -n "$DETECTED_ARCH" ] && ARCH="$DETECTED_ARCH"
         TARGET_OS="linux-musl"
@@ -356,7 +312,7 @@ while [ $# -gt 0 ]; do
         [ -n "$DETECTED_ARCH" ] && ARCH="$DETECTED_ARCH"
         TARGET_OS="windows-gnu"
         shift 2
-      elif [ -n "$2" ] && [[ "$2" == *musl* || "$2" == *-unknown-* ]]; then
+      elif [ -n "$2" ] && [[ "$2" == *musl* || "$2" == *-unknown-* || "$2" == *linux* ]]; then
         DETECTED_ARCH="${2%%-*}"
         [ -n "$DETECTED_ARCH" ] && ARCH="$DETECTED_ARCH"
         TARGET_OS="linux-musl"

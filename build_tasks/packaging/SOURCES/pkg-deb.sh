@@ -159,27 +159,27 @@ while [ $# -gt 0 ]; do
       shift 2
       ;;
     --depends)
-      DEPENDS="${DEPENDS:+${DEPENDS}, }$2"
+      [ -n "$2" ] && DEPENDS="${DEPENDS:+${DEPENDS}, }$2"
       shift 2
       ;;
     --recommends)
-      RECOMMENDS="${RECOMMENDS:+${RECOMMENDS}, }$2"
+      [ -n "$2" ] && RECOMMENDS="${RECOMMENDS:+${RECOMMENDS}, }$2"
       shift 2
       ;;
     --suggests)
-      SUGGESTS="${SUGGESTS:+${SUGGESTS}, }$2"
+      [ -n "$2" ] && SUGGESTS="${SUGGESTS:+${SUGGESTS}, }$2"
       shift 2
       ;;
     --provides)
-      PROVIDES="${PROVIDES:+${PROVIDES}, }$2"
+      [ -n "$2" ] && PROVIDES="${PROVIDES:+${PROVIDES}, }$2"
       shift 2
       ;;
     --conflicts)
-      CONFLICTS="${CONFLICTS:+${CONFLICTS}, }$2"
+      [ -n "$2" ] && CONFLICTS="${CONFLICTS:+${CONFLICTS}, }$2"
       shift 2
       ;;
     --replaces)
-      REPLACES="${REPLACES:+${REPLACES}, }$2"
+      [ -n "$2" ] && REPLACES="${REPLACES:+${REPLACES}, }$2"
       shift 2
       ;;
     --changelog)
@@ -211,7 +211,7 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     --lintian-suppress)
-      LINTIAN_SUPPRESS="${LINTIAN_SUPPRESS:+${LINTIAN_SUPPRESS},}$2"
+      [ -n "$2" ] && LINTIAN_SUPPRESS="${LINTIAN_SUPPRESS:+${LINTIAN_SUPPRESS},}$2"
       shift 2
       ;;
     --out)

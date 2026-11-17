@@ -30,14 +30,16 @@
 #        rpmbuild --with windows --with archive --with deb -ba SPECS/<name>-xg.spec
 #   Optional QA / Dependency Flags:
 #        --with testsuite (Go unit tests via %%go_run_tests), --with lint,
-#        --with audit, --with update_deps (run go get -u && go mod tidy)
+#        --with audit, --without update_deps (skip go get -u && go mod tidy)
 #
 # TECHNICAL ARCHITECTURE:
 #   - Shared lifecycle macros (%%pkg_*) come from pkg-common.inc; Go build/patch
 #     macros (%%go_build_target, %%go_run_tests, %%go_vendor_local_mod,
 #     %%go_update_tree, %%go_lint_checks, %%go_security_audit) come from go-toolchain.inc.
+#   - %%build executes dependency updates by default (%%{go_update_tree}, or
+#     %%{go_update_tree_tests} with --with testsuite); pass --without update_deps to skip.
 #   - %%check executes binary wellness validation via pkg-verify.sh by default;
-#     linting, security audit, unit tests, and dependency updates are opt-in via --with flags.
+#     linting, security audit, and unit tests are opt-in via --with flags.
 # ==============================================================================
 
 # Common Go toolchain validation, completion paths, and package definitions
@@ -68,13 +70,11 @@
 %bcond_with testsuite
 %bcond_with lint
 %bcond_with audit
-%bcond_with update_deps
+%bcond_without update_deps
 
 # Package Descriptions (Shared between RPM and Debian control)
 %global pkg_summary     <summary>
-%global pkg_desc        <description>\
-<description_line_2>\
-<description_line_3>
+%global pkg_desc        <description>
 
 # Package Metadata
 Name:           <name>
@@ -108,7 +108,7 @@ Source0:        %{name}-%{version}-%{gh_tag}-src.zip
 Source1:        sqlite-amalgamation-%{sqlitever}.zip
 %endif
 %if %{use_bundled_c_lib}
-Source2:        libxcrypt-%{xcryptver}.tar.xz
+Source2:        %{clib_archive}
 %endif
 
 %if %{use_cgo}
@@ -128,7 +128,7 @@ Source22:       %{name}.tmpfiles.conf
 Source23:       %{name}.env
 %endif
 
-BuildRequires:  golang >= 1.22
+BuildRequires:  golang >= %{go_min_ver}
 %pkg_common_buildrequires
 
 %description
@@ -144,7 +144,7 @@ unzip -q %{SOURCE1} -d ../%{sqlitedir}
 %endif
 
 %if %{use_bundled_c_lib}
-[ -n "%{xcryptver}" ] && rm -rf -- "../libxcrypt-%{xcryptver}"
+[ -n "%{clib_dir}" ] && rm -rf -- "../%{clib_dir}"
 tar -xf %{SOURCE2} -C ..
 %endif
 
@@ -154,9 +154,15 @@ export GOPROXY="%{go_proxy}"
 
 %if %{with update_deps}
 %if %{with testsuite}
-%{go_update_tree_tests}
+(export GOOS=linux; %{go_update_tree_tests})
+%if %{enable_windows} && %{with windows}
+(export GOOS=windows; %{go_update_tree_tests})
+%endif
 %else
-%{go_update_tree}
+(export GOOS=linux; %{go_update_tree})
+%if %{enable_windows} && %{with windows}
+(export GOOS=windows; %{go_update_tree})
+%endif
 %endif
 %endif
 
