@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Script: /opt/scripts/kernel-default.sh
-# Version: 1.5.0  2026/11/06
+# Version: 2.0.0  2026/11/18
 # Compatibility: Enterprise Linux 8, 9, 10 (RHEL, AlmaLinux, Rocky Linux, CentOS)
 # Standard: DRY Architecture Framework
 # Description: Production-hardened GRUB boot kernel manager with multi-kernel
@@ -65,11 +65,13 @@ Compatibility:
 EOF
 }
 
-# Allow non-root users to view help
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  show_usage
-  exit 0
-fi
+# Allow non-root users to view help regardless of flag position
+for arg in "$@"; do
+  if [[ "${arg}" == "-h" || "${arg}" == "--help" ]]; then
+    show_usage
+    exit 0
+  fi
+done
 
 # ------------------------------------------------------------------------------
 # 3. Privilege & Dependency Guards
@@ -192,9 +194,7 @@ remove_old_kernels() {
 
   # Safety Guard: Check if a new kernel is installed but not yet booted
   local default_kernel=""
-  local default_kernel_path
-  default_kernel_path="$(grubby --default-kernel 2> /dev/null || true)"
-  default_kernel="${default_kernel_path#/boot/vmlinuz-}"
+  default_kernel="$(get_default_boot_kernel)"
 
   if [[ -n "${default_kernel}" && "${default_kernel}" != "${current_kernel}" && ${force} -eq 0 ]]; then
     echo "=============================================================================="
@@ -225,7 +225,7 @@ remove_old_kernels() {
   local safe_pkgs=()
   for pkg in "${old_pkgs[@]}"; do
     [[ -z "${pkg}" ]] && continue
-    if [[ "${pkg}" == *"${current_kernel}"* ]]; then
+    if [[ "${pkg}" == *[-:]"${current_kernel}" ]]; then
       echo "[!] Preserving active running kernel: ${pkg}"
     else
       safe_pkgs+=("${pkg}")
@@ -386,7 +386,7 @@ esac
 # 8. Index Validation, Rescue Guard & Bootloader Assignment
 # ------------------------------------------------------------------------------
 # Validate index exists in GRUB
-if ! grubby --info="${KERNEL_INDEX}" > /dev/null 2>&1 && ! grubby --info=ALL 2> /dev/null | grep -q "^index=${KERNEL_INDEX}$"; then
+if ! grubby --info="${KERNEL_INDEX}" > /dev/null 2>&1 && ! grep -q "^index=${KERNEL_INDEX}$" <(grubby --info=ALL 2> /dev/null); then
   echo "[-] Error: GRUB index '${KERNEL_INDEX}' does not exist." >&2
   echo "" >&2
   report_all_kernel_entries >&2
@@ -395,6 +395,13 @@ fi
 
 # Rescue Kernel Safeguard
 target_info="$(grubby --info="${KERNEL_INDEX}" 2>/dev/null || true)"
+if [[ -z "${target_info}" ]]; then
+  target_info="$(grubby --info=ALL 2>/dev/null | awk -v idx="${KERNEL_INDEX}" '
+    $0 == "index=" idx { in_blk=1 }
+    in_blk { print }
+    in_blk && /^$/ { exit }
+  ' || true)"
+fi
 if [[ "${target_info}" == *"rescue"* && ${ALLOW_RESCUE} -eq 0 ]]; then
   echo "[-] SECURITY GUARD: Entry index '${KERNEL_INDEX}' appears to be a RESCUE kernel!" >&2
   echo "    Setting a rescue kernel as default may boot into emergency single-user recovery mode." >&2

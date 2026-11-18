@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Library:     /opt/scripts/lib/debian_sys.sh
-# Version:     2.0.0  2026/11/06
+# Version:     2.0.0  2026/11/18
 # Standard:    DRY Architecture Framework (Debian/Ubuntu Domain Layer)
 # Author:      DevOps Systems Administration <criticalsys.mis@gmail.com>
 # Compatibility: Debian 12+ (Bookworm), Ubuntu 22.04+ (Jammy/Noble), Linux Mint
@@ -29,19 +29,8 @@ fi
 # Default log file target for Debian operations
 LOG_FILE="${LOG_FILE:-/var/log/debian_sys.log}"
 
-# ------------------------------------------------------------------------------
-# Function: init_debian_logging
-# Purpose:  Initializes system logging with Debian-specific default path.
-# ------------------------------------------------------------------------------
 init_debian_logging() {
     init_system_logging "${1:-/var/log/debian_sys.log}"
-}
-
-# ------------------------------------------------------------------------------
-# 2. Operating System Validation
-# ------------------------------------------------------------------------------
-validate_debian_os() {
-    validate_os "debian"
 }
 
 resolve_version_sort_cmd() {
@@ -53,8 +42,32 @@ resolve_version_sort_cmd() {
 }
 
 # ------------------------------------------------------------------------------
-# 3. APT / dpkg Concurrency & Lock Management
+# 2. APT / dpkg Concurrency & Lock Management
 # ------------------------------------------------------------------------------
+_filter_self_pids() {
+    local raw_pids="$1"
+    local -a pids_arr=()
+    local -a out_pids=()
+    read -r -a pids_arr <<< "${raw_pids}"
+    if [[ ${#pids_arr[@]} -gt 0 ]]; then
+        local pid
+        for pid in "${pids_arr[@]}"; do
+            [[ -z "${pid}" || "${pid}" == "$$" || "${pid}" == "${PPID:-0}" ]] && continue
+            out_pids+=("${pid}")
+        done
+    fi
+    [[ ${#out_pids[@]} -gt 0 ]] && printf '%s\n' "${out_pids[@]}"
+    return 0
+}
+
+_filter_active_pkg_procs() {
+    local procs
+    procs="$(get_active_pkg_managers)"
+    if [[ -n "${procs}" ]]; then
+        awk -v pid="$$" -v ppid="${PPID:-0}" '$1 != pid && $1 != ppid' <<< "${procs}" || true
+    fi
+}
+
 inspect_and_wait_for_package_locks() {
     local max_wait="${1:-120}"
     local is_detect="${2:-false}"
@@ -73,44 +86,45 @@ inspect_and_wait_for_package_locks() {
     local reason=""
     local -a all_locker_pids=()
 
+    local lf
     for lf in "${lock_files[@]}"; do
         if [[ -f "${lf}" ]]; then
             local pids
             pids="$(get_lock_pids "${lf}")"
             if [[ -n "${pids}" ]]; then
-                for pid in ${pids}; do
-                    [[ "${pid}" == "$$" || "${pid}" == "${PPID:-0}" ]] && continue
-                    all_locker_pids+=("${pid}")
-                    if [[ -d "/proc/${pid}" ]]; then
-                        local cmd
-                        cmd="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || ps -p "${pid}" -o comm= 2>/dev/null || true)"
-                        if echo "${cmd}" | grep -qiE "unattended-upgr|apt\.systemd\.daily|packagekit|apt-daily"; then
-                            bg_updater=true
-                            reason="background auto-updater [PID ${pid}: ${cmd}]"
-                        else
-                            contention=true
-                            reason="active process [PID ${pid}: ${cmd}]"
+                local -a filtered_pids=()
+                mapfile -t filtered_pids < <(_filter_self_pids "${pids}")
+                if [[ ${#filtered_pids[@]} -gt 0 ]]; then
+                    local pid
+                    for pid in "${filtered_pids[@]}"; do
+                        all_locker_pids+=("${pid}")
+                        if [[ -d "/proc/${pid}" ]]; then
+                            local cmd
+                            cmd="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || ps -p "${pid}" -o comm= 2>/dev/null || true)"
+                            if grep -qiE "unattended-upgr|apt\.systemd\.daily|packagekit|apt-daily" <<< "${cmd}"; then
+                                bg_updater=true
+                                reason="background auto-updater [PID ${pid}: ${cmd}]"
+                            else
+                                contention=true
+                                reason="active process [PID ${pid}: ${cmd}]"
+                            fi
                         fi
-                    fi
-                done
+                    done
+                fi
             fi
         fi
     done
 
     # Concurrency verification via process table
-    local active_procs
-    active_procs="$(get_active_pkg_managers)"
-    if [[ -n "${active_procs}" ]]; then
-        local filtered_procs
-        filtered_procs="$(echo "${active_procs}" | awk -v pid="$$" -v ppid="${PPID:-0}" '$1 != pid && $1 != ppid')"
-        if [[ -n "${filtered_procs}" ]]; then
-            if echo "${filtered_procs}" | grep -qiE "unattended-upgr|apt\.systemd\.daily|packagekitd"; then
-                bg_updater=true
-                [[ -z "${reason}" ]] && reason="background auto-updater service"
-            else
-                contention=true
-                [[ -z "${reason}" ]] && reason="active package manager process"
-            fi
+    local filtered_procs
+    filtered_procs="$(_filter_active_pkg_procs)"
+    if [[ -n "${filtered_procs}" ]]; then
+        if grep -qiE "unattended-upgr|apt\.systemd\.daily|packagekitd" <<< "${filtered_procs}"; then
+            bg_updater=true
+            [[ -z "${reason}" ]] && reason="background auto-updater service"
+        else
+            contention=true
+            [[ -z "${reason}" ]] && reason="active package manager process"
         fi
     fi
 
@@ -122,7 +136,7 @@ inspect_and_wait_for_package_locks() {
 
     if [[ ${#unique_pids[@]} -gt 0 ]]; then
         log_warn "APT/dpkg lock actively held by process PID(s): ${unique_pids[*]}"
-        ps -fp "${unique_pids[@]}" 2>/dev/null | tee -a "${LOG_FILE}" || true
+        _run_apt_logged ps -fp "${unique_pids[@]}" 2>/dev/null || true
     fi
 
     if [[ "${bg_updater}" == "true" ]]; then
@@ -147,14 +161,16 @@ inspect_and_wait_for_package_locks() {
 
             local still_locked=false
             for lf in "${lock_files[@]}"; do
-                if [[ -n "$(get_lock_pids "${lf}")" ]]; then
+                local cur_lock_pids
+                cur_lock_pids="$(_filter_self_pids "$(get_lock_pids "${lf}")")"
+                if [[ -n "${cur_lock_pids}" ]]; then
                     still_locked=true
                     break
                 fi
             done
 
             local cur_procs=""
-            cur_procs="$(get_active_pkg_managers | awk -v pid="$$" -v ppid="${PPID:-0}" '$1 != pid && $1 != ppid' || true)"
+            cur_procs="$(_filter_active_pkg_procs)"
 
             if [[ "${still_locked}" == "false" && -z "${cur_procs}" ]]; then
                 log_info "Transaction lock released after ${waited}s. Proceeding."
@@ -168,7 +184,7 @@ inspect_and_wait_for_package_locks() {
 
         log_error "Lock acquisition timeout (${max_wait}s expired). APT/dpkg locks are still held."
         log_error "Cannot proceed safely without risking package database corruption."
-        exit 1
+        return 1
     else
         log_info "No active transaction locks detected. Package manager locks are clear."
     fi
@@ -176,14 +192,21 @@ inspect_and_wait_for_package_locks() {
 }
 
 # ------------------------------------------------------------------------------
-# 4. Background Auto-Upgrades Remediation
+# 3. Background Auto-Upgrades Remediation
 # ------------------------------------------------------------------------------
 disable_autoupgrades() {
     local only_disable="${1:-false}"
     log_info "Permanently disabling automatic background APT timers and services..."
     if command -v systemctl >/dev/null 2>&1; then
-        local auto_services="apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service unattended-upgrades.service"
-        for s in ${auto_services}; do
+        local -a auto_services=(
+            apt-daily.timer
+            apt-daily-upgrade.timer
+            apt-daily.service
+            apt-daily-upgrade.service
+            unattended-upgrades.service
+        )
+        local s
+        for s in "${auto_services[@]}"; do
             systemctl stop "$s" >/dev/null 2>&1 || true
             systemctl disable "$s" >/dev/null 2>&1 || true
             systemctl mask "$s" >/dev/null 2>&1 || true
@@ -191,19 +214,14 @@ disable_autoupgrades() {
     fi
     if [[ -d /etc/apt/apt.conf.d ]]; then
         log_info "Configuring /etc/apt/apt.conf.d to disable periodic APT actions..."
-        cat << 'EOF' > /etc/apt/apt.conf.d/20auto-upgrades
-APT::Periodic::Update-Package-Lists "0";
+        local periodic_cfg
+        periodic_cfg='APT::Periodic::Update-Package-Lists "0";
 APT::Periodic::Download-Upgradeable-Packages "0";
 APT::Periodic::AutocleanInterval "0";
-APT::Periodic::Unattended-Upgrade "0";
-EOF
+APT::Periodic::Unattended-Upgrade "0";'
+        printf '%s\n' "${periodic_cfg}" > /etc/apt/apt.conf.d/20auto-upgrades
         if [[ -f /etc/apt/apt.conf.d/10periodic ]]; then
-            cat << 'EOF' > /etc/apt/apt.conf.d/10periodic
-APT::Periodic::Update-Package-Lists "0";
-APT::Periodic::Download-Upgradeable-Packages "0";
-APT::Periodic::AutocleanInterval "0";
-APT::Periodic::Unattended-Upgrade "0";
-EOF
+            printf '%s\n' "${periodic_cfg}" > /etc/apt/apt.conf.d/10periodic
         fi
     fi
     log_info "Automatic background upgrades have been permanently disabled and masked."
@@ -214,8 +232,23 @@ EOF
 }
 
 # ------------------------------------------------------------------------------
-# 5. Kernel Boot Symlinks Synchronization
+# 4. Kernel Boot Symlinks Synchronization
 # ------------------------------------------------------------------------------
+_sync_boot_symlink_pair() {
+    local suffix="$1"
+    local kver="$2"
+
+    update_link "/boot/vmlinuz${suffix}" "vmlinuz-${kver}"
+    update_link "/boot/initrd.img${suffix}" "initrd.img-${kver}"
+
+    if [[ -L "/vmlinuz${suffix}" || -f "/vmlinuz${suffix}" ]]; then
+        update_link "/vmlinuz${suffix}" "boot/vmlinuz-${kver}"
+    fi
+    if [[ -L "/initrd.img${suffix}" || -f "/initrd.img${suffix}" ]]; then
+        update_link "/initrd.img${suffix}" "boot/initrd.img-${kver}"
+    fi
+}
+
 update_boot_symlinks() {
     log_info "Updating system boot symlinks..."
 
@@ -226,7 +259,7 @@ update_boot_symlinks() {
     local f kver
     for f in /boot/vmlinuz-*; do
         [[ -e "${f}" ]] || continue
-        if [[ -f "${f}" && ! -L "${f}" && ! "${f}" == *.tmp && ! "${f}" == *.bak ]]; then
+        if [[ -f "${f}" && ! -L "${f}" && "${f}" != *.tmp && "${f}" != *.bak ]]; then
             kver="$(basename "${f}" | sed 's/^vmlinuz-//')"
             if [[ -f "/boot/initrd.img-${kver}" ]]; then
                 versions+=("${kver}")
@@ -262,30 +295,12 @@ update_boot_symlinks() {
 
     local newest_ver="${sorted_arr[0]}"
     log_info "Newest valid kernel version resolved: ${newest_ver}"
-
-    update_link "/boot/vmlinuz" "vmlinuz-${newest_ver}"
-    update_link "/boot/initrd.img" "initrd.img-${newest_ver}"
-
-    if [[ -L "/vmlinuz" || -f "/vmlinuz" ]]; then
-        update_link "/vmlinuz" "boot/vmlinuz-${newest_ver}"
-    fi
-    if [[ -L "/initrd.img" || -f "/initrd.img" ]]; then
-        update_link "/initrd.img" "boot/initrd.img-${newest_ver}"
-    fi
+    _sync_boot_symlink_pair "" "${newest_ver}"
 
     if [[ ${num_sorted} -gt 1 ]]; then
         local second_ver="${sorted_arr[1]}"
         log_info "Second newest valid kernel version resolved: ${second_ver}"
-
-        update_link "/boot/vmlinuz.old" "vmlinuz-${second_ver}"
-        update_link "/boot/initrd.img.old" "initrd.img-${second_ver}"
-
-        if [[ -L "/vmlinuz.old" || -f "/vmlinuz.old" ]]; then
-            update_link "/vmlinuz.old" "boot/vmlinuz-${second_ver}"
-        fi
-        if [[ -L "/initrd.img.old" || -f "/initrd.img.old" ]]; then
-            update_link "/initrd.img.old" "boot/initrd.img-${second_ver}"
-        fi
+        _sync_boot_symlink_pair ".old" "${second_ver}"
     else
         log_info "Only one valid kernel version resolved. Removing old symlinks to avoid dangling references."
         rm -f "/boot/vmlinuz.old" "/boot/initrd.img.old"
@@ -299,7 +314,7 @@ update_boot_symlinks() {
 }
 
 # ------------------------------------------------------------------------------
-# 6. Standard Hardened Non-Interactive APT Configuration
+# 5. Standard Hardened Non-Interactive APT Configuration
 # ------------------------------------------------------------------------------
 DEFAULT_APT_OPTS=(
     -qy
@@ -310,28 +325,44 @@ DEFAULT_APT_OPTS=(
     -o Acquire::http::Max-Age=0
 )
 
+_run_apt_logged() {
+    local rc=0
+    if _is_log_writable; then
+        "$@" 2>&1 | tee -a "${LOG_FILE}" || rc=$?
+    else
+        "$@" 2>&1 || rc=$?
+    fi
+    return "${rc}"
+}
+
 # ------------------------------------------------------------------------------
-# 7. Package Archive & Unneeded Dependencies Cleanup
+# 6. Package Archive & Unneeded Dependencies Cleanup
 # ------------------------------------------------------------------------------
 clean_apt_cache_and_orphans() {
     local dry_run="${1:-false}"
     log_info "Autoremoving unneeded dependencies and cleaning package archive..."
     if [[ "${dry_run}" == "true" ]]; then
         log_info "  -> [DRY-RUN] Would execute 'apt-get autoremove --purge -y' and 'apt-get clean'"
-    else
-        apt-get "${DEFAULT_APT_OPTS[@]}" autoremove -y --purge 2>&1 | tee -a "${LOG_FILE}" || true
-        apt-get "${DEFAULT_APT_OPTS[@]}" clean 2>&1 | tee -a "${LOG_FILE}" || true
+        return 0
     fi
+
+    local rc=0
+    _run_apt_logged apt-get "${DEFAULT_APT_OPTS[@]}" autoremove -y --purge || rc=$?
+    _run_apt_logged apt-get "${DEFAULT_APT_OPTS[@]}" clean || rc=$?
+    return "${rc}"
 }
 
 # ------------------------------------------------------------------------------
-# 8. Unconfigured & Residual Package Remediation
+# 7. Unconfigured & Residual Package Remediation
 # ------------------------------------------------------------------------------
 repair_unconfigured_packages() {
     local dry_run="${1:-false}"
+    local purge_unpacked="${2:-false}"
     log_info "Attempting to configure any unpacked or unconfigured packages..."
+
+    local rc=0
     if [[ "${dry_run}" == "false" ]]; then
-        dpkg --configure -a 2>&1 | tee -a "${LOG_FILE}" || true
+        _run_apt_logged dpkg --configure -a || rc=$?
     fi
 
     if command -v dpkg-query >/dev/null 2>&1; then
@@ -339,13 +370,18 @@ repair_unconfigured_packages() {
         iu_pkgs="$(dpkg-query -f '${db:Status-Status} ${Package}\n' -W 2>/dev/null | awk '/^unpacked/ {print $2}' || true)"
         if [[ -n "${iu_pkgs}" ]]; then
             if [[ "${dry_run}" == "true" ]]; then
-                log_info "  -> [DRY-RUN] Would purge unpacked package(s): ${iu_pkgs}"
+                log_info "  -> [DRY-RUN] Unpacked package(s) detected: ${iu_pkgs}"
+            elif [[ "${purge_unpacked}" == "true" ]]; then
+                log_warn "Purging broken unpacked package(s) (--purge-unpacked): ${iu_pkgs}"
+                _run_apt_logged xargs -r apt-get "${DEFAULT_APT_OPTS[@]}" remove --purge -y <<< "${iu_pkgs}" || rc=$?
             else
-                log_info "Purging broken unpacked package(s)..."
-                echo "${iu_pkgs}" | xargs -r apt-get "${DEFAULT_APT_OPTS[@]}" remove --purge -y 2>&1 | tee -a "${LOG_FILE}" || true
+                log_warn "Unpacked package(s) remain after 'dpkg --configure -a': ${iu_pkgs}"
+                log_warn "Skipping automatic purge to prevent config/dependency loss; pass 'true' as 2nd arg to purge."
+                rc=1
             fi
         fi
     fi
+    return "${rc}"
 }
 
 purge_residual_configs() {
@@ -354,24 +390,26 @@ purge_residual_configs() {
         return 0
     fi
 
+    local rc=0
     local rc_pkgs
     rc_pkgs="$(dpkg-query -f '${db:Status-Status} ${Package}\n' -W 2>/dev/null | awk '/^config-files/ {print $2}' || true)"
     if [[ -n "${rc_pkgs}" ]]; then
         local num_rc
-        num_rc="$(echo "${rc_pkgs}" | wc -l)"
+        num_rc="$(wc -l <<< "${rc_pkgs}")"
         if [[ "${dry_run}" == "true" ]]; then
             log_info "  -> [DRY-RUN] Would purge ${num_rc} residual package configuration files (status: rc)."
         else
             log_info "Purging ${num_rc} residual package configurations..."
-            echo "${rc_pkgs}" | xargs -r apt-get "${DEFAULT_APT_OPTS[@]}" purge -y 2>&1 | tee -a "${LOG_FILE}" || true
+            _run_apt_logged xargs -r apt-get "${DEFAULT_APT_OPTS[@]}" purge -y <<< "${rc_pkgs}" || rc=$?
         fi
     else
         log_info "No residual package configurations (status: rc) found."
     fi
+    return "${rc}"
 }
 
 # ------------------------------------------------------------------------------
-# 9. Kernel Discrepancy & Reboot Inspection
+# 8. Kernel Discrepancy & Reboot Inspection
 # ------------------------------------------------------------------------------
 check_system_reboot_status() {
     local target_kernel="${1:-}"
@@ -381,15 +419,15 @@ check_system_reboot_status() {
     local reboot_required=false
     local reason=""
 
-    if [[ -f /var/run/reboot-required ]]; then
+    if declare -F is_reboot_required >/dev/null 2>&1 && is_reboot_required; then
+        reboot_required=true
+        reason="Reboot required flag (/run/reboot-required or pending service restart) is present"
+    elif [[ -f /var/run/reboot-required ]]; then
         reboot_required=true
         reason="/var/run/reboot-required flag is present"
     elif [[ -n "${target_kernel}" && "${running_kver}" != "${target_kernel}" ]]; then
         reboot_required=true
         reason="Active kernel (${running_kver}) does not match target kernel (${target_kernel})"
-    elif declare -f is_reboot_required >/dev/null 2>&1 && is_reboot_required; then
-        reboot_required=true
-        reason="Package manager flagged pending system restart"
     fi
 
     if [[ "${reboot_required}" == "true" ]]; then

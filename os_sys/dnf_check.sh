@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Script: /opt/scripts/dnf_check.sh
-# Version: 1.6.1  2026/11/06
+# Version: 2.0.0  2026/11/18
 # Compatibility: Enterprise Linux 8, 9, 10 (RHEL, AlmaLinux, Rocky Linux, CentOS)
 # Standard: DRY Architecture Framework
 # Description: Production-hardened DNF wrapper with cross-version SQLite integrity
@@ -25,11 +25,73 @@ fi
 source "${LIB_SYSTEM}"
 validate_rhel_os
 
+# Verify package manager is DNF/YUM compatible
+case "$(basename "${PKG_MGR}")" in
+  dnf | dnf-* | yum) ;;
+  *)
+    echo "[-] Error: Unsupported package manager '${PKG_MGR}'. This wrapper requires dnf or yum." >&2
+    exit 1
+    ;;
+esac
+
 # Common paths and relaxed dependency options
 DNF_RELAX_OPTS=(--skip-broken --nobest)
 DNF_BASE="/var/lib/dnf"
 DNF_CACHE="/var/cache/dnf"
 BOOT_MIN_FREE_MB=100
+sha1_audit_logged=0
+
+# ------------------------------------------------------------------------------
+# Function: get_rpmdb_dir
+# Purpose:  Resolves the canonical RPM database directory path.
+# ------------------------------------------------------------------------------
+get_rpmdb_dir() {
+  local rpm_dir="/var/lib/rpm"
+  readlink -f "${rpm_dir}" 2>/dev/null || echo "${rpm_dir}"
+}
+
+# ------------------------------------------------------------------------------
+# Function: get_rpmdb_bin
+# Purpose:  Resolves the preferred RPM database maintenance binary (rpmdb or rpm).
+# ------------------------------------------------------------------------------
+get_rpmdb_bin() {
+  if command -v rpmdb >/dev/null 2>&1; then
+    echo "rpmdb"
+  else
+    echo "rpm"
+  fi
+}
+
+# ------------------------------------------------------------------------------
+# Function: get_rpm_pkg_count
+# Purpose:  Safely counts installed RPM packages without pipeline masking.
+# ------------------------------------------------------------------------------
+get_rpm_pkg_count() {
+  local count
+  if count="$(rpm -qa 2>/dev/null | wc -l)"; then
+    echo "${count}"
+    return 0
+  fi
+  return 1
+}
+
+# ------------------------------------------------------------------------------
+# Function: run_pkg_mgr
+# Purpose:  Executes the configured package manager, scoping SHA-1 override when
+#           --allow-sha1 is requested.
+# ------------------------------------------------------------------------------
+run_pkg_mgr() {
+  if [[ ${allow_sha1:-0} -eq 1 ]]; then
+    if [[ ${sha1_audit_logged:-0} -eq 0 ]]; then
+      echo "[!] Warning: Permitting SHA-1 OpenSSL signatures for this transaction (--allow-sha1)." >&2
+      log_audit "Running ${PKG_MGR} with OPENSSL_ENABLE_SHA1_SIGNATURES=1 (--allow-sha1)" "dnf_check"
+      sha1_audit_logged=1
+    fi
+    env OPENSSL_ENABLE_SHA1_SIGNATURES=1 "${PKG_MGR}" "$@"
+  else
+    "${PKG_MGR}" "$@"
+  fi
+}
 
 # ------------------------------------------------------------------------------
 # 2. CLI Usage & Help
@@ -57,6 +119,7 @@ Maintenance Options:
   --show-update-details Display detailed CVEs, severity, and errata for pending updates
   --needs-restarting    Inspect whether core libraries or active services require restart
   --relax               Permit non-best packages and skip broken dependencies (--skip-broken --nobest)
+  --allow-sha1          Permit SHA-1 OpenSSL signatures for legacy RPM GPG keys
   --auto-reboot         Automatically reboot the host if a new kernel is installed/upgraded
   --force               Bypass pre-flight checks (e.g. /boot disk capacity warnings)
   -h, --help            Display this help message and exit
@@ -84,9 +147,6 @@ if [[ $# -lt 1 ]]; then
   exit 2
 fi
 
-# Privilege guard: all functional actions require root / sudo
-require_root
-
 # ------------------------------------------------------------------------------
 # 3. Core Maintenance Functions
 # ------------------------------------------------------------------------------
@@ -107,7 +167,7 @@ verify_rpmdb() {
 
   local rpm_dir="/var/lib/rpm"
   local rpm_real_dir
-  rpm_real_dir="$(readlink -f "${rpm_dir}" 2>/dev/null || echo "${rpm_dir}")"
+  rpm_real_dir="$(get_rpmdb_dir)"
   echo "[*] RPM Database Path: ${rpm_dir} -> ${rpm_real_dir}"
 
   local issues=0
@@ -116,17 +176,15 @@ verify_rpmdb() {
   local lock_file="${rpm_real_dir}/.rpm.lock"
   if [[ -f "${lock_file}" ]]; then
     echo "[*] Inspecting transaction lock: [${lock_file}]..."
-    local locker_pids=""
-    if command -v fuser >/dev/null 2>&1; then
-      locker_pids="$(fuser "${lock_file}" 2>/dev/null || true)"
-    fi
+    local locker_pids
+    locker_pids="$(get_lock_pids "${lock_file}")"
     if [[ -n "${locker_pids}" ]]; then
       echo "[!] Lock is actively held by process PID(s): ${locker_pids}"
       local -a pids_arr=()
       read -r -a pids_arr <<< "${locker_pids}"
       ps -fp "${pids_arr[@]}" 2>/dev/null || true
     else
-      if command -v fuser >/dev/null 2>&1; then
+      if command -v fuser >/dev/null 2>&1 || command -v lsof >/dev/null 2>&1; then
         echo "[+] Transaction lock is idle (no active locks held)."
       else
         echo "[i] Lock file present (concurrency check shows no active package managers)."
@@ -151,12 +209,10 @@ verify_rpmdb() {
 
   # 3. Native RPM verification
   echo -n "[*] Running native RPM verification... "
-  local verify_cmd="rpmdb --verifydb"
-  if ! command -v rpmdb >/dev/null 2>&1; then
-    verify_cmd="rpm --verifydb"
-  fi
+  local rpmdb_bin
+  rpmdb_bin="$(get_rpmdb_bin)"
   local verify_out
-  if verify_out="$(${verify_cmd} 2>&1)"; then
+  if verify_out="$("${rpmdb_bin}" --verifydb 2>&1)"; then
     echo "OK"
   else
     echo "FAILED"
@@ -166,7 +222,7 @@ verify_rpmdb() {
 
   # 4. Inventory count check
   local pkg_count=0
-  if pkg_count="$(rpm -qa 2>/dev/null | wc -l)"; then
+  if pkg_count="$(get_rpm_pkg_count)"; then
     echo "[+] Package inventory query succeeded: ${pkg_count} packages installed."
     if [[ ${pkg_count} -eq 0 ]]; then
       echo "[-] Warning: Zero packages returned by 'rpm -qa'." >&2
@@ -215,16 +271,15 @@ rebuild_rpmdb() {
     return 1
   fi
 
-  local rpm_dir="/var/lib/rpm"
   local rpm_real_dir
-  rpm_real_dir="$(readlink -f "${rpm_dir}" 2>/dev/null || echo "${rpm_dir}")"
+  rpm_real_dir="$(get_rpmdb_dir)"
   local lock_file="${rpm_real_dir}/.rpm.lock"
 
   # 2. Check if .rpm.lock is actively held
   if [[ -f "${lock_file}" ]]; then
-    if command -v fuser >/dev/null 2>&1; then
+    if command -v fuser >/dev/null 2>&1 || command -v lsof >/dev/null 2>&1; then
       local locker_pids
-      locker_pids="$(fuser "${lock_file}" 2>/dev/null || true)"
+      locker_pids="$(get_lock_pids "${lock_file}")"
       if [[ -n "${locker_pids}" ]]; then
         echo "[-] Error: Lock file [${lock_file}] is actively held by process(es): ${locker_pids}" >&2
         return 1
@@ -239,21 +294,27 @@ rebuild_rpmdb() {
 
   # 3. Record pre-rebuild package inventory count
   local pre_count=0
-  pre_count="$(rpm -qa 2>/dev/null | wc -l || echo 0)"
+  pre_count="$(get_rpm_pkg_count)" || pre_count=0
   echo "[*] Pre-rebuild package count: ${pre_count}"
 
   # 4. Pre-rebuild safety snapshot
   local backup_dir="/var/backups/rpmdb"
   local backup_user="${SYS_USER:-csysadm}"
   local backup_group="${SYS_GROUP:-root}"
-  mkdir -p "${backup_dir}"
-  chmod 0750 "${backup_dir}"
+  if ! mkdir -p "${backup_dir}"; then
+    echo "[-] Error: Failed to create backup directory [${backup_dir}]. Aborting rebuild." >&2
+    return 1
+  fi
+  chmod 0750 "${backup_dir}" || true
   chown "${backup_user}:${backup_group}" "${backup_dir}" 2>/dev/null || true
 
   local ts
   ts="$(date +%Y%m%d_%H%M%S)"
-  local archive_name="rpmdb-pre-rebuild-${ts}.tar.gz"
-  local archive_path="${backup_dir}/${archive_name}"
+  local archive_path
+  if ! archive_path="$(mktemp "${backup_dir}/rpmdb-pre-rebuild-${ts}-XXXXXX.tar.gz")"; then
+    echo "[-] Error: Failed to create temporary backup archive in [${backup_dir}]. Aborting rebuild." >&2
+    return 1
+  fi
 
   echo "[*] Creating pre-rebuild safety backup archive: [${archive_path}]..."
   local rpm_parent
@@ -282,33 +343,28 @@ rebuild_rpmdb() {
 
   # 5. Execute native database rebuild
   echo "[*] Executing native RPM database rebuild..."
-  local rebuild_cmd="rpmdb --rebuilddb"
-  if ! command -v rpmdb >/dev/null 2>&1; then
-    rebuild_cmd="rpm --rebuilddb"
-  fi
+  local rpmdb_bin
+  rpmdb_bin="$(get_rpmdb_bin)"
 
   local rebuild_status=0
-  ${rebuild_cmd} || rebuild_status=$?
+  "${rpmdb_bin}" --rebuilddb || rebuild_status=$?
 
   if [[ ${rebuild_status} -ne 0 ]]; then
-    echo "[-] Fatal: RPM database rebuild command (${rebuild_cmd}) failed with exit code ${rebuild_status}!" >&2
+    echo "[-] Fatal: RPM database rebuild command (${rpmdb_bin} --rebuilddb) failed with exit code ${rebuild_status}!" >&2
     echo "    Safety snapshot is preserved at: ${archive_path}" >&2
     echo "    To restore manually: tar -xzf ${archive_path} -C ${rpm_parent}" >&2
     log_audit "RPM database rebuild failed with exit code ${rebuild_status}" "dnf_check"
-    return ${rebuild_status}
+    return "${rebuild_status}"
   fi
   echo "[+] Database rebuild command executed successfully."
 
   # 6. Post-rebuild validation
   echo "[*] Performing post-rebuild verification..."
-  local verify_cmd="rpmdb --verifydb"
-  if ! command -v rpmdb >/dev/null 2>&1; then
-    verify_cmd="rpm --verifydb"
-  fi
-
   local verify_fail=0
-  if ! ${verify_cmd} >/dev/null 2>&1; then
+  local verify_out
+  if ! verify_out="$("${rpmdb_bin}" --verifydb 2>&1)"; then
     echo "[-] Warning: Post-rebuild native verification check failed!" >&2
+    [[ -n "${verify_out}" ]] && echo "${verify_out}" >&2
     verify_fail=1
   else
     echo "[+] Native RPM verification passed."
@@ -322,16 +378,17 @@ rebuild_rpmdb() {
   fi
 
   local post_count=0
-  post_count="$(rpm -qa 2>/dev/null | wc -l || echo 0)"
+  post_count="$(get_rpm_pkg_count)" || post_count=0
   echo "[*] Post-rebuild package count: ${post_count}"
 
-  if [[ ${pre_count} -gt 0 && ${post_count} -lt ${pre_count} ]]; then
+  if [[ ${post_count} -eq 0 && ${pre_count} -gt 0 ]]; then
+    echo "[-] ERROR: Package database is empty after rebuild (pre: ${pre_count}, post: 0)!" >&2
+    log_audit "RPM database empty after rebuild (pre: ${pre_count}, backup: ${archive_path})" "dnf_check"
+    return 1
+  elif [[ ${pre_count} -gt 0 && ${post_count} -lt ${pre_count} ]]; then
     local diff=$((pre_count - post_count))
     echo "[!] WARNING: Package count decreased after rebuild by ${diff} package(s) (pre: ${pre_count}, post: ${post_count})!" >&2
     echo "    Inspect packages or restore safety snapshot at: ${archive_path}" >&2
-  elif [[ ${post_count} -eq 0 && ${pre_count} -gt 0 ]]; then
-    echo "[-] ERROR: Package database is empty after rebuild!" >&2
-    return 1
   else
     echo "[+] Package count verified intact (${post_count} packages)."
   fi
@@ -351,6 +408,43 @@ rebuild_rpmdb() {
 }
 
 # ------------------------------------------------------------------------------
+# Function: _run_sqlite_batch
+# Purpose:  Runs a SQLite maintenance helper across one or more database paths.
+# Arguments:
+#   $1 - Helper function name (sqlite_integrity_check | sqlite_vacuum_db)
+#   $2 - Start banner message
+#   $3 - Success banner message
+#   $4 - Failure prefix message
+#   $@ - Database paths
+# ------------------------------------------------------------------------------
+_run_sqlite_batch() {
+  local fn="$1"
+  local start_msg="$2"
+  local ok_msg="$3"
+  local fail_prefix="$4"
+  shift 4
+
+  if ! command -v sqlite3 > /dev/null 2>&1; then
+    echo "[-] Error: 'sqlite3' CLI utility is not installed." >&2
+    return 1
+  fi
+
+  local errors=0
+  echo "${start_msg}"
+  for db in "$@"; do
+    "${fn}" "${db}" || errors=$((errors + 1))
+  done
+
+  if [[ ${errors} -eq 0 ]]; then
+    echo "${ok_msg}"
+    return 0
+  else
+    echo "[-] ${fail_prefix} (${errors} database(s))." >&2
+    return 1
+  fi
+}
+
+# ------------------------------------------------------------------------------
 # Function: sqliteWalCheck
 # Purpose:  Verifies SQLite database integrity across DNF history and metadata
 #           databases, reporting WAL journal presence or corruption.
@@ -360,29 +454,13 @@ rebuild_rpmdb() {
 #   0 if all databases are intact; 1 if any database fails integrity check.
 # ------------------------------------------------------------------------------
 sqliteWalCheck() {
-  if ! command -v sqlite3 > /dev/null 2>&1; then
-    echo "[-] Error: 'sqlite3' CLI utility is not installed." >&2
-    return 1
-  fi
-
-  local databases=(
-    "${DNF_CACHE}/packages.db"
+  _run_sqlite_batch \
+    sqlite_integrity_check \
+    "[*] Checking integrity of DNF SQLite databases..." \
+    "[+] All DNF SQLite database integrity checks passed." \
+    "Integrity errors detected in" \
+    "${DNF_CACHE}/packages.db" \
     "${DNF_BASE}/history.sqlite"
-  )
-
-  local errors=0
-  echo "[*] Checking integrity of DNF SQLite databases..."
-  for db in "${databases[@]}"; do
-    sqlite_integrity_check "${db}" || errors=$((errors + 1))
-  done
-
-  if [[ ${errors} -eq 0 ]]; then
-    echo "[+] All DNF SQLite database integrity checks passed."
-    return 0
-  else
-    echo "[-] Errors detected in ${errors} database(s)." >&2
-    return 1
-  fi
 }
 
 # ------------------------------------------------------------------------------
@@ -395,30 +473,16 @@ sqliteWalCheck() {
 #   0 on success; 1 if any database fails.
 # ------------------------------------------------------------------------------
 sqliteWalVacuum() {
-  if ! command -v sqlite3 > /dev/null 2>&1; then
-    echo "[-] Error: 'sqlite3' CLI utility is not installed." >&2
-    return 1
-  fi
-
-  local databases=(
-    "${DNF_CACHE}/packages.db"
-    "${DNF_BASE}/history.sqlite"
-    "/var/lib/rpm/rpmdb.sqlite"
-  )
-
-  local errors=0
-  echo "[*] Checkpointing and vacuuming DNF & RPM SQLite databases..."
-  for db in "${databases[@]}"; do
-    sqlite_vacuum_db "${db}" || errors=$((errors + 1))
-  done
-
-  if [[ ${errors} -eq 0 ]]; then
-    echo "[+] All SQLite databases vacuumed and checkpointed successfully."
-    return 0
-  else
-    echo "[-] Errors encountered vacuuming ${errors} database(s)." >&2
-    return 1
-  fi
+  local rpm_real_dir
+  rpm_real_dir="$(get_rpmdb_dir)"
+  _run_sqlite_batch \
+    sqlite_vacuum_db \
+    "[*] Checkpointing and vacuuming DNF & RPM SQLite databases..." \
+    "[+] All SQLite databases vacuumed and checkpointed successfully." \
+    "Errors encountered vacuuming" \
+    "${DNF_CACHE}/packages.db" \
+    "${DNF_BASE}/history.sqlite" \
+    "${rpm_real_dir}/rpmdb.sqlite"
 }
 
 # Backward-compatibility aliases
@@ -443,16 +507,25 @@ clean_dnf_system() {
 
   local err=0
 
+  local pre_default_kernel=""
+  if ! is_wsl; then
+    pre_default_kernel="$(get_default_boot_kernel)"
+  fi
+
   # 1. Purge DNF package and metadata cache
   echo "[*] Purging DNF cache via '${PKG_MGR} clean all'..."
-  "${PKG_MGR}" clean all || err=$((err + 1))
+  run_pkg_mgr clean all || err=$((err + 1))
 
   # 2. Autoremove unneeded orphaned dependencies
   echo "[*] Removing orphaned packages via '${PKG_MGR} autoremove -y'..."
-  "${PKG_MGR}" autoremove -y || err=$((err + 1))
+  run_pkg_mgr autoremove -y || err=$((err + 1))
 
   # 3. Checkpoint WAL journals and vacuum DNF + RPM SQLite databases
   sqliteWalVacuum || err=$((err + 1))
+
+  if [[ ${err} -eq 0 ]] && ! is_wsl; then
+    verify_kernel_upgrade "${pre_default_kernel}"
+  fi
 
   echo "=============================================================================="
   if [[ ${err} -eq 0 ]]; then
@@ -511,13 +584,15 @@ inspect_needs_restarting() {
 # Function: verify_kernel_upgrade
 # Purpose:  Audits the installed default boot kernel against the currently active
 #           running kernel and core libraries. Emits warning to reboot,
-#           or triggers automated reboot if --auto-reboot was supplied.
+#           or triggers automated reboot if --auto-reboot was supplied and this
+#           transaction changed the default boot kernel.
 # Arguments:
-#   None.
+#   $1 (Optional) - Pre-transaction default boot kernel version.
 # Returns:
 #   0.
 # ------------------------------------------------------------------------------
 verify_kernel_upgrade() {
+  local pre_default_kernel="${1:-}"
   if is_wsl; then
     echo "[i] WSL environment detected (kernel is managed by Windows host)."
     return 0
@@ -526,20 +601,8 @@ verify_kernel_upgrade() {
   local running_kernel
   running_kernel="$(uname -r)"
 
-  local default_kernel=""
-  local default_kernel_path=""
-
-  if command -v grubby > /dev/null 2>&1; then
-    default_kernel_path="$(grubby --default-kernel 2> /dev/null || true)"
-    default_kernel="${default_kernel_path#/boot/vmlinuz-}"
-  fi
-
-  if [[ -z "${default_kernel}" ]]; then
-    default_kernel="$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' kernel-core 2> /dev/null | sort -V | tail -n 1 || true)"
-    if [[ -z "${default_kernel}" ]]; then
-      default_kernel="$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' kernel 2> /dev/null | sort -V | tail -n 1 || true)"
-    fi
-  fi
+  local default_kernel
+  default_kernel="$(get_default_boot_kernel)"
 
   local kernel_changed=0
   if [[ -n "${default_kernel}" && "${default_kernel}" != "${running_kernel}" ]]; then
@@ -563,10 +626,14 @@ verify_kernel_upgrade() {
     log_audit "Kernel upgrade detected: running ${running_kernel}, default ${default_kernel}" "dnf_check"
 
     if [[ ${auto_reboot} -eq 1 ]]; then
-      echo "[*] Option --auto-reboot specified: Initiating automated system reboot in 5 seconds..."
-      log_audit "Triggering automated reboot post-kernel upgrade via --auto-reboot" "dnf_check"
-      sleep 5
-      systemctl reboot 2> /dev/null || shutdown -r now 2> /dev/null || reboot
+      if [[ -z "${pre_default_kernel}" || "${default_kernel}" != "${pre_default_kernel}" ]]; then
+        echo "[*] Option --auto-reboot specified: Initiating automated system reboot in 5 seconds..."
+        log_audit "Triggering automated reboot post-kernel upgrade via --auto-reboot" "dnf_check"
+        sleep 5
+        systemctl reboot 2> /dev/null || shutdown -r now 2> /dev/null || reboot
+      else
+        echo "[i] Pending kernel reboot predates this transaction; skipping --auto-reboot."
+      fi
     fi
   else
     # Kernel did not change; check if core system libraries require a reboot
@@ -593,9 +660,13 @@ do_purge_cache=0
 do_show_details=0
 do_needs_restarting=0
 relax_deps=0
+allow_sha1=0
 auto_reboot=0
 force_flag=0
 is_mutating=0
+needs_boot_check=0
+has_dry_run_or_help=0
+saw_help=0
 dnf_args=()
 
 for arg in "$@"; do
@@ -627,6 +698,9 @@ for arg in "$@"; do
     --relax)
       relax_deps=1
       ;;
+    --allow-sha1)
+      allow_sha1=1
+      ;;
     --auto-reboot)
       auto_reboot=1
       ;;
@@ -636,83 +710,118 @@ for arg in "$@"; do
     *)
       dnf_args+=("${arg}")
       case "${arg}" in
-        update | upgrade | distro-sync | install | reinstall | remove | erase | upgrade-minimal)
-          is_mutating=1
+        -h | --help)
+          saw_help=1
+          has_dry_run_or_help=1
+          ;;
+        --downloadonly | --assumeno | *tsflags=*test*)
+          has_dry_run_or_help=1
           ;;
       esac
       ;;
   esac
 done
 
+# Identify the first two positional DNF subcommand tokens (skipping DNF option flags and their values)
+dnf_subcmd=""
+dnf_subaction=""
+skip_next=0
+if [[ ${#dnf_args[@]} -gt 0 ]]; then
+  for arg in "${dnf_args[@]}"; do
+    if [[ ${skip_next} -eq 1 ]]; then
+      skip_next=0
+      continue
+    fi
+    case "${arg}" in
+      --)
+        break
+        ;;
+      -c | --config | --installroot | --releasever | --setopt | --repo | --repoid | --enablerepo | --disablerepo | --exclude | -x | --destdir | --downloaddir | --forcearch)
+        skip_next=1
+        ;;
+      -*)
+        ;;
+      *)
+        if [[ -z "${dnf_subcmd}" ]]; then
+          dnf_subcmd="${arg}"
+        else
+          dnf_subaction="${arg}"
+          break
+        fi
+        ;;
+    esac
+  done
+fi
+
+if [[ ${saw_help} -eq 1 && -z "${dnf_subcmd}" && $((do_clean + do_verify_rpmdb + do_rebuild_rpmdb + do_sqlite_check + do_sqlite_vacuum + do_purge_cache + do_show_details + do_needs_restarting)) -eq 0 ]]; then
+  show_usage
+  exit 0
+fi
+
+# Privilege guard: all functional actions require root / sudo
+require_root
+
+case "${dnf_subcmd}" in
+  update | upgrade | distro-sync | install | reinstall | upgrade-minimal | downgrade | swap | localinstall | groupinstall | groupupdate)
+    is_mutating=1
+    needs_boot_check=1
+    ;;
+  remove | erase | autoremove | groupremove)
+    is_mutating=1
+    ;;
+  group | module)
+    case "${dnf_subaction}" in
+      install | update | upgrade)
+        is_mutating=1
+        needs_boot_check=1
+        ;;
+      remove | erase)
+        is_mutating=1
+        ;;
+    esac
+    ;;
+  history)
+    case "${dnf_subaction}" in
+      undo | redo | rollback)
+        is_mutating=1
+        needs_boot_check=1
+        ;;
+    esac
+    ;;
+esac
+
+if [[ ${has_dry_run_or_help} -eq 1 ]]; then
+  is_mutating=0
+  needs_boot_check=0
+fi
+
 # Execute standalone maintenance tasks if requested
 has_maintenance=0
 maint_status=0
 
-if [[ ${do_clean} -eq 1 ]]; then
+_check_maint_status() {
   has_maintenance=1
-  clean_dnf_system || maint_status=$?
   if [[ ${maint_status} -ne 0 ]]; then
-    exit ${maint_status}
+    exit "${maint_status}"
   fi
-fi
+}
 
-if [[ ${do_verify_rpmdb} -eq 1 ]]; then
-  has_maintenance=1
-  verify_rpmdb || maint_status=$?
-  if [[ ${maint_status} -ne 0 ]]; then
-    exit ${maint_status}
-  fi
-fi
-
-if [[ ${do_rebuild_rpmdb} -eq 1 ]]; then
-  has_maintenance=1
-  rebuild_rpmdb || maint_status=$?
-  if [[ ${maint_status} -ne 0 ]]; then
-    exit ${maint_status}
-  fi
-fi
-
-if [[ ${do_sqlite_check} -eq 1 ]]; then
-  has_maintenance=1
-  sqliteWalCheck || maint_status=$?
-  if [[ ${maint_status} -ne 0 ]]; then
-    exit ${maint_status}
-  fi
-fi
-
-if [[ ${do_sqlite_vacuum} -eq 1 ]]; then
-  has_maintenance=1
-  sqliteWalVacuum || maint_status=$?
-  if [[ ${maint_status} -ne 0 ]]; then
-    exit ${maint_status}
-  fi
-fi
-
+if [[ ${do_clean} -eq 1 ]]; then clean_dnf_system || maint_status=$?; _check_maint_status; fi
+if [[ ${do_verify_rpmdb} -eq 1 ]]; then verify_rpmdb || maint_status=$?; _check_maint_status; fi
+if [[ ${do_rebuild_rpmdb} -eq 1 ]]; then rebuild_rpmdb || maint_status=$?; _check_maint_status; fi
+if [[ ${do_sqlite_check} -eq 1 ]]; then sqliteWalCheck || maint_status=$?; _check_maint_status; fi
+if [[ ${do_sqlite_vacuum} -eq 1 ]]; then sqliteWalVacuum || maint_status=$?; _check_maint_status; fi
 if [[ ${do_purge_cache} -eq 1 ]]; then
-  has_maintenance=1
   echo "[*] Purging DNF cache via native package manager (${PKG_MGR})..."
-  "${PKG_MGR}" clean all || maint_status=$?
-  if [[ ${maint_status} -ne 0 ]]; then
-    exit ${maint_status}
-  fi
+  run_pkg_mgr clean all || maint_status=$?
+  _check_maint_status
 fi
-
 if [[ ${do_show_details} -eq 1 ]]; then
-  has_maintenance=1
   echo "[*] Querying detailed advisory and errata update information via ${PKG_MGR}..."
-  "${PKG_MGR}" updateinfo info --updates || maint_status=$?
-  if [[ ${maint_status} -ne 0 ]]; then
-    exit ${maint_status}
-  fi
+  run_pkg_mgr updateinfo info --updates || maint_status=$?
+  _check_maint_status
 fi
-
-if [[ ${do_needs_restarting} -eq 1 ]]; then
-  has_maintenance=1
-  inspect_needs_restarting || maint_status=$?
-  if [[ ${maint_status} -ne 0 ]]; then
-    exit ${maint_status}
-  fi
-fi
+if [[ ${do_needs_restarting} -eq 1 ]]; then inspect_needs_restarting || maint_status=$?; _check_maint_status; fi
 
 # If standalone maintenance was performed and no further DNF commands remain, exit cleanly
 if [[ ${has_maintenance} -eq 1 && ${#dnf_args[@]} -eq 0 ]]; then
@@ -728,7 +837,7 @@ fi
 # ------------------------------------------------------------------------------
 # 5. Pre-Flight Safeguards (Mutating Operations)
 # ------------------------------------------------------------------------------
-if [[ ${is_mutating} -eq 1 ]]; then
+if [[ ${needs_boot_check} -eq 1 ]]; then
   if ! check_boot_capacity "${BOOT_MIN_FREE_MB}"; then
     if [[ ${force_flag} -eq 0 ]]; then
       echo "[-] Error: /boot free space is critically low. Aborting transaction to prevent initramfs corruption." >&2
@@ -748,9 +857,14 @@ if [[ ${relax_deps} -eq 1 ]]; then
   dnf_args+=("${DNF_RELAX_OPTS[@]}")
 fi
 
+pre_default_kernel=""
+if [[ ${is_mutating} -eq 1 ]] && ! is_wsl; then
+  pre_default_kernel="$(get_default_boot_kernel)"
+fi
+
 # Execute package manager with exact arguments preserved, safely capturing exit code under set -e
 DNF_STATUS=0
-"${PKG_MGR}" "${dnf_args[@]}" || DNF_STATUS=$?
+run_pkg_mgr "${dnf_args[@]}" || DNF_STATUS=$?
 
 # If command failed, abort immediately and preserve its exit code
 if [[ ${DNF_STATUS} -ne 0 ]]; then
@@ -770,7 +884,7 @@ if [[ ${is_mutating} -eq 1 ]]; then
     fi
 
     # Audit if installed kernel or core libraries differ from running environment
-    verify_kernel_upgrade
+    verify_kernel_upgrade "${pre_default_kernel}"
   fi
 fi
 

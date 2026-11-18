@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Library:     /opt/scripts/lib/system.sh
-# Version:     2.0.0  2026/11/06
+# Version:     2.0.0  2026/11/18
 # Standard:    DRY Architecture Framework (Universal System Foundation Layer)
 # Author:      DevOps Systems Administration <criticalsys.mis@gmail.com>
 # Compatibility: POSIX compliant Linux (Enterprise Linux 8/9/10, Debian 12+,
@@ -51,39 +51,30 @@ init_system_logging() {
     fi
 }
 
-init_debian_logging() {
-    init_system_logging "${1:-/var/log/debian_sys.log}"
+_is_log_writable() {
+    [[ -w "${LOG_FILE}" ]] || { [[ ! -f "${LOG_FILE}" ]] && [[ -w "$(dirname "${LOG_FILE}" 2>/dev/null)" ]]; }
 }
 
-log_info() {
-    local msg="$1"
+_log_msg() {
+    local level="$1"
+    local prefix="$2"
+    local stream="$3"
+    local msg="$4"
     local ts
     ts="$(date '+%Y-%m-%d %H:%M:%S')"
-    echo "[+] [${ts}] ${msg}"
-    if [[ -w "${LOG_FILE}" ]] || { [[ ! -f "${LOG_FILE}" ]] && [[ -w "$(dirname "${LOG_FILE}" 2>/dev/null)" ]]; }; then
-        echo "[INFO] [${ts}] ${msg}" >> "${LOG_FILE}" 2>/dev/null || true
+    if [[ "${stream}" == "stderr" ]]; then
+        echo "${prefix} [${ts}] ${msg}" >&2
+    else
+        echo "${prefix} [${ts}] ${msg}"
+    fi
+    if _is_log_writable; then
+        echo "[${level}] [${ts}] ${msg}" >> "${LOG_FILE}" 2>/dev/null || true
     fi
 }
 
-log_warn() {
-    local msg="$1"
-    local ts
-    ts="$(date '+%Y-%m-%d %H:%M:%S')"
-    echo "[!] [${ts}] WARNING: ${msg}" >&2
-    if [[ -w "${LOG_FILE}" ]] || { [[ ! -f "${LOG_FILE}" ]] && [[ -w "$(dirname "${LOG_FILE}" 2>/dev/null)" ]]; }; then
-        echo "[WARN] [${ts}] ${msg}" >> "${LOG_FILE}" 2>/dev/null || true
-    fi
-}
-
-log_error() {
-    local msg="$1"
-    local ts
-    ts="$(date '+%Y-%m-%d %H:%M:%S')"
-    echo "[-] [${ts}] ERROR: ${msg}" >&2
-    if [[ -w "${LOG_FILE}" ]] || { [[ ! -f "${LOG_FILE}" ]] && [[ -w "$(dirname "${LOG_FILE}" 2>/dev/null)" ]]; }; then
-        echo "[ERROR] [${ts}] ${msg}" >> "${LOG_FILE}" 2>/dev/null || true
-    fi
-}
+log_info()  { _log_msg "INFO"  "[+]" "stdout" "$1"; }
+log_warn()  { _log_msg "WARN"  "[!]" "stderr" "WARNING: $1"; }
+log_error() { _log_msg "ERROR" "[-]" "stderr" "ERROR: $1"; }
 
 log_audit() {
     local msg="$1"
@@ -247,7 +238,7 @@ validate_rhel_os() {
 get_partition_summary() {
     local target_path="$1"
     [[ -d "${target_path}" ]] || target_path="/"
-    df -h "${target_path}" 2>/dev/null | awk 'NR==2 {print $6 " (" $4 " free / " $5 " used)"}' || echo "N/A"
+    LC_ALL=C df -h "${target_path}" 2>/dev/null | awk 'NR==2 {print $6 " (" $4 " free / " $5 " used)"}' || echo "N/A"
 }
 
 get_free_mb() {
@@ -255,19 +246,36 @@ get_free_mb() {
     [[ -d "${target_path}" ]] || target_path="/"
     local free_mb=""
     # Try POSIX block-size 1M first (GNU df)
-    free_mb="$(df -P -BM "${target_path}" 2>/dev/null | awk 'NR==2 {gsub(/M/,"",$4); print $4}' || true)"
+    free_mb="$(LC_ALL=C df -P -BM "${target_path}" 2>/dev/null | awk 'NR==2 {gsub(/M/,"",$4); print $4}' || true)"
     if [[ "${free_mb}" =~ ^[0-9]+$ ]]; then
         echo "${free_mb}"
         return 0
     fi
     # Fallback to standard 1K blocks
     local free_kb
-    free_kb="$(df -P "${target_path}" 2>/dev/null | awk 'NR==2 {print $4}' || true)"
+    free_kb="$(LC_ALL=C df -P "${target_path}" 2>/dev/null | awk 'NR==2 {print $4}' || true)"
     if [[ "${free_kb}" =~ ^[0-9]+$ ]]; then
         echo "$((free_kb / 1024))"
         return 0
     fi
-    echo "9999"
+    return 1
+}
+
+_check_fs_headroom() {
+    local label="$1"
+    local free_mb="$2"
+    local min_mb="$3"
+    local extra_warn="${4:-}"
+
+    if [[ ! "${free_mb}" =~ ^[0-9]+$ ]]; then
+        log_warn "Unable to determine free space on ${label}; storage check failed."
+        return 1
+    elif [[ ${free_mb} -lt ${min_mb} ]]; then
+        log_warn "${label} filesystem storage is critically low: ${free_mb} MB free (minimum recommended: ${min_mb} MB)!"
+        [[ -n "${extra_warn}" ]] && log_warn "${extra_warn}"
+        return 1
+    fi
+    return 0
 }
 
 check_storage_capacity() {
@@ -281,10 +289,9 @@ check_storage_capacity() {
     local boot_path="/boot"
     [[ -d "${boot_path}" ]] || boot_path="/"
 
-    local root_free_mb
-    root_free_mb="$(get_free_mb "/")"
-    local boot_free_mb
-    boot_free_mb="$(get_free_mb "${boot_path}")"
+    local root_free_mb boot_free_mb
+    root_free_mb="$(get_free_mb "/")" || root_free_mb="unknown"
+    boot_free_mb="$(get_free_mb "${boot_path}")" || boot_free_mb="unknown"
 
     local root_summary
     root_summary="$(get_partition_summary "/")"
@@ -297,16 +304,9 @@ check_storage_capacity() {
 
     local issues=0
 
-    if [[ "${root_free_mb}" =~ ^[0-9]+$ ]] && [[ ${root_free_mb} -lt ${root_min_mb} ]]; then
-        log_warn "Root (/) filesystem storage is critically low: ${root_free_mb} MB free (minimum recommended: ${root_min_mb} MB)!"
-        issues=$((issues + 1))
-    fi
-
-    if [[ "${boot_free_mb}" =~ ^[0-9]+$ ]] && [[ ${boot_free_mb} -lt ${boot_min_mb} ]]; then
-        log_warn "${boot_path} filesystem storage is critically low: ${boot_free_mb} MB free (minimum recommended: ${boot_min_mb} MB)!"
-        log_warn "Low storage on ${boot_path} may cause initramfs generation to fail during kernel transactions."
-        issues=$((issues + 1))
-    fi
+    _check_fs_headroom "Root (/)" "${root_free_mb}" "${root_min_mb}" || issues=$((issues + 1))
+    _check_fs_headroom "${boot_path}" "${boot_free_mb}" "${boot_min_mb}" \
+        "Low storage on ${boot_path} may cause initramfs generation to fail during kernel transactions." || issues=$((issues + 1))
 
     if [[ ${issues} -gt 0 ]]; then
         if [[ "${is_detect}" == "true" ]]; then
@@ -368,7 +368,7 @@ update_link() {
     local tmp_link
     tmp_link="$(mktemp -u "${link_path}.tmp.XXXXXX")"
     ln -sf "${target}" "${tmp_link}"
-    mv -f "${tmp_link}" "${link_path}"
+    mv -Tf "${tmp_link}" "${link_path}"
 }
 
 # ------------------------------------------------------------------------------
@@ -390,7 +390,7 @@ harden_grub_config() {
 
     local temp_backup=""
     if [[ "${is_detect}" == "false" ]]; then
-        temp_backup="$(mktemp -u "/tmp/grub.XXXXXX")"
+        temp_backup="$(mktemp "/tmp/grub.XXXXXX")"
         cp -p "${grub_conf}" "${temp_backup}"
     fi
 
@@ -463,7 +463,11 @@ harden_grub_config() {
                 log_info "[DETECT]   -> Would optimize GRUB_CMDLINE_LINUX_DEFAULT: removing 'quiet', ensuring 'nomodeset' and 'panic=30'."
             else
                 log_info "  -> Optimizing GRUB_CMDLINE_LINUX_DEFAULT: removing 'quiet', ensuring 'nomodeset' and 'panic=30'."
-                sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|${new_line}|" "${grub_conf}"
+                local escaped_line
+                escaped_line="${new_line//\\/\\\\}"
+                escaped_line="${escaped_line//&/\\&}"
+                escaped_line="${escaped_line//|/\\|}"
+                sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|${escaped_line}|" "${grub_conf}"
                 modified=true
             fi
         fi

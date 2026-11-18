@@ -25,8 +25,8 @@ Comprehensive operational and architecture guide for [`/opt/scripts/kernel-defau
 ### Architecture and Design Choices
 * **Native Tooling Layer:** Built directly on top of `grubby` and `${PKG_MGR}` (`dnf`/`yum`), avoiding manual editing or parsing of `/boot/grub2/grub.cfg` or `/boot/loader/entries/`.
 * **Universal EL8/9/10 Compatibility:** Operates seamlessly across UEFI and legacy BIOS firmware layouts.
-* **Loose Coupling with Shared Infrastructure:** Sources [`/opt/scripts/lib/rhel_sys.sh`](lib/rhel_sys.sh) for DRY conventions, with complete standalone fallback definitions if executed in isolation.
-* **Strict Shell Governance:** Enforces `set -euo pipefail` and `umask 022`.
+* **Loose Coupling with Shared Infrastructure:** Sources [`/opt/scripts/lib/system.sh`](lib/system.sh) (auto-routing to [`lib/rhel_sys.sh`](lib/rhel_sys.sh) via `validate_rhel_os`) and exits `1` immediately if the library is absent.
+* **Strict Shell Governance:** Enforces `set -euo pipefail` and `umask 022` (applied on library load).
 
 ### Assumptions
 * The host operating system utilizes GRUB2 with the Boot Loader Specification (`BLS`) enabled (standard in EL8+).
@@ -34,11 +34,11 @@ Comprehensive operational and architecture guide for [`/opt/scripts/kernel-defau
 * `/boot` and `/boot/loader/entries` are accessible and mounted read-write during updates.
 
 ### Handled Edge Cases
-* **Missing or Non-Existent Index / Version:** Validates requested indexes and version strings with both `grubby --info="${INDEX}"` and `grubby --info=ALL` before attempting modification.
+* **Missing or Non-Existent Index / Version:** Validates requested indexes via `grubby --info="${INDEX}"` (falling back to `grubby --info=ALL` match) before attempting modification.
 * **Accidental Rescue Assignment:** Inspects target entry metadata and rejects `rescue` kernel assignments unless explicitly authorized via `--allow-rescue`.
 * **Unbooted Kernel Deletion Window:** Warns and halts if a newly deployed kernel has not been booted, preventing deletion of the active running fallback kernel.
 * **Retention Floor Protection:** Retains at least 2 kernel versions by default (`--keep 2`), ensuring a recovery kernel is always present in GRUB. Requires positive integers ($\ge 1$) to prevent accidental complete purging.
-* **Active Kernel Protection:** Automatically filters out package candidates matching `*$(uname -r)*` to prevent purging the booted kernel, even if older than other installed kernels.
+* **Active Kernel Protection:** Filters out package candidates matching `*[-:]$(uname -r)` to prevent purging the booted kernel, even if older than other installed kernels.
 * **Empty Package Sets:** Bypasses `${PKG_MGR} remove` when zero retired kernels exist, avoiding package manager syntax errors.
 * **Pipefail Resilience:** Output pipelines append `|| true` to prevent `set -o pipefail` from terminating the script on empty filter results.
 * **Conflicting Option Rejection:** Enforces mutual exclusivity across primary actions (e.g. `--report` and `--cleanup`), rejecting conflicting commands.
@@ -52,15 +52,17 @@ graph TD
     User["System Administrator / Automation"] -->|"CLI Args"| Entrypoint["/opt/scripts/kernel-default.sh"]
     
     subgraph "Initialization & Safety"
-        Entrypoint --> ModeCheck{"Action Requested?"}
+        Entrypoint --> SourceLib["Source lib/system.sh (umask 022 + validate_rhel_os)"]
+        SourceLib --> ModeCheck{"Action Requested?"}
         ModeCheck -->|"-h / --help"| HelpHandler["Display Usage & Exit 0"]
         ModeCheck -->|"Execution"| RootGuard["require_root (EUID == 0)"]
-        RootGuard --> DepCheck["verify_dependencies (grubby, dnf, grep, uname, awk)"]
-        DepCheck --> UmaskCheck["Enforce umask 022"]
+        RootGuard --> WSLCheck{"is_wsl?"}
+        WSLCheck -->|Yes| WSLExit["Skip Bootloader & Exit 0"]
+        WSLCheck -->|No| DepCheck["verify_dependencies (grubby, PKG_MGR, grep, uname, awk)"]
     end
 
     subgraph "Core Functionality"
-        UmaskCheck --> ActionRouter{"Action Dispatch"}
+        DepCheck --> ActionRouter{"Action Dispatch"}
         ActionRouter -->|"--default"| ReadDefault["grubby default & /boot usage"]
         ActionRouter -->|"--report"| ReadAll["grubby --info=ALL & /boot usage"]
         ActionRouter -->|"--cleanup"| CleanOld{"Reboot Pending?"}
@@ -137,11 +139,12 @@ sequenceDiagram
 
 ```mermaid
 graph LR
-    SubScript["kernel-default.sh"] --> LibRhel["lib/rhel_sys.sh"]
+    SubScript["kernel-default.sh"] --> LibSys["lib/system.sh"]
+    LibSys --> LibRhel["lib/rhel_sys.sh (validate_rhel_os)"]
     SubScript --> BinaryGrubby["/usr/sbin/grubby (grubby package)"]
     SubScript --> BinaryDNF["/usr/bin/dnf or /usr/bin/yum"]
     SubScript --> CoreUtils["util-linux (logger, uname)"]
-    SubScript --> GrepUtils["grep / coreutils"]
+    SubScript --> GrepUtils["grep / coreutils / gawk"]
     
     BinaryGrubby --> BootFiles["/boot/loader/entries/*.conf"]
     BinaryGrubby --> GrubEnv["/boot/grub2/grubenv"]
@@ -155,7 +158,8 @@ graph LR
 | `dnf` / `yum` | Package Manager | `dnf` | 4.0+ | Querying and removing retired installonly kernel packages |
 | `logger` | Syslog Utility | `util-linux` | 2.32+ | Recording operational audit events to systemd journal |
 | `grep`, `uname`, `awk` | Core Utilities | `grep`, `coreutils`, `gawk` | Any | String filtering, metrics parsing, and active kernel detection |
-| `lib/rhel_sys.sh` | Shared Library | Repository Internal | 1.4.0+ | Foundation library (`require_root`, `verify_dependencies`, `is_wsl`, `log_audit`) |
+| `lib/system.sh` | Shared Library | Repository Internal | 2.0.0+ | Foundation layer (`require_root`, `verify_dependencies`, `is_wsl`, `log_audit`, `get_partition_summary`) |
+| `lib/rhel_sys.sh` | Domain Library | Repository Internal | 2.0.0+ | Auto-loaded via `validate_rhel_os` (`PKG_MGR`, `get_default_boot_kernel`) |
 
 ---
 
@@ -209,8 +213,8 @@ graph TD
 | `--set <VERSION>` | String | N/A | Resolves and assigns default kernel by version substring (e.g. `6.12.0-211.74.1`). |
 | `--allow-rescue` | Flag | N/A | Explicitly authorizes assigning a rescue kernel as the default boot entry. |
 | `--cleanup` | Flag | N/A | Safely purges retired kernel packages beyond the retention floor while preserving the active kernel. |
-| `--keep <N>` | Integer (`>= 1`) | `2` | Number of latest kernel versions to retain during cleanup. Requires positive integer ($\ge 1$); automatically implies `--cleanup` if no action is specified. |
-| `--dry-run`, `-n` | Flag | N/A | Previews kernel packages that would be removed by cleanup without modifying the system; automatically implies `--cleanup` if no action is specified. |
+| `--keep <N>` | Integer (`>= 1`) | `2` | Number of latest kernel versions to retain during cleanup. Requires positive integer ($\ge 1$); implies `--cleanup` and conflicts with other primary actions (`--report`, `--default`, `--set`, `<INDEX>`). |
+| `--dry-run`, `-n` | Flag | N/A | Previews kernel packages that would be removed by cleanup without modifying the system; implies `--cleanup` and conflicts with other primary actions. |
 | `--force` | Flag | N/A | Bypasses safety guards (e.g. forces cleanup when a reboot into a new kernel is pending). |
 | `--latest` | Flag | N/A | Explicitly assigns index `0` as the default boot kernel. |
 | `-h`, `--help` | Flag | N/A | Displays CLI usage documentation and exits `0`. |

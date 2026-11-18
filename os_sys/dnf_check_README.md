@@ -51,30 +51,31 @@ graph TD
     Caller["Administrator / Automated Task"] -->|"Arguments ($@)"| Script["/opt/scripts/dnf_check.sh"]
 
     subgraph "Initialization & Privilege Guard"
-        Script --> HelpCheck{"Is -h or --help?"}
+        Script --> SourceLib["Source lib/system.sh (umask 022 + validate_rhel_os)"]
+        SourceLib --> HelpCheck{"Standalone -h or --help?"}
         HelpCheck -->|Yes| ShowHelp["Display Usage & Exit 0"]
         HelpCheck -->|No| RequireRoot["require_root (EUID == 0)"]
-        RequireRoot --> DetectPkgMgr["Detect PKG_MGR (dnf / yum)"]
-        DetectPkgMgr --> EnforceUmask["umask 022"]
+        RequireRoot --> DetectPkgMgr["Validate PKG_MGR (dnf / yum)"]
     end
 
     subgraph "Internal Maintenance Handlers"
-        EnforceUmask --> ActionSwitch{"Maintenance Flag?"}
+        DetectPkgMgr --> ActionSwitch{"Maintenance Flag?"}
+        ActionSwitch -->|"--clean / --clean-all"| CleanSys["clean_dnf_system<br/>(clean + autoremove + vacuum + audit)"]
         ActionSwitch -->|"--verify-rpmdb"| VerifyRpm["verify_rpmdb<br/>(Locks + SQLite + rpmdb verify)"]
         ActionSwitch -->|"--rebuild-rpmdb"| RebuildRpm["rebuild_rpmdb<br/>(Snapshot + rebuild + verify)"]
         ActionSwitch -->|"--sqlite-check"| SqliteCheck["sqliteWalCheck<br/>(PRAGMA integrity_check)"]
         ActionSwitch -->|"--sqlite-vacuum"| SqliteVac["sqliteWalVacuum<br/>(wal_checkpoint + vacuum)"]
-        ActionSwitch -->|"--purge-cache"| CleanCache["${PKG_MGR} clean all"]
-        ActionSwitch -->|"--show-update-details"| Details["${PKG_MGR} updateinfo info --updates"]
+        ActionSwitch -->|"--purge-cache"| CleanCache["run_pkg_mgr clean all"]
+        ActionSwitch -->|"--show-update-details"| Details["run_pkg_mgr updateinfo info --updates"]
         ActionSwitch -->|"--needs-restarting"| NeedsRestart["inspect_needs_restarting<br/>(needs-restarting -r / -s)"]
     end
 
     subgraph "Pre-Flight & Execution"
-        ActionSwitch -->|"DNF Command"| CheckMutate{"Mutating Subcommand?"}
-        CheckMutate -->|Yes| BootGuard{"/boot Space >= 100MB?"}
-        BootGuard -->|No (no --force)| AbortLow["Abort: Low /boot storage"]
-        BootGuard -->|Yes / --force| ExecDNF["Execute: ${PKG_MGR} $@"]
-        CheckMutate -->|No| ExecDNF
+        ActionSwitch -->|"DNF Command"| CheckMutate{"Mutating & Not Dry-Run?"}
+        CheckMutate -->|Kernel-Capable Mutation| BootGuard{"/boot Space >= 100MB?"}
+        BootGuard -->|No (no --force)| AbortLow["Abort Exit 1: Low /boot storage"]
+        BootGuard -->|Yes / --force| ExecDNF["run_pkg_mgr $@ (Optional --relax / --allow-sha1)"]
+        CheckMutate -->|Removal / Read-Only / Dry-Run| ExecDNF
     end
 
     subgraph "Post-Transaction Logic"
@@ -141,11 +142,12 @@ sequenceDiagram
 
 ```mermaid
 graph LR
-    Main["dnf_check.sh"] --> LibRhel["lib/rhel_sys.sh"]
+    Main["dnf_check.sh"] --> LibSys["lib/system.sh"]
+    LibSys --> LibRhel["lib/rhel_sys.sh (validate_rhel_os)"]
     Main --> BinaryDNF["/usr/bin/dnf or /usr/bin/yum"]
     Main --> BinaryRPM["/usr/bin/rpmdb or /usr/bin/rpm"]
     Main --> BinarySqlite["/usr/bin/sqlite3 (sqlite package)"]
-    Main --> BinaryFuser["/usr/sbin/fuser (psmisc package)"]
+    Main --> BinaryFuser["fuser / lsof / pgrep"]
     Main --> SubKernel["kernel-default.sh"]
     Main --> CoreUtils["coreutils (stat, id, uname, tar)"]
     
@@ -159,11 +161,12 @@ graph LR
 | `bash` | Shell Runtime | `bash` | 4.4+ (EL8+) | Script interpreter |
 | `dnf` / `yum` | Package Manager | `dnf` | 4.0+ | Package installations, updates, and repo queries |
 | `rpmdb` / `rpm` | Package Engine | `rpm` | 4.14+ | Low-level RPM database verification and rebuild operations (`--verifydb`, `--rebuilddb`) |
-| `fuser` | Lock Inspector | `psmisc` | 23.0+ | Process lock inspection for `/usr/lib/sysimage/rpm/.rpm.lock` |
+| `fuser` / `lsof` / `pgrep` | Lock & Process Inspector | `psmisc` / `lsof` / `procps-ng` | Any | Lock ownership and active package-manager concurrency checks |
 | `tar` | Archive Utility | `tar` | 1.30+ | Compressed pre-rebuild safety snapshots in `/var/backups/rpmdb/` |
-| `sqlite3` | SQLite Utility | `sqlite` | 3.26+ | Database integrity validation in `sqliteWalCheck` and `verify_rpmdb` |
-| `kernel-default.sh` | Sibling Script | Repository Internal | 1.1.0+ | Post-transaction default boot kernel synchronization |
-| `lib/rhel_sys.sh` | Shared Library | Repository Internal | 1.4.0+ | Foundation library (`require_root`, `sqlite_integrity_check`, `log_audit`) |
+| `sqlite3` | SQLite Utility | `sqlite` | 3.26+ | Database integrity validation and vacuuming in `sqliteWalCheck`, `sqliteWalVacuum`, and `verify_rpmdb` |
+| `kernel-default.sh` | Sibling Script | Repository Internal | 2.0.0+ | Post-transaction default boot kernel synchronization |
+| `lib/system.sh` | Shared Library | Repository Internal | 2.0.0+ | Foundation layer (`require_root`, `is_wsl`, `get_lock_pids`, `get_active_pkg_managers`, `log_audit`) |
+| `lib/rhel_sys.sh` | Domain Library | Repository Internal | 2.0.0+ | Auto-loaded via `validate_rhel_os` (`PKG_MGR`, `sqlite_integrity_check`, `sqlite_vacuum_db`, `check_boot_capacity`, `get_default_boot_kernel`) |
 
 ---
 
@@ -190,11 +193,12 @@ graph TD
 
 ## 7. Security Assessment
 
-* **Privileged Execution Context:** Requires `root` permissions for package manager commands and database operations. Non-root users can only run `-h` / `--help`.
+* **Privileged Execution Context:** Requires `root` permissions for package manager commands and database operations. Non-root users can only invoke `-h` / `--help` cleanly when not combined with subcommands (`dnf update --help` falls through after `require_root`).
 * **Zero Shell Injection Surface:** Avoids `eval` and unquoted variable expansions (`$*`). All arguments pass directly through `"$@"`.
-* **Umask Enforcement:** Explicitly declares `umask 022` to ensure packages and logs are created with standard system permissions rather than inheriting restrictive parent environments.
+* **Umask Enforcement:** `lib/system.sh` explicitly declares `umask 022` so packages, logs, and snapshots are created with predictable permissions rather than inheriting restrictive parent environments.
 * **Non-Destructive Database Audits:** SQLite integrity checks run read-only PRAGMAs without altering journal modes or writing data.
-* **Pre-Rebuild Snapshot Isolation:** Safety snapshots are created in `/var/backups/rpmdb/` with restricted directory permissions (`0750 csysadm:root`) and file permissions (`0640 csysadm:root`), ensuring sensitive package installation metadata is not accessible to unprivileged system users.
+* **Pre-Rebuild Snapshot Isolation:** Safety snapshots are created in `/var/backups/rpmdb/` with restricted directory permissions (`0750 ${SYS_USER:-csysadm}:${SYS_GROUP:-root}`) and file permissions (`0640`), ensuring sensitive package installation metadata is not accessible to unprivileged system users.
+* **Scoped Legacy Crypto Override (`--allow-sha1`):** Explicitly opts into `OPENSSL_ENABLE_SHA1_SIGNATURES=1` strictly scoped to the `${PKG_MGR}` invocation while logging an audit event (`log_audit`) and warning banner.
 * **Process Concurrency Isolation:** Before rebuilding, the script scans active processes (`dnf`, `dnf5`, `rpm`, `yum`) and `.rpm.lock` ownership to eliminate race conditions or database corruption caused by concurrent writes.
 
 ---
@@ -203,8 +207,8 @@ graph TD
 
 * **Bash Strict Mode:** Runs under `set -euo pipefail`.
 * **Clean Exit Code Propagation:** Never masks non-zero exit codes from DNF; failures are immediately bubbled up to callers and CI/CD pipelines.
-* **Backward Compatibility:** Provides function aliases (`sqlite_wal_check`, `sqliteWalClean`) and flag aliases (`--sqlite-close`) for seamless legacy script support.
-* **Modular Path Discovery:** Sibling scripts are dynamically resolved via `${SCRIPT_DIR}` to allow deployment in non-standard directories.
+* **Backward Compatibility:** Provides function aliases (`sqlite_wal_check`, `sqliteWalClean`) and flag aliases (`--clean-all`, `--rpmdb-verify`, `--rpmdb-rebuild`, `--sqlite-close`, `--sqlite-checkpoint`, `--sqlite-optimize`, `--update-details`) for seamless legacy script support.
+* **Modular Path Discovery:** Sibling scripts are dynamically resolved via `${SCRIPT_DIR}` with `/opt/scripts/` fallbacks.
 
 ---
 
@@ -212,22 +216,22 @@ graph TD
 
 | Argument | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `--clean`, `--clean-all` | Flag | N/A | Comprehensive package system cleanup: executes `dnf clean all`, autoremoves orphaned packages (`dnf autoremove -y`), and checkpoints/vacuums DNF and RPM SQLite databases. |
+| `--clean`, `--clean-all` | Flag | N/A | Comprehensive package system cleanup: executes `dnf clean all`, autoremoves orphaned packages (`dnf autoremove -y`), checkpoints/vacuums DNF and RPM SQLite databases, and runs `verify_kernel_upgrade`. |
 | `--verify-rpmdb`, `--rpmdb-verify` | Flag | N/A | Inspects RPM database structural integrity, active transaction locks, underlying SQLite engine health, and queryable package counts. |
 | `--rebuild-rpmdb`, `--rpmdb-rebuild` | Flag | N/A | Safely rebuilds the RPM database with active process concurrency checks, automated pre-rebuild safety archive in `/var/backups/rpmdb/`, stale lock cleanup, and post-rebuild verification. |
-| `--sqlite-check` | Flag | N/A | Validates the integrity of DNF's SQLite databases (`packages.db`, `history.sqlite`). |
-| `--sqlite-vacuum` | Flag | N/A | Checkpoints active WAL journals and vacuums SQLite databases to reclaim disk space. |
-| `--sqlite-close` | Flag | N/A | Legacy compatibility alias for `--sqlite-check`. |
+| `--sqlite-check`, `--sqlite-close` | Flag | N/A | Validates the integrity of DNF's SQLite databases (`packages.db`, `history.sqlite`). |
+| `--sqlite-vacuum`, `--sqlite-checkpoint`, `--sqlite-optimize` | Flag | N/A | Checkpoints active WAL journals and vacuums DNF and RPM SQLite databases (`packages.db`, `history.sqlite`, `rpmdb.sqlite`) to reclaim disk space. |
 | `--purge-cache` | Flag | N/A | Safely cleans all DNF metadata and package caches via native `dnf clean all`. |
 | `--show-update-details`, `--update-details` | Flag | N/A | Queries detailed CVEs, severities, and errata descriptions for pending updates via `dnf updateinfo info --updates`. |
 | `--needs-restarting` | Flag | N/A | Audits whether core system libraries or active services require a reboot or restart. |
 | `--relax` | Flag | N/A | Permits non-best packages and skips broken dependencies (`--skip-broken --nobest`). |
-| `--auto-reboot` | Flag | N/A | Automatically reboots the host if a new kernel is installed or upgraded during a mutating transaction. |
+| `--allow-sha1` | Flag | N/A | Permits SHA-1 OpenSSL signatures (`OPENSSL_ENABLE_SHA1_SIGNATURES=1`) for legacy RPM GPG keys. |
+| `--auto-reboot` | Flag | N/A | Automatically reboots the host if a new kernel is installed or upgraded during the transaction (`default_kernel != pre_default_kernel`). |
 | `--force` | Flag | N/A | Bypasses pre-flight guards (e.g. low `/boot` partition capacity warnings). |
-| `-h`, `--help` | Flag | N/A | Displays CLI usage documentation and exits `0`. |
-| `[DNF_COMMAND...]` | Pass-through | N/A | Standard DNF arguments (e.g. `update`, `install nginx`, `clean all`, `search`). |
+| `-h`, `--help` | Flag | N/A | Displays CLI usage documentation and exits `0` when passed standalone without a subcommand/maintenance flag. |
+| `[DNF_COMMAND...]` | Pass-through | N/A | Standard DNF arguments (e.g. `update`, `install nginx`, `clean all`, `search`). Missing arguments with no maintenance flag exit `2`. |
 
-*Note: Maintenance flags can be chained together in a single command (e.g. `--verify-rpmdb --sqlite-check`). They execute sequentially in precedence order: RPM verification, RPM rebuild, SQLite check, SQLite vacuum, cache purge, update details, and restart audit. If any maintenance step fails, the script halts immediately with that step's exit code. When combined with DNF subcommands (e.g. `--purge-cache update -y`), maintenance tasks execute prior to the package transaction.*
+*Note: Maintenance flags can be chained together in a single command (e.g. `--verify-rpmdb --sqlite-check`). They execute sequentially in precedence order: `--clean`, `--verify-rpmdb`, `--rebuild-rpmdb`, `--sqlite-check`, `--sqlite-vacuum`, `--purge-cache`, `--show-update-details`, and `--needs-restarting`. If any maintenance step fails, the script halts immediately with that step's exit code. Kernel-capable DNF mutations (`update`, `install`, `upgrade`, `distro-sync`, `group install/update/upgrade`, `history undo/redo/rollback`, etc.) trigger both the `/boot` free-space preflight check and post-transaction kernel sync; removal commands (`remove`, `erase`, `autoremove`, `groupremove`) sync kernels without requiring `/boot` headroom; and dry-run flags (`--downloadonly`, `--assumeno`, `*tsflags=*test*`) bypass both mutation checks.*
 
 ---
 
@@ -335,16 +339,17 @@ sudo /opt/scripts/dnf_check.sh --sqlite-check
 [+] All DNF SQLite database integrity checks passed.
 ```
 
-#### 6. Optimize and Vacuum DNF SQLite Databases
+#### 6. Optimize and Vacuum DNF & RPM SQLite Databases
 ```bash
 sudo /opt/scripts/dnf_check.sh --sqlite-vacuum
 ```
 **Sample Output:**
 ```text
-[*] Checkpointing and vacuuming DNF SQLite databases...
+[*] Checkpointing and vacuuming DNF & RPM SQLite databases...
     Optimizing / vacuuming [/var/cache/dnf/packages.db]... OK
     Optimizing / vacuuming [/var/lib/dnf/history.sqlite]... OK
-[+] All DNF SQLite databases vacuumed and checkpointed successfully.
+    Optimizing / vacuuming [/usr/lib/sysimage/rpm/rpmdb.sqlite]... OK
+[+] All SQLite databases vacuumed and checkpointed successfully.
 ```
 
 #### 7. Audit Core Libraries and Services Needing Restart
@@ -414,7 +419,7 @@ sudo /opt/scripts/dnf_check.sh --show-update-details
    Severity: Important
 ```
 
-#### 10. Read-Only Query (No Bootloader Interaction)
+#### 11. Read-Only Query (No Bootloader Interaction)
 ```bash
 sudo /opt/scripts/dnf_check.sh repoquery --latest-limit=1 -q kernel-core
 ```
@@ -424,21 +429,21 @@ kernel-core-0:6.12.0-211.56.1.el10_2.x86_64
 ```
 *(Notice that `kernel-default.sh` is not invoked.)*
 
-#### 11. Relaxed Dependency Update (`--relax`)
+#### 12. Relaxed Dependency Update (`--relax`)
 ```bash
 sudo /opt/scripts/dnf_check.sh --relax update -y
 ```
 **Behavior:**
 Appends `--skip-broken --nobest` to DNF arguments, allowing transactions to proceed when upstream packages have non-critical dependency conflicts or non-best architecture candidates.
 
-#### 12. Automated Reboot on Kernel Upgrades (`--auto-reboot`)
+#### 13. Automated Reboot on Kernel Upgrades (`--auto-reboot`)
 ```bash
 sudo /opt/scripts/dnf_check.sh --auto-reboot update -y
 ```
 **Behavior:**
-Executes the package update, synchronizes bootloader default kernel entries via `kernel-default.sh`, and if a new kernel version is deployed, logs an audit entry and automatically initiates a system reboot after a 5-second countdown.
+Executes the package update, synchronizes bootloader default kernel entries via `kernel-default.sh`, and if that transaction changes the default boot kernel (`default_kernel != pre_default_kernel`), logs an audit entry and initiates a system reboot after a 5-second countdown (pre-existing pending kernel reboots are skipped).
 
-#### 13. Multi-Option Maintenance Chaining
+#### 14. Multi-Option Maintenance Chaining
 ```bash
 sudo /opt/scripts/dnf_check.sh --verify-rpmdb --sqlite-check
 ```

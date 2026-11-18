@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Library:     /opt/scripts/lib/rhel_sys.sh
-# Version:     2.0.0  2026/11/06
+# Version:     2.0.0  2026/11/18
 # Standard:    DRY Architecture Framework (Enterprise Linux Domain Layer)
 # Author:      DevOps Systems Administration <criticalsys.mis@gmail.com>
 # Compatibility: Enterprise Linux 8, 9, 10 (RHEL, AlmaLinux, Rocky, CentOS)
@@ -27,14 +27,7 @@ if [[ -z "${_SYSTEM_SH_LOADED:-}" ]]; then
 fi
 
 # ------------------------------------------------------------------------------
-# 2. Operating System Validation
-# ------------------------------------------------------------------------------
-validate_rhel_os() {
-    validate_os "rhel"
-}
-
-# ------------------------------------------------------------------------------
-# 3. Package Manager Discovery & Metadata
+# 2. Package Manager Discovery & Metadata
 # ------------------------------------------------------------------------------
 # Auto-detects native package manager binary across Enterprise Linux families.
 # Priority: dnf (EL8/9/10, Fedora) -> yum (EL7/legacy) -> dnf
@@ -61,6 +54,27 @@ get_pkg_mgr_info() {
 # ------------------------------------------------------------------------------
 
 # ------------------------------------------------------------------------------
+# Function: _sqlite_precheck
+# Purpose:  Validates sqlite3 availability and database file existence.
+# Returns:
+#   0 - Ready to run SQLite operations.
+#   1 - Database file missing (skip gracefully).
+#   2 - sqlite3 CLI binary not installed.
+# ------------------------------------------------------------------------------
+_sqlite_precheck() {
+    local db="$1"
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        echo "[-] Error: 'sqlite3' CLI utility is not installed." >&2
+        return 2
+    fi
+    if [[ ! -f "${db}" ]]; then
+        echo "[-] Notice: Database [${db}] does not exist, skipping."
+        return 1
+    fi
+    return 0
+}
+
+# ------------------------------------------------------------------------------
 # Function: sqlite_integrity_check
 # Purpose:  Inspects SQLite databases for internal corruption and WAL state.
 # Arguments:
@@ -72,13 +86,12 @@ get_pkg_mgr_info() {
 # ------------------------------------------------------------------------------
 sqlite_integrity_check() {
     local db="$1"
-    if ! command -v sqlite3 >/dev/null 2>&1; then
-        echo "[-] Error: 'sqlite3' CLI utility is not installed." >&2
-        return 2
-    fi
-    if [[ ! -f "${db}" ]]; then
-        echo "[-] Notice: Database [${db}] does not exist, skipping."
+    local rc=0
+    _sqlite_precheck "${db}" || rc=$?
+    if [[ ${rc} -eq 1 ]]; then
         return 0
+    elif [[ ${rc} -ne 0 ]]; then
+        return ${rc}
     fi
 
     echo -n "    Checking integrity of [${db}]... "
@@ -109,13 +122,12 @@ sqlite_integrity_check() {
 # ------------------------------------------------------------------------------
 sqlite_vacuum_db() {
     local db="$1"
-    if ! command -v sqlite3 >/dev/null 2>&1; then
-        echo "[-] Error: 'sqlite3' CLI utility is not installed." >&2
-        return 2
-    fi
-    if [[ ! -f "${db}" ]]; then
-        echo "[-] Notice: Database [${db}] does not exist, skipping."
+    local rc=0
+    _sqlite_precheck "${db}" || rc=$?
+    if [[ ${rc} -eq 1 ]]; then
         return 0
+    elif [[ ${rc} -ne 0 ]]; then
+        return ${rc}
     fi
 
     echo -n "    Optimizing / vacuuming [${db}]... "
@@ -126,8 +138,7 @@ sqlite_vacuum_db() {
     fi
 
     local result
-    result="$(sqlite3 "${db}" 'PRAGMA vacuum;' 2>&1 || true)"
-    if [[ -z "${result}" ]]; then
+    if result="$(sqlite3 "${db}" 'VACUUM;' 2>&1)"; then
         echo "OK"
         return 0
     else
@@ -146,7 +157,7 @@ sqlite_vacuum_db() {
 # Arguments:
 #   $1 (Optional) - Minimum threshold in megabytes (default: 100).
 # Returns:
-#   0 if space >= threshold; 1 if space < threshold.
+#   0 if space >= threshold; 1 if space < threshold or capacity check fails.
 # ------------------------------------------------------------------------------
 check_boot_capacity() {
     local min_free_mb="${1:-100}"
@@ -154,12 +165,40 @@ check_boot_capacity() {
     [[ -d "${boot_path}" ]] || boot_path="/"
 
     local free_mb
-    free_mb="$(get_free_mb "${boot_path}")"
+    if ! free_mb="$(get_free_mb "${boot_path}")" || [[ ! "${free_mb}" =~ ^[0-9]+$ ]]; then
+        echo "[!] WARNING: Unable to determine free space on ${boot_path}." >&2
+        return 1
+    fi
 
-    if [[ "${free_mb}" =~ ^[0-9]+$ ]] && [[ ${free_mb} -lt ${min_free_mb} ]]; then
+    if [[ ${free_mb} -lt ${min_free_mb} ]]; then
         echo "[!] WARNING: ${boot_path} filesystem has only ${free_mb} MB free (minimum recommended: ${min_free_mb} MB)!" >&2
         echo "    Low storage on ${boot_path} may cause initramfs generation to fail during kernel transactions." >&2
         return 1
     fi
     return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: get_default_boot_kernel
+# Purpose:  Resolves the current default boot kernel version string.
+# ------------------------------------------------------------------------------
+get_default_boot_kernel() {
+    local default_kernel=""
+    local default_kernel_path=""
+
+    if command -v grubby > /dev/null 2>&1; then
+        default_kernel_path="$(grubby --default-kernel 2> /dev/null || true)"
+        if [[ "${default_kernel_path}" == /boot/vmlinuz-* ]]; then
+            default_kernel="${default_kernel_path#/boot/vmlinuz-}"
+        fi
+    fi
+
+    if [[ -z "${default_kernel}" ]]; then
+        default_kernel="$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' kernel-core 2> /dev/null | sort -V | tail -n 1 || true)"
+        if [[ -z "${default_kernel}" ]]; then
+            default_kernel="$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' kernel 2> /dev/null | sort -V | tail -n 1 || true)"
+        fi
+    fi
+
+    echo "${default_kernel}"
 }
