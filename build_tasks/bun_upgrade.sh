@@ -9,9 +9,11 @@
 #    Supports path expressions in drive:/path/sub format on Windows.
 #
 #  Syntax:
-#    bun_upgrade.sh [--detect] [--update] [--auto] [--clear-cache]
+#    bun_upgrade.sh [--detect] [--update] [--auto] [--package] [--clear-cache]
 #                   [--trust-all] [--list] [--update-modules] [--install] [--path <path>]
 #                   [--install-module <module>] [--remove-module <module>]
+#                   [--source <path>] [--target <path>] [--force] [--no-update-source]
+#                   [--dry-run] [--token <pat>] [--verbose]
 #
 #  Diagnostics Exit Codes:
 #    0 = Success
@@ -26,6 +28,21 @@
 
 set -u
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_LIB="${SCRIPT_DIR}/client_package_common.sh"
+if [ ! -f "${COMMON_LIB}" ]; then
+  echo "[ERROR] Missing required shared library: ${COMMON_LIB}" >&2
+  exit 3
+fi
+# shellcheck source=client_package_common.sh
+source "${COMMON_LIB}"
+
+TEMP_ROOT_CYG=$(detect_temp_root)
+TEMP_ROOT_PATH=$(enforce_drive_path "$TEMP_ROOT_CYG")
+EXEC_WORKSPACE=""
+CURRENT_BUILD_DIR=""
+CURRENT_TARGET_TMP=""
+
 # =============================================================================
 #  CONFIGURATION GLOBALS
 # =============================================================================
@@ -38,42 +55,13 @@ BUN_BASE_URL="https://github.com/${BUN_ORG}/${BUN_REPO}/releases/latest"
 BUN_DOWNLOAD_URL="${BUN_BASE_URL}/download"
 
 # =============================================================================
-#  LOGGING UTILITIES
-# =============================================================================
-
-# -----------------------------------------------------------------------------
-#  Function: log_info
-#  Description: Logs a standard informational message to stdout.
-#  Arguments:
-#    $1 - Message string to display.
-# -----------------------------------------------------------------------------
-function log_info() {
-  echo "[INFO] $1"
-}
-
-# -----------------------------------------------------------------------------
-#  Function: log_error
-#  Description: Logs an error message to stderr.
-#  Arguments:
-#    $1 - Error message string to display.
-# -----------------------------------------------------------------------------
-function log_error() {
-  echo "[ERROR] $1" >&2
-}
-
-# =============================================================================
 #  PLATFORM INITIALIZATION
 # =============================================================================
 
-# Cache Windows platform detection status
-IS_WINDOWS="false"
-command -v cygpath &> /dev/null && IS_WINDOWS="true"
-
 # Resolve POSIX equivalent of the user's home/profile directory
 USER_HOME=""
-if [ "${IS_WINDOWS}" = "true" ] && [ -n "${USERPROFILE:-}" ]; then
-  # Translate Windows user profile path (C:\Users\...) to Cygwin/MSYS POSIX path
-  USER_HOME=$(cygpath -u "${USERPROFILE}" 2> /dev/null)
+if is_windows_platform && [ -n "${USERPROFILE:-}" ]; then
+  USER_HOME=$(to_posix_path "${USERPROFILE}" 2> /dev/null || true)
 fi
 # Fallback to standard shell HOME directory if not resolved
 [ -z "${USER_HOME}" ] && USER_HOME="${HOME:-}"
@@ -127,44 +115,23 @@ function get_bun_home() {
 }
 
 # -----------------------------------------------------------------------------
-#  Function: get_temp_dir
-#  Description: Resolves a unique temporary directory path.
-#               Prioritizes TMPDIR, TMP, and TEMP environment variables.
-#  Outputs:
-#    Prints the resolved directory path to stdout.
-# -----------------------------------------------------------------------------
-function get_temp_dir() {
-  local base_temp=""
-
-  if [ -n "${TMPDIR:-}" ]; then
-    base_temp="${TMPDIR}"
-  elif [ -n "${TMP:-}" ]; then
-    base_temp="${TMP}"
-  elif [ -n "${TEMP:-}" ]; then
-    base_temp="${TEMP}"
-  fi
-
-  if [ -n "${base_temp}" ] && [ "${IS_WINDOWS}" = "true" ]; then
-    base_temp=$(cygpath -u "${base_temp}" 2> /dev/null)
-  fi
-
-  if [ -z "${base_temp}" ] || [ ! -d "${base_temp}" ] || [ ! -w "${base_temp}" ]; then
-    base_temp="/tmp"
-  fi
-  if [ ! -d "${base_temp}" ] || [ ! -w "${base_temp}" ]; then
-    base_temp=$(get_bun_home)
-  fi
-
-  echo "${base_temp}/bun_tmp_$$"
-}
-
-# -----------------------------------------------------------------------------
 #  Function: fetch_latest_version
 #  Description: Fetches the latest available Bun version tag from GitHub releases.
+#               Uses shared gh_resolve_release when jq is available, falling back
+#               to HTTP Location redirect parsing otherwise.
 #  Outputs:
-#    Prints the version number (e.g. 1.3.14) to stdout if successful.
+#    Prints the version number (e.g. 1.4.5) to stdout if successful.
 # -----------------------------------------------------------------------------
 function fetch_latest_version() {
+  if command -v jq > /dev/null 2>&1; then
+    local info ver
+    info=$(gh_resolve_release "${BUN_ORG}/${BUN_REPO}" "$BUN_REPO" "${BUN_REPO}-v" "${GITHUB_TOKEN:-}" 2> /dev/null || true)
+    if [ -n "$info" ]; then
+      IFS=$'\t' read -r ver _ <<< "$info"
+      printf '%s\n' "$ver"
+      return 0
+    fi
+  fi
   curl -sI "${BUN_BASE_URL}" 2> /dev/null | grep -i '^Location:' | sed -E "s/.*tag\/${BUN_REPO}-v//I" | tr -d '\r'
 }
 
@@ -179,6 +146,14 @@ function show_help() {
   echo "  --detect               Detect current Bun version and path."
   echo "  --update               Upgrade Bun (unzip on Windows, 'bun upgrade' on Linux)."
   echo "  --auto                 With --update, check version first and skip if up-to-date."
+  echo "  --package              Auto-detect latest GitHub release and package Linux/Windows x64 zips."
+  echo "  --source <path>        With --package, software library dir (default: n:/softlib/software/public/devel/nodejs)."
+  echo "  --target <path>        With --package, pending stage dir (default: f:/stage/upload/pending)."
+  echo "  --force                With --package, download and stage even if local version is current."
+  echo "  --no-update-source     With --package, stage to --target without modifying --source."
+  echo "  --dry-run              With --package, preview actions without modifying files on disk."
+  echo "  --token <pat>          With --package, GitHub token (or GITHUB_TOKEN / gh auth token)."
+  echo "  --verbose              With --package, print resolved asset URLs and diagnostics."
   echo "  --clear-cache          Clear Bun PM cache (bun pm cache rm)."
   echo "  --trust-all            Trust all global package binaries."
   echo "  --list                 List global npm packages."
@@ -197,6 +172,7 @@ function show_help() {
 DO_DETECT="false"
 DO_UPDATE="false"
 DO_AUTO="false"
+DO_PACKAGE="false"
 DO_CLEAR_CACHE="false"
 DO_TRUST_ALL="false"
 DO_LIST="false"
@@ -207,12 +183,39 @@ INSTALL_MODULE_PKG=""
 DO_REMOVE_MODULE="false"
 REMOVE_MODULE_PKG=""
 INSTALL_PATH=""
+PKG_SOURCE_PATH=""
+PKG_TARGET_PATH=""
+PKG_TOKEN="${GITHUB_TOKEN:-}"
+FORCE_REPACKAGE="false"
+UPDATE_SOURCE="true"
+DRY_RUN="false"
+VERBOSE="false"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --detect) DO_DETECT="true" && shift ;;
     --update) DO_UPDATE="true" && shift ;;
     --auto) DO_AUTO="true" && shift ;;
+    --package) DO_PACKAGE="true" && shift ;;
+    --source)
+      [ -z "${2:-}" ] || [[ "$2" == -* ]] && log_error "--source requires an argument." && exit 2
+      PKG_SOURCE_PATH="$2"
+      shift 2
+      ;;
+    --target)
+      [ -z "${2:-}" ] || [[ "$2" == -* ]] && log_error "--target requires an argument." && exit 2
+      PKG_TARGET_PATH="$2"
+      shift 2
+      ;;
+    --token)
+      [ -z "${2:-}" ] || [[ "$2" == -* ]] && log_error "--token requires an argument." && exit 2
+      PKG_TOKEN="$2"
+      shift 2
+      ;;
+    --force) FORCE_REPACKAGE="true" && shift ;;
+    --no-update-source) UPDATE_SOURCE="false" && shift ;;
+    --dry-run) DRY_RUN="true" && shift ;;
+    --verbose) VERBOSE="true" && shift ;;
     --clear-cache) DO_CLEAR_CACHE="true" && shift ;;
     --trust-all) DO_TRUST_ALL="true" && shift ;;
     --list) DO_LIST="true" && shift ;;
@@ -246,10 +249,10 @@ done
 
 # Require at least one action flag
 if [ "${DO_DETECT}" = "false" ] && [ "${DO_UPDATE}" = "false" ] &&
-  [ "${DO_CLEAR_CACHE}" = "false" ] && [ "${DO_TRUST_ALL}" = "false" ] &&
-  [ "${DO_LIST}" = "false" ] && [ "${DO_UPDATE_MODULES}" = "false" ] &&
-  [ "${DO_INSTALL}" = "false" ] && [ "${DO_INSTALL_MODULE}" = "false" ] &&
-  [ "${DO_REMOVE_MODULE}" = "false" ]; then
+  [ "${DO_PACKAGE}" = "false" ] && [ "${DO_CLEAR_CACHE}" = "false" ] &&
+  [ "${DO_TRUST_ALL}" = "false" ] && [ "${DO_LIST}" = "false" ] &&
+  [ "${DO_UPDATE_MODULES}" = "false" ] && [ "${DO_INSTALL}" = "false" ] &&
+  [ "${DO_INSTALL_MODULE}" = "false" ] && [ "${DO_REMOVE_MODULE}" = "false" ]; then
   show_help
   exit 0
 fi
@@ -281,8 +284,7 @@ if [ "${DO_DETECT}" = "true" ]; then
     bun_version=$("${bun_path}" --version 2> /dev/null | tr -d '\r')
     [ -z "${bun_version}" ] && bun_version=$("${bun_path}" -v 2> /dev/null | tr -d '\r')
 
-    mixed_path="${bun_path}"
-    [ "${IS_WINDOWS}" = "true" ] && mixed_path=$(cygpath -m "${bun_path}" 2> /dev/null)
+    mixed_path=$(enforce_drive_path "${bun_path}")
 
     in_path="NO"
     command -v "${BUN_REPO}" &> /dev/null && in_path="YES"
@@ -334,7 +336,7 @@ if [ "${DO_INSTALL}" = "true" ] || [ "${DO_UPDATE}" = "true" ]; then
   # Determine target release archive name and platform specifics
   zip_name=""
   exe_name=""
-  if [ "${IS_WINDOWS}" = "true" ]; then
+  if is_windows_platform; then
     if ! command -v taskkill.exe &> /dev/null; then
       log_error "Windows prerequisite 'taskkill.exe' is not in PATH."
       exit 3
@@ -348,8 +350,7 @@ if [ "${DO_INSTALL}" = "true" ] || [ "${DO_UPDATE}" = "true" ]; then
 
   # Resolve paths and setup directory structure
   bun_home=$(get_bun_home)
-  mixed_home="${bun_home}"
-  [ "${IS_WINDOWS}" = "true" ] && mixed_home=$(cygpath -m "${bun_home}" 2> /dev/null)
+  mixed_home=$(enforce_drive_path "${bun_home}")
 
   log_info "Target Directory: ${mixed_home}"
   mkdir -p "${bun_home}"
@@ -365,7 +366,7 @@ if [ "${DO_INSTALL}" = "true" ] || [ "${DO_UPDATE}" = "true" ]; then
 
   # Terminate processes to unlock files
   log_info "Terminating active bun processes..."
-  if [ "${IS_WINDOWS}" = "true" ]; then
+  if is_windows_platform; then
     taskkill.exe /F /IM "${exe_name}" 2> /dev/null || true
   else
     pkill "${exe_name}" 2> /dev/null || killall "${exe_name}" 2> /dev/null || true
@@ -408,7 +409,7 @@ if [ "${DO_CLEAR_CACHE}" = "true" ] || [ "${DO_TRUST_ALL}" = "true" ] || [ "${DO
   # Fallback to local path if not found in current shell session's PATH
   if [ -z "${bun_bin}" ]; then
     bun_home=$(get_bun_home)
-    if [ "${IS_WINDOWS}" = "true" ] && [ -f "${bun_home}/${BUN_REPO}.exe" ]; then
+    if is_windows_platform && [ -f "${bun_home}/${BUN_REPO}.exe" ]; then
       bun_bin="${bun_home}/${BUN_REPO}.exe"
     elif [ -f "${bun_home}/${BUN_REPO}" ]; then
       bun_bin="${bun_home}/${BUN_REPO}"
@@ -440,10 +441,10 @@ if [ "${DO_CLEAR_CACHE}" = "true" ] || [ "${DO_TRUST_ALL}" = "true" ] || [ "${DO
   fi
 
   # Workaround: Bun client operations throw an error if no package.json is present in the CWD.
-  # We execute all client operations inside a temporary workspace with a dummy package.json.
+  # We execute all client operations inside an isolated temporary workspace with a dummy package.json.
+  temp_dir=$(create_temp_workdir "bun_tmp_" "$(get_bun_home)") || exit 5
+  EXEC_WORKSPACE="$temp_dir"
   (
-    temp_dir=$(get_temp_dir)
-    mkdir -p "${temp_dir}"
     cd "${temp_dir}" || exit 5
     echo '{"name": "temp-client-ops"}' > package.json
 
@@ -491,8 +492,135 @@ if [ "${DO_CLEAR_CACHE}" = "true" ] || [ "${DO_TRUST_ALL}" = "true" ] || [ "${DO
     fi
 
     cd - &> /dev/null || true
-    rm -rf "${temp_dir}"
   ) || exit 7
+  cleanup_exec_workspace
+fi
+
+# -----------------------------------------------------------------------------
+#  Pipeline 4: PACKAGE MODE (--package)
+# -----------------------------------------------------------------------------
+if [ "${DO_PACKAGE}" = "true" ]; then
+  set -Eeo pipefail
+  enable_err_trap
+
+  SOURCE_PATH="${PKG_SOURCE_PATH:-$(resolve_default_path "n" "softlib/software/public/devel/nodejs")}"
+  TARGET_PATH="${PKG_TARGET_PATH:-$(resolve_default_path "f" "stage/upload/pending")}"
+  SOURCE_PATH=$(enforce_drive_path "$SOURCE_PATH")
+  SOURCE_CYG=$(to_cygpath "$SOURCE_PATH")
+  TARGET_PATH=$(enforce_drive_path "$TARGET_PATH")
+  TARGET_CYG=$(to_cygpath "$TARGET_PATH")
+  GITHUB_TOKEN="${PKG_TOKEN:-}"
+
+  verify_required_tools curl unzip jq
+
+  print_action_banner "Bun Binary Packaging Utility" \
+    "Platform" "$PLATFORM" \
+    "Repository" "${BUN_ORG}/${BUN_REPO}" \
+    "Source Library" "$SOURCE_PATH" \
+    "Target Pending" "$TARGET_PATH" \
+    "Dry Run" "$DRY_RUN" \
+    "Force Repack" "$FORCE_REPACKAGE" \
+    "Update Source" "$UPDATE_SOURCE" \
+    "Temp Root Dir" "$TEMP_ROOT_PATH"
+
+  rel_info=""
+  if ! rel_info=$(gh_resolve_release "${BUN_ORG}/${BUN_REPO}" "$BUN_REPO" "${BUN_REPO}-v" "$GITHUB_TOKEN"); then
+    log_error "Failed to query latest Bun release from GitHub."
+    exit 4
+  fi
+
+  rver=""
+  rtag=""
+  rel_json=""
+  IFS=$'\t' read -r rver rtag rel_json <<< "$rel_info"
+  log_info "Remote latest version: ${rver} (tag: ${rtag})"
+
+  lnx_row=$(gh_find_asset "$rel_json" "^bun-linux-x64[.]zip$" "musl|baseline|profile|android|aarch64|arm")
+  win_row=$(gh_find_asset "$rel_json" "^bun-windows-x64[.]zip$" "baseline|profile|aarch64|arm")
+
+  lnx_name="" lnx_url="" lnx_digest=""
+  win_name="" win_url="" win_digest=""
+  if [ -n "$lnx_row" ]; then
+    IFS=$'\t' read -r lnx_name lnx_url lnx_digest <<< "$lnx_row"
+  fi
+  if [ -n "$win_row" ]; then
+    IFS=$'\t' read -r win_name win_url win_digest <<< "$win_row"
+  fi
+
+  if [ -z "$lnx_url" ] || [ -z "$win_url" ]; then
+    log_error "Missing required x64 release assets (linux='${lnx_name:-MISSING}', windows='${win_name:-MISSING}')"
+    exit 4
+  fi
+
+  if [ "$VERBOSE" = true ]; then
+    log_info "  Linux x64 asset  : $lnx_name ($lnx_url)"
+    log_info "  Windows x64 asset: $win_name ($win_url)"
+  fi
+
+  init_exec_workspace "bun_pkg_" "$SOURCE_CYG" "$TARGET_CYG" "$DRY_RUN" "$UPDATE_SOURCE"
+
+  TOTAL_COUNT=0
+  UPDATED_COUNT=0
+  SKIPPED_COUNT=0
+  ERROR_COUNT=0
+
+  dest_src_dir=""
+  if [ "$UPDATE_SOURCE" = true ]; then
+    dest_src_dir="$SOURCE_CYG"
+  fi
+
+  for plat_spec in \
+    "Linux x64|linux-x64|${lnx_name}|${lnx_url}|${lnx_digest}|bun-linux-x64/bun" \
+    "Windows x64|windows-x64|${win_name}|${win_url}|${win_digest}|bun-windows-x64/bun.exe"; do
+    IFS='|' read -r p_label p_suffix a_name a_url a_digest expected_entry <<< "$plat_spec"
+    TOTAL_COUNT=$((TOTAL_COUNT + 1))
+
+    lver="" lfile=""
+    read -r lver lfile < <(find_local_version "$SOURCE_CYG" "$BUN_REPO" "$p_suffix" "zip")
+    log_info "Local ${p_label} version  : ${lver} (${lfile:-none})"
+
+    pkg_name="${BUN_REPO}-${rver}-${p_suffix}.zip"
+    if [ "$FORCE_REPACKAGE" != true ] && ! is_version_newer "$rver" "$lver"; then
+      log_info "${p_label} package is already up to date (${lver} >= ${rver})."
+      SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+      continue
+    fi
+
+    if [ "$DRY_RUN" = true ]; then
+      log_ok "[DRY-RUN] Would download: $a_name -> $pkg_name"
+      atomic_stage_package "" "$pkg_name" "$BUN_REPO" "$p_suffix" "$dest_src_dir" "$TARGET_CYG" true
+      UPDATED_COUNT=$((UPDATED_COUNT + 1))
+      continue
+    fi
+
+    CURRENT_BUILD_DIR=$(mktemp -d "${EXEC_WORKSPACE}/${BUN_REPO}_${p_suffix}_XXXXXX")
+    pkg_file="${CURRENT_BUILD_DIR}/${pkg_name}"
+
+    if ! gh_download_verified_asset "$rel_json" "$p_label" "$a_name" "$a_url" "$a_digest" "$pkg_file" "$CURRENT_BUILD_DIR"; then
+      cleanup_current_build_dir
+      ERROR_COUNT=$((ERROR_COUNT + 1))
+      continue
+    fi
+
+    if ! verify_zip_integrity "$pkg_file" || ! verify_zip_has_entry "$pkg_file" "$expected_entry"; then
+      log_error "Downloaded ${p_label} zip failed validation (corrupt or missing '${expected_entry}'): $a_name"
+      cleanup_current_build_dir
+      ERROR_COUNT=$((ERROR_COUNT + 1))
+      continue
+    fi
+
+    if atomic_stage_package "$pkg_file" "$pkg_name" "$BUN_REPO" "$p_suffix" "$dest_src_dir" "$TARGET_CYG" false; then
+      UPDATED_COUNT=$((UPDATED_COUNT + 1))
+      log_ok "Packaged and staged: ${pkg_name}"
+    else
+      ERROR_COUNT=$((ERROR_COUNT + 1))
+    fi
+    cleanup_current_build_dir
+  done
+
+  cleanup_exec_workspace
+  print_packaging_summary "Bun Packaging Summary" "$TOTAL_COUNT" "$UPDATED_COUNT" "$SKIPPED_COUNT" "$ERROR_COUNT"
+  [ "$ERROR_COUNT" -eq 0 ] || exit 4
 fi
 
 log_info "Done."

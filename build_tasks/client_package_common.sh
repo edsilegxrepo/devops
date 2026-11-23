@@ -330,7 +330,13 @@ report_unexpected_err() {
     log_error "Unexpected failure (exit=${err_rc}) in $(basename "$err_src"):${err_line}: ${err_cmd}"
 }
 
-trap 'report_unexpected_err "${BASH_SOURCE[0]}" "${LINENO}" "${BASH_COMMAND}"' ERR
+enable_err_trap() {
+    trap 'report_unexpected_err "${BASH_SOURCE[0]}" "${LINENO}" "${BASH_COMMAND}"' ERR
+}
+
+if [[ $- == *e* ]]; then
+    enable_err_trap
+fi
 trap cleanup_workspace EXIT INT TERM HUP
 
 # ------------------------------------------------------------------------------
@@ -773,6 +779,14 @@ verify_zip_integrity() {
     unzip -tq "$zip_path" > /dev/null 2>&1
 }
 
+# verify_zip_has_entry <zip_path> <exact_entry_path>
+# Returns 0 if zip_path contains exact_entry_path (case-sensitive).
+verify_zip_has_entry() {
+    local zip_path="$1" entry="$2"
+    [[ -f "$zip_path" && -n "$entry" ]] || return 1
+    grep -qxF "$entry" <<< "$(unzip -Z1 "$zip_path" 2> /dev/null || true)"
+}
+
 # verify_tar_xz_integrity <tar_xz_path>
 verify_tar_xz_integrity() {
     local tar_xz_path="$1"
@@ -888,6 +902,33 @@ init_log_file() {
     exec > >(tee -a "$log_cyg") 2>&1
 }
 
+# create_temp_workdir [prefix] [fallback_dir]
+# Resolves temp root via detect_temp_root ($TEMP -> $TMPDIR -> $TMP -> /tmp),
+# prunes stale workdirs (>1 day) matching <prefix>*, creates a unique temp directory
+# via mktemp -d, and prints its POSIX path to stdout.
+create_temp_workdir() {
+    local prefix="${1:-work_}" fallback_dir="${2:-}"
+    local base_temp="${TEMP_ROOT_CYG:-}"
+    if [[ -z "$base_temp" || ! -d "$base_temp" || ! -w "$base_temp" ]]; then
+        base_temp=$(detect_temp_root)
+    fi
+    mkdir -p "$base_temp" 2> /dev/null || true
+
+    if [[ ! -d "$base_temp" || ! -w "$base_temp" ]] && [[ -n "$fallback_dir" ]]; then
+        base_temp=$(to_posix_path "$fallback_dir")
+        mkdir -p "$base_temp" 2> /dev/null || true
+    fi
+
+    if [[ -d "$base_temp" && "$base_temp" != "/" && ! "$base_temp" =~ ^(/cygdrive/|/mnt/|/)[a-zA-Z]$ ]]; then
+        find "$base_temp" -maxdepth 1 -type d -name "${prefix}*" -mtime +1 -exec rm -rf {} + 2> /dev/null || true
+    fi
+
+    local workdir
+    workdir=$(mktemp -d "${base_temp}/${prefix}XXXXXX") || return 1
+    [[ -n "$workdir" && -d "$workdir" ]] || return 1
+    printf '%s' "$workdir"
+}
+
 # init_exec_workspace <prefix> <source_cyg> <target_cyg> <dry_run> [update_source]
 # Creates target/source/temp directories when not in dry-run mode, prunes stale
 # workspaces older than 1 day, and populates EXEC_WORKSPACE.
@@ -904,15 +945,10 @@ init_exec_workspace() {
     if [[ "$update_source" == true && -n "$source_cyg" ]]; then
         mkdir -p "$source_cyg"
     fi
-    mkdir -p "$TEMP_ROOT_CYG"
 
-    if [[ -d "$TEMP_ROOT_CYG" && "$TEMP_ROOT_CYG" != "/" && ! "$TEMP_ROOT_CYG" =~ ^(/cygdrive/|/mnt/|/)[a-zA-Z]$ ]]; then
-        find "$TEMP_ROOT_CYG" -maxdepth 1 -type d -name "${prefix}*" -mtime +1 -exec rm -rf {} + 2> /dev/null || true
-    fi
-
-    EXEC_WORKSPACE=$(mktemp -d "${TEMP_ROOT_CYG}/${prefix}XXXXXX")
+    EXEC_WORKSPACE=$(create_temp_workdir "$prefix") || true
     if [[ -z "$EXEC_WORKSPACE" || ! -d "$EXEC_WORKSPACE" ]]; then
-        log_error "Failed to create temporary workspace in $TEMP_ROOT_PATH"
+        log_error "Failed to create temporary workspace in ${TEMP_ROOT_PATH:-${TEMP_ROOT_CYG:-/tmp}}"
         exit 1
     fi
     log_info "Execution workspace initialized: $(enforce_drive_path "$EXEC_WORKSPACE")"
@@ -1309,11 +1345,20 @@ gh_fetch_releases_json() {
     fi
 
     local url="https://api.github.com/repos/${repo}/releases?per_page=${per_page}"
+    if [[ -z "$token" ]] && command -v gh > /dev/null 2>&1; then
+        token=$(gh auth token 2> /dev/null || true)
+        GITHUB_TOKEN="$token"
+    fi
     local auth_header=()
     [[ -n "$token" ]] && auth_header=(-H "Authorization: Bearer ${token}")
 
+    local tmp_base="${EXEC_WORKSPACE:-${TEMP_ROOT_CYG:-}}"
+    if [[ -z "$tmp_base" || ! -d "$tmp_base" ]]; then
+        tmp_base=$(detect_temp_root)
+    fi
+
     local response err_file rc=0
-    err_file=$(mktemp "${EXEC_WORKSPACE:-${TEMP_ROOT_CYG}}/gh_api_err.XXXXXX")
+    err_file=$(mktemp "${tmp_base}/gh_api_err.XXXXXX")
     _CURRENT_TMP_FILE="$err_file"
     response=$(curl -fsSL --connect-timeout 10 --max-time 30 --retry 3 --retry-delay 2 \
         "${auth_header[@]}" \

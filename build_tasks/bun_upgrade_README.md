@@ -54,6 +54,14 @@ Cygwin and MSYS2 translate Windows drives to POSIX paths differently (e.g. `/cyg
 | `--detect` | None | Detects active Bun binary, version, and location. |
 | `--update` | None | Triggers Bun upgrade. Uses ZIP downloads and local extraction on both Windows and Linux. |
 | `--auto` | None | With `--update`, checks version first and skips if local version is already up-to-date. |
+| `--package` | None | Queries latest `oven-sh/bun` release vs `--source`, verifies SHA-256 checksums, and stages `bun-<ver>-linux-x64.zip` and `bun-<ver>-windows-x64.zip` via [`client_package_common.sh`](client_package_common.sh). |
+| `--source` | `<path>` | Software library root for `--package` (default: `n:/softlib/software/public/devel/nodejs`). |
+| `--target` | `<path>` | Pending upload stage dir for `--package` (default: `f:/stage/upload/pending`). |
+| `--force` | None | Forces download and staging in `--package` mode even when the local version is current. |
+| `--no-update-source` | None | In `--package` mode, stages archives to `--target` without modifying or purging `--source`. |
+| `--dry-run` | None | Previews `--package` release checks and atomic staging without modifying files on disk. |
+| `--token` | `<pat>` | GitHub Personal Access Token for `--package` API requests (defaults to `GITHUB_TOKEN` / `gh auth token`). |
+| `--verbose` | None | Prints resolved upstream asset URLs during `--package`. |
 | `--clear-cache` | None | Runs `bun pm cache rm` to flush package manager dependencies. |
 | `--trust-all` | None | Runs `bun pm trust -g --all` to trust global npm binary scripts. |
 | `--list` | None | Runs `bun pm ls -g` to list globally installed npm packages. |
@@ -125,4 +133,11 @@ Install a global utility or framework (e.g. `pm2`) directly using the Bun packag
 Uninstall a globally installed package:
 ```bash
 ./bun_upgrade.sh --remove-module pm2
+```
+
+### 7. Synchronize & Package Release Archives (`--package`)
+Check whether `n:/softlib/software/public/devel/nodejs` has the latest Windows and Linux x64 Bun archives from `oven-sh/bun`, or preview with `--dry-run`:
+```bash
+./bun_upgrade.sh --package --dry-run
+./bun_upgrade.sh --package
 ```
