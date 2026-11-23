@@ -409,6 +409,22 @@ normalize_to_mixed_path() {
   fi
 }
 
+# Function: normalize_to_posix_path
+# Objective: Converts any Windows/mixed path to native POSIX mount path using
+#            cygpath -u when running on a Windows host shell.
+# Arguments:
+#   $1 - Path to normalize
+# Outputs: Prints POSIX path to stdout.
+normalize_to_posix_path() {
+  local raw="${1:-}"
+  [ -z "${raw}" ] && return 0
+  if [ "${HOST_OS:-}" = "WIN" ] && command -v cygpath &> /dev/null; then
+    cygpath -u "${raw}" 2> /dev/null || echo "${raw}"
+  else
+    echo "${raw}"
+  fi
+}
+
 # Function: mixed_to_wsl_path
 # Objective: Transforms a mixed path (drive:/path/sub) into standard WSL mount path (/mnt/drive/path/sub).
 # Arguments:

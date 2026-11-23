@@ -48,6 +48,16 @@ export PATH="/usr/bin:/bin:${PATH}"
 DEFAULT_STAGING_DIR="f:/stage/upload/staging"
 DEFAULT_VERSION=""
 
+LOG_INFO_TO_STDERR=1
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_LIB="${SCRIPT_DIR}/client_package_common.sh"
+if [ ! -f "${COMMON_LIB}" ]; then
+  echo "[ERROR] Shared library not found: ${COMMON_LIB}" >&2
+  exit 3
+fi
+# shellcheck source=client_package_common.sh
+source "${COMMON_LIB}"
+
 STAGING_DIR="${DEFAULT_STAGING_DIR}"
 DISTRIB_DIR=""
 VERSION_TAG="${DEFAULT_VERSION}"
@@ -58,68 +68,14 @@ REMOVE_SOURCE=false
 DRY_RUN=false
 VERBOSE=false
 
+EXEC_WORKSPACE=""
 TEMP_WORKSPACE=""
 
-# ==============================================================================
-#  Path Normalization Utilities
-# ==============================================================================
-
-to_posix_path() {
-  local p="${1:-}"
-  [ -z "${p}" ] && echo "" && return 0
-  local clean_p="${p//\\//}"
-  if command -v cygpath &> /dev/null; then
-    cygpath -u "${clean_p}" 2> /dev/null || echo "${clean_p}"
-  else
-    echo "${clean_p}"
+_ensure_temp_workspace() {
+  if [ -z "${EXEC_WORKSPACE}" ] || [ ! -d "${EXEC_WORKSPACE}" ]; then
+    EXEC_WORKSPACE=$(create_temp_workdir "pyalign_")
   fi
-}
-
-to_win_path() {
-  local p="${1:-}"
-  [ -z "${p}" ] && echo "" && return 0
-  local clean_p="${p//\\//}"
-  if command -v cygpath &> /dev/null; then
-    cygpath -m "${clean_p}" 2> /dev/null || echo "${clean_p}"
-  else
-    echo "${clean_p}"
-  fi
-}
-
-# ==============================================================================
-#  Logging Helpers
-# ==============================================================================
-
-log_info()  { echo "[INFO]  $*" >&2; }
-log_warn()  { echo "[WARN]  $*" >&2; }
-log_error() { echo "[ERROR] $*" >&2; }
-log_step()  { echo -e "\n=== $* ===" >&2; }
-
-# ==============================================================================
-#  Workspace Lifecycle Management
-# ==============================================================================
-
-# shellcheck disable=SC2329
-cleanup_workspace() {
-  if [ -n "${TEMP_WORKSPACE}" ] && [ -d "${TEMP_WORKSPACE}" ]; then
-    if [ "${VERBOSE}" = true ]; then
-      log_info "Cleaning up temporary workspace: ${TEMP_WORKSPACE}"
-    fi
-    rm -rf "${TEMP_WORKSPACE}"
-  fi
-}
-
-trap cleanup_workspace EXIT INT TERM
-
-create_temp_workspace() {
-  local base_tmp="${TMPDIR:-${TMP:-${TEMP:-/tmp}}}"
-  local posix_base
-  posix_base=$(to_posix_path "${base_tmp}")
-  mkdir -p "${posix_base}"
-  local ts
-  ts=$(date +%Y%m%d%H%M%S)
-  TEMP_WORKSPACE="${posix_base}/pyalign-${ts}-$BASHPID"
-  mkdir -p "${TEMP_WORKSPACE}"
+  TEMP_WORKSPACE="${EXEC_WORKSPACE}"
 }
 
 # ==============================================================================
@@ -226,20 +182,14 @@ POSIX_STAGING=$(to_posix_path "${STAGING_DIR}")
 POSIX_DISTRIB=$(to_posix_path "${DISTRIB_DIR}")
 
 if [ ! -d "${POSIX_STAGING}" ]; then
-  log_error "Staging directory not found: $(to_win_path "${STAGING_DIR}")"
+  log_error "Staging directory not found: $(enforce_drive_path "${STAGING_DIR}")"
   exit 2
 fi
 
 mkdir -p "${POSIX_DISTRIB}"
 
 # Required toolchain binaries
-REQUIRED_BINS=("unzip" "zip" "find" "sha256sum" "sed" "grep" "sort" "wc" "awk")
-for b in "${REQUIRED_BINS[@]}"; do
-  if ! command -v "${b}" &> /dev/null; then
-    log_error "Required system utility '${b}' is missing from PATH."
-    exit 3
-  fi
-done
+verify_required_tools --exit-code 3 unzip zip find sha256sum sed grep sort wc awk
 
 # Version resolution & auto-detection
 if [ -z "${VERSION_TAG}" ]; then
@@ -272,7 +222,7 @@ DST_FREE_BIN_PATH="${POSIX_DISTRIB}/${DST_FREE_BIN_NAME}"
 DST_DEVEL_PATH="${POSIX_DISTRIB}/${DST_DEVEL_NAME}"
 
 if [ ! -f "${SRC_STD_ZIP_PATH}" ]; then
-  log_error "Source distribution archive not found: $(to_win_path "${SRC_STD_ZIP_PATH}")"
+  log_error "Source distribution archive not found: $(enforce_drive_path "${SRC_STD_ZIP_PATH}")"
   exit 2
 fi
 
@@ -325,14 +275,14 @@ SEPARATE_FILES=(
 
 perform_rule_inspection() {
   log_step "Inspection & Segregation Rules Audit"
-  log_info "Staging Directory     : $(to_win_path "${STAGING_DIR}")"
-  log_info "Distribution Directory: $(to_win_path "${DISTRIB_DIR}")"
-  log_info "Source Archive        : $(to_win_path "${SRC_STD_ZIP_PATH}")"
+  log_info "Staging Directory     : $(enforce_drive_path "${STAGING_DIR}")"
+  log_info "Distribution Directory: $(enforce_drive_path "${DISTRIB_DIR}")"
+  log_info "Source Archive        : $(enforce_drive_path "${SRC_STD_ZIP_PATH}")"
   if [ "${HAS_FREE_ARCHIVE}" = true ]; then
-    log_info "Freethreaded Archive  : $(to_win_path "${SRC_FREE_ZIP_PATH}")"
+    log_info "Freethreaded Archive  : $(enforce_drive_path "${SRC_FREE_ZIP_PATH}")"
   fi
 
-  create_temp_workspace
+  _ensure_temp_workspace
   local comp_dir="${TEMP_WORKSPACE}/diff_audit"
   mkdir -p "${comp_dir}"
 
@@ -401,7 +351,7 @@ perform_rule_inspection
 
 log_step "Executing Distribution Alignment & Devel Archive Assembly"
 
-create_temp_workspace
+_ensure_temp_workspace
 WS_STD="${TEMP_WORKSPACE}/extract_std"
 WS_FREE="${TEMP_WORKSPACE}/extract_free"
 WS_DEVEL="${TEMP_WORKSPACE}/devel_payload"
@@ -554,15 +504,15 @@ log_info "Assembling development distribution archive: ${DST_DEVEL_NAME} (${DEVE
 
 # 10. Test Archive Integrity
 log_info "Verifying archive integrity..."
-unzip -tq "${NEW_STD_BIN_ZIP}"
+verify_zip_integrity "${NEW_STD_BIN_ZIP}"
 if [ -n "${NEW_FREE_BIN_ZIP}" ] && [ -f "${NEW_FREE_BIN_ZIP}" ]; then
-  unzip -tq "${NEW_FREE_BIN_ZIP}"
+  verify_zip_integrity "${NEW_FREE_BIN_ZIP}"
 fi
-unzip -tq "${NEW_DEVEL_ZIP}"
+verify_zip_integrity "${NEW_DEVEL_ZIP}"
 log_info "All generated archives passed integrity verification tests."
 
 # 11. Promote Repackaged Archives to Distribution Directory
-log_info "Promoting generated archives to distribution destination: $(to_win_path "${DISTRIB_DIR}")..."
+log_info "Promoting generated archives to distribution destination: $(enforce_drive_path "${DISTRIB_DIR}")..."
 
 ORIG_STD_SIZE=$(stat -c%s "${SRC_STD_ZIP_PATH}" 2>/dev/null || echo 0)
 ORIG_FREE_SIZE=0
@@ -570,20 +520,11 @@ if [ "${HAS_FREE_ARCHIVE}" = true ]; then
   ORIG_FREE_SIZE=$(stat -c%s "${SRC_FREE_ZIP_PATH}" 2>/dev/null || echo 0)
 fi
 
-promote_archive() {
-  local src="$1"
-  local dst="$2"
-  [ -f "${dst}" ] && rm -f "${dst}" 2>/dev/null || true
-  if ! cp -f "${src}" "${dst}" 2>/dev/null; then
-    cat "${src}" > "${dst}"
-  fi
-}
-
-promote_archive "${NEW_STD_BIN_ZIP}" "${DST_STD_BIN_PATH}"
+atomic_publish_file "${NEW_STD_BIN_ZIP}" "${DST_STD_BIN_PATH}" "runtime" true
 if [ -n "${NEW_FREE_BIN_ZIP}" ] && [ -f "${NEW_FREE_BIN_ZIP}" ]; then
-  promote_archive "${NEW_FREE_BIN_ZIP}" "${DST_FREE_BIN_PATH}"
+  atomic_publish_file "${NEW_FREE_BIN_ZIP}" "${DST_FREE_BIN_PATH}" "freethreaded" true
 fi
-promote_archive "${NEW_DEVEL_ZIP}" "${DST_DEVEL_PATH}"
+atomic_publish_file "${NEW_DEVEL_ZIP}" "${DST_DEVEL_PATH}" "devel" true
 
 NEW_STD_SIZE=$(stat -c%s "${DST_STD_BIN_PATH}")
 NEW_FREE_SIZE=0
@@ -594,15 +535,12 @@ NEW_DEVEL_SIZE=$(stat -c%s "${DST_DEVEL_PATH}")
 
 # 12. Generate SHA256 Checksums
 log_info "Calculating SHA256 checksums..."
-(
-  cd "${POSIX_DISTRIB}" || exit 1
-  SUM_TARGETS=("${DST_STD_BIN_NAME}")
-  if [ "${HAS_FREE_ARCHIVE}" = true ]; then
-    SUM_TARGETS+=("${DST_FREE_BIN_NAME}")
-  fi
-  SUM_TARGETS+=("${DST_DEVEL_NAME}")
-  sha256sum "${SUM_TARGETS[@]}" > SHA256SUMS
-)
+SUM_TARGETS=("${DST_STD_BIN_PATH}")
+if [ "${HAS_FREE_ARCHIVE}" = true ]; then
+  SUM_TARGETS+=("${DST_FREE_BIN_PATH}")
+fi
+SUM_TARGETS+=("${DST_DEVEL_PATH}")
+write_sha256_manifest "${POSIX_DISTRIB}/SHA256SUMS" "${SUM_TARGETS[@]}"
 
 # 13. Remove Source Archives (if --remove specified)
 if [ "${REMOVE_SOURCE}" = true ]; then

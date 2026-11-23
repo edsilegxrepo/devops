@@ -6,20 +6,33 @@
 # .NET release metadata for specified channels (--version) or discovered local
 # archives >= 8 (--auto). Downloads and verifies updated Windows installers via
 # SHA-512 when missing or outdated, rebuilds the flat ZIP archive
-# transactionally, updates the archive repository, and stages the package for
-# upload.
+# transactionally, stages the bundle for upload, and updates the archive library.
 # ==============================================================================
 
-set -euo pipefail
+set -Eeuo pipefail
+
+# Route informational telemetry to stderr so stdout carries only summary output.
+LOG_INFO_TO_STDERR=1
+VERBOSE=0
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_LIB="${SCRIPT_DIR}/client_package_common.sh"
+if [[ ! -f "${COMMON_LIB}" ]]; then
+    printf '[ERROR] Shared library not found: %s\n' "${COMMON_LIB}" >&2
+    exit 1
+fi
+# shellcheck source=client_package_common.sh
+source "${COMMON_LIB}"
 
 # ------------------------------------------------------------------------------
 # Defaults & Constants
 # ------------------------------------------------------------------------------
 readonly SCRIPT_NAME="dotnet_packaging.sh"
-readonly DEFAULT_ARCHIVE_WIN="n:/softlib/software/public/devel/dotnet"
-readonly DEFAULT_STAGING_WIN="f:/stage/upload/pending"
+DEFAULT_ARCHIVE_WIN="$(resolve_default_path "n" "softlib/software/public/devel/dotnet")"
+DEFAULT_STAGING_WIN="$(resolve_default_path "f" "stage/upload/pending")"
+readonly DEFAULT_ARCHIVE_WIN
+readonly DEFAULT_STAGING_WIN
 readonly METADATA_BASE_URL="${DOTNET_METADATA_BASE_URL:-https://builds.dotnet.microsoft.com/dotnet/release-metadata}"
-readonly LOCK_FILE="/tmp/dotnet_packaging.lock"
 readonly MIN_DOTNET_MAJOR=8
 
 # Runtime configuration
@@ -33,274 +46,23 @@ DRY_RUN=0
 FORCE=0
 NO_STAGING=0
 NO_UPDATE_ARCHIVE=0
-VERBOSE=0
 
-# Mutable execution state (cleaned up via trap)
-PLATFORM=""
-SHA512_CMD=""
+# Mutable execution state (cleaned up via shared EXIT/signal traps)
 EXEC_WORKSPACE=""
-CURRENT_PUBLISH_TMP=""
-LOCK_ACQUIRED=0
 
 # Summary tracking arrays
 declare -a CHANNELS=()
 declare -a SUMMARY_ROWS=()
 
 # ------------------------------------------------------------------------------
-# Logging Helpers
+# Dependencies
 # ------------------------------------------------------------------------------
-log_info() {
-    printf '[INFO] %s\n' "$*" >&2
-}
-
-log_warn() {
-    printf '[WARN] %s\n' "$*" >&2
-}
-
-log_error() {
-    printf '[ERROR] %s\n' "$*" >&2
-}
-
-log_debug() {
-    if [[ "${VERBOSE}" -eq 1 ]]; then
-        printf '[DEBUG] %s\n' "$*" >&2
-    fi
-}
-
-# ------------------------------------------------------------------------------
-# Platform, Path & Validation Helpers
-# ------------------------------------------------------------------------------
-detect_platform() {
-    # Prioritize the active POSIX runtime's /usr/bin:/bin so binaries (cygpath,
-    # realpath, unzip, mktemp, sha512sum, uname) match Cygwin vs MSYS2 even in
-    # non-login shells inheriting a mixed Windows PATH.
-    if [[ -d /usr/bin ]]; then
-        export PATH="/usr/bin:/bin:${PATH}"
-    fi
-
-    local os_hint="${OSTYPE:-}"
-    local uname_s
-    uname_s="$(uname -s 2>/dev/null || echo unknown)"
-    case "${os_hint}:${uname_s}" in
-        cygwin*:*|*:CYGWIN*)
-            PLATFORM="cygwin"
-            ;;
-        msys*:*|mingw*:*|*:MINGW*|*:MSYS*)
-            PLATFORM="msys2"
-            ;;
-        linux*:*|*:Linux*)
-            PLATFORM="linux"
-            ;;
-        *)
-            log_error "Unsupported host platform: OSTYPE=${os_hint:-unset}, uname=${uname_s}"
-            exit 1
-            ;;
-    esac
-    log_debug "Detected platform: ${PLATFORM} (OSTYPE=${os_hint:-unset}, uname=${uname_s})"
-}
-
-to_posix_path() {
-    local input="$1"
-    local normalized="${input//\\//}"
-
-    # Handle Windows drive paths like N:/foo, n:/foo, or N:
-    if [[ "${normalized}" =~ ^([A-Za-z]):(/.*)?$ ]]; then
-        local drive_lower="${BASH_REMATCH[1],,}"
-        local rest="${BASH_REMATCH[2]:-}"
-        rest="${rest#/}"
-
-        if [[ "${PLATFORM}" == "cygwin" || "${PLATFORM}" == "msys2" ]] && command -v cygpath >/dev/null 2>&1; then
-            cygpath -u "${normalized}"
-            return 0
-        fi
-
-        if [[ "${PLATFORM}" == "cygwin" ]]; then
-            if [[ -n "${rest}" ]]; then
-                printf '/cygdrive/%s/%s\n' "${drive_lower}" "${rest}"
-            else
-                printf '/cygdrive/%s\n' "${drive_lower}"
-            fi
-        elif [[ "${PLATFORM}" == "msys2" ]]; then
-            if [[ -n "${rest}" ]]; then
-                printf '/%s/%s\n' "${drive_lower}" "${rest}"
-            else
-                printf '/%s\n' "${drive_lower}"
-            fi
-        else
-            local mount_base="/mnt/${drive_lower}"
-            if [[ ! -d "/mnt/${drive_lower}" && -d "/media/${drive_lower}" ]]; then
-                mount_base="/media/${drive_lower}"
-            fi
-            if [[ -n "${rest}" ]]; then
-                printf '%s/%s\n' "${mount_base}" "${rest}"
-            else
-                printf '%s\n' "${mount_base}"
-            fi
-        fi
-        return 0
-    fi
-
-    printf '%s\n' "${normalized}"
-}
-
-strip_trailing_slashes() {
-    local p="$1"
-    while [[ "${#p}" -gt 1 && "${p}" == */ ]]; do
-        p="${p%/}"
-    done
-    printf '%s\n' "${p}"
-}
-
-display_path() {
-    local posix_path="$1"
-    if [[ "${PLATFORM}" == "cygwin" || "${PLATFORM}" == "msys2" ]] && command -v cygpath >/dev/null 2>&1; then
-        local mixed
-        mixed="$(cygpath -m "${posix_path}" 2>/dev/null || true)"
-        if [[ -n "${mixed}" ]]; then
-            printf '%s\n' "${mixed}"
-            return 0
-        fi
-    fi
-    printf '%s\n' "${posix_path}"
-}
-
-validate_safe_dir() {
-    local label="$1"
-    local raw="$2"
-
-    if [[ -z "${raw}" ]]; then
-        log_error "${label} path must not be empty."
-        exit 1
-    fi
-
-    # Reject path traversal segments before canonicalization
-    if [[ "${raw}" =~ (^|[\\/])\.\.($|[\\/]) ]]; then
-        log_error "${label} path must not contain '..' segments: ${raw}"
-        exit 1
-    fi
-
-    local posix
-    posix="$(to_posix_path "${raw}")"
-    posix="$(strip_trailing_slashes "${posix}")"
-
-    if command -v realpath >/dev/null 2>&1; then
-        posix="$(realpath -m "${posix}")"
-        posix="$(strip_trailing_slashes "${posix}")"
-    fi
-
-    if [[ "${posix}" != /* ]]; then
-        log_error "${label} must resolve to an absolute path: ${raw} -> ${posix}"
-        exit 1
-    fi
-
-    # Reject dangerous root, system, or bare drive-mount directories
-    case "${posix}" in
-        /|/tmp|/var|/etc|/usr|/usr/*|/bin|/sbin|/lib|/lib64|/boot|/dev|/proc|/sys|/mnt|/media|/cygdrive|/root|/home)
-            log_error "Refusing unsafe ${label} directory: ${posix}"
-            exit 1
-            ;;
-        /[a-zA-Z]|/mnt/[a-zA-Z]|/media/[a-zA-Z]|/cygdrive/[a-zA-Z])
-            log_error "Refusing bare drive/mount root for ${label}: ${posix}"
-            exit 1
-            ;;
-        /[cC]/Windows|/[cC]/Windows/*|/mnt/[cC]/Windows|/mnt/[cC]/Windows/*|/cygdrive/[cC]/Windows|/cygdrive/[cC]/Windows/*)
-            log_error "Refusing Windows system directory for ${label}: ${posix}"
-            exit 1
-            ;;
-    esac
-
-    printf '%s\n' "${posix}"
-}
-
-# ------------------------------------------------------------------------------
-# Workspace, Lock & Signal Trap
-# ------------------------------------------------------------------------------
-safe_rm_rf_workspace() {
-    local target="$1"
-    if [[ -z "${target}" || "${target}" == "/" ]]; then
-        return 0
-    fi
-    if [[ "${target}" != /tmp/dotnet_pkg.* ]]; then
-        log_warn "Refusing to remove unexpected workspace path: ${target}"
-        return 0
-    fi
-    rm -rf -- "${target}"
-}
-
-cleanup() {
-    local exit_code=$?
-
-    if [[ -n "${CURRENT_PUBLISH_TMP}" && -f "${CURRENT_PUBLISH_TMP}" ]]; then
-        rm -f -- "${CURRENT_PUBLISH_TMP}" || true
-    fi
-    if [[ -n "${EXEC_WORKSPACE}" && -d "${EXEC_WORKSPACE}" ]]; then
-        safe_rm_rf_workspace "${EXEC_WORKSPACE}" || true
-    fi
-    if [[ "${LOCK_ACQUIRED}" -eq 1 && -f "${LOCK_FILE}" ]]; then
-        local owner_pid
-        owner_pid="$(cat "${LOCK_FILE}" 2>/dev/null || true)"
-        if [[ "${owner_pid}" == "$$" ]]; then
-            rm -f -- "${LOCK_FILE}" || true
-        fi
-    fi
-
-    exit "${exit_code}"
-}
-
-trap cleanup EXIT INT TERM HUP
-
-acquire_lock() {
-    if (set -o noclobber; printf '%s\n' "$$" > "${LOCK_FILE}") 2>/dev/null; then
-        LOCK_ACQUIRED=1
-        log_debug "Acquired lock ${LOCK_FILE} (PID $$)"
-        return 0
-    fi
-
-    local existing_pid=""
-    if [[ -f "${LOCK_FILE}" ]]; then
-        existing_pid="$(cat "${LOCK_FILE}" 2>/dev/null || true)"
-    fi
-
-    if [[ -n "${existing_pid}" ]] && [[ "${existing_pid}" =~ ^[0-9]+$ ]] && kill -0 "${existing_pid}" 2>/dev/null; then
-        log_error "Another instance is already running (PID ${existing_pid}, lock ${LOCK_FILE})."
-        exit 1
-    fi
-
-    log_warn "Removing stale lock file ${LOCK_FILE} (previous PID: ${existing_pid:-unknown})."
-    rm -f -- "${LOCK_FILE}"
-
-    if (set -o noclobber; printf '%s\n' "$$" > "${LOCK_FILE}") 2>/dev/null; then
-        LOCK_ACQUIRED=1
-        log_debug "Acquired lock ${LOCK_FILE} after stale cleanup (PID $$)"
-        return 0
-    fi
-
-    log_error "Failed to acquire lock ${LOCK_FILE}."
-    exit 1
-}
-
 check_dependencies() {
-    local missing=()
-    local cmd
-    for cmd in curl jq zip unzip mktemp realpath; do
-        if ! command -v "${cmd}" >/dev/null 2>&1; then
-            missing+=("${cmd}")
-        fi
-    done
-
-    if command -v sha512sum >/dev/null 2>&1; then
-        SHA512_CMD="sha512sum"
-    elif command -v shasum >/dev/null 2>&1; then
-        SHA512_CMD="shasum"
-    else
-        missing+=("sha512sum/shasum")
-    fi
-
-    if [[ "${#missing[@]}" -gt 0 ]]; then
-        log_error "Missing required dependencies: ${missing[*]}"
+    verify_required_tools curl jq zip unzip mktemp realpath
+    if ! command -v sha512sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+        log_error "Required SHA-512 tool not found: need sha512sum or shasum in PATH."
         exit 1
     fi
-    log_debug "Dependencies verified (SHA-512 tool: ${SHA512_CMD})."
 }
 
 # ------------------------------------------------------------------------------
@@ -354,7 +116,6 @@ parse_versions_list() {
     IFS=',' read -r -a tokens <<< "${raw}"
 
     for token in "${tokens[@]}"; do
-        # Trim surrounding whitespace
         token="${token#"${token%%[![:space:]]*}"}"
         token="${token%"${token##*[![:space:]]}"}"
         if [[ -z "${token}" ]]; then
@@ -386,7 +147,7 @@ parse_versions_list() {
 
 discover_auto_channels() {
     if [[ ! -d "${ARCHIVE_DIR}" ]]; then
-        log_error "--auto cannot scan non-existent archive directory: $(display_path "${ARCHIVE_DIR}")"
+        log_error "--auto cannot scan non-existent archive directory: $(enforce_drive_path "${ARCHIVE_DIR}")"
         exit 1
     fi
 
@@ -404,7 +165,7 @@ discover_auto_channels() {
     done
 
     if [[ "${#found_majors[@]}" -eq 0 ]]; then
-        log_error "No dotnetfx-<major>.0-win.zip archives with major >= ${MIN_DOTNET_MAJOR} found in $(display_path "${ARCHIVE_DIR}"). Use --version <major> to create an initial archive."
+        log_error "No dotnetfx-<major>.0-win.zip archives with major >= ${MIN_DOTNET_MAJOR} found in $(enforce_drive_path "${ARCHIVE_DIR}"). Use --version <major> to create an initial archive."
         exit 1
     fi
 
@@ -419,25 +180,15 @@ discover_auto_channels() {
     log_info "Auto-discovered .NET channels (>= ${MIN_DOTNET_MAJOR}): ${CHANNELS[*]}"
 }
 
-require_opt_arg() {
-    local opt="$1"
-    local val="${2:-}"
-    if [[ -z "${val}" || "${val}" == -* ]]; then
-        log_error "${opt} requires an argument."
-        exit 1
-    fi
-    printf '%s\n' "${val}"
-}
-
 parse_args() {
     while [[ "$#" -gt 0 ]]; do
         case "$1" in
             --version)
-                REQUESTED_VERSIONS="$(require_opt_arg "$1" "${2:-}")"
+                REQUESTED_VERSIONS="$(require_opt_value "$1" "${2:-}")"
                 shift 2
                 ;;
             --version=*)
-                REQUESTED_VERSIONS="$(require_opt_arg "${1%%=*}" "${1#*=}")"
+                REQUESTED_VERSIONS="$(require_opt_value "${1%%=*}" "${1#*=}")"
                 shift
                 ;;
             --auto)
@@ -445,19 +196,19 @@ parse_args() {
                 shift
                 ;;
             --archive)
-                ARCHIVE_RAW="$(require_opt_arg "$1" "${2:-}")"
+                ARCHIVE_RAW="$(require_opt_value "$1" "${2:-}")"
                 shift 2
                 ;;
             --archive=*)
-                ARCHIVE_RAW="$(require_opt_arg "${1%%=*}" "${1#*=}")"
+                ARCHIVE_RAW="$(require_opt_value "${1%%=*}" "${1#*=}")"
                 shift
                 ;;
             --staging)
-                STAGING_RAW="$(require_opt_arg "$1" "${2:-}")"
+                STAGING_RAW="$(require_opt_value "$1" "${2:-}")"
                 shift 2
                 ;;
             --staging=*)
-                STAGING_RAW="$(require_opt_arg "${1%%=*}" "${1#*=}")"
+                STAGING_RAW="$(require_opt_value "${1%%=*}" "${1#*=}")"
                 shift
                 ;;
             --dry-run)
@@ -504,8 +255,8 @@ parse_args() {
         exit 1
     fi
 
-    ARCHIVE_DIR="$(validate_safe_dir "archive" "${ARCHIVE_RAW}")"
-    STAGING_DIR="$(validate_safe_dir "staging" "${STAGING_RAW}")"
+    ARCHIVE_DIR="$(validate_safe_dir "archive" "${ARCHIVE_RAW}")" || exit 1
+    STAGING_DIR="$(validate_safe_dir "staging" "${STAGING_RAW}")" || exit 1
 
     if [[ "${DRY_RUN}" -eq 0 && "${NO_STAGING}" -eq 1 && "${NO_UPDATE_ARCHIVE}" -eq 1 ]]; then
         log_error "Cannot combine --no-staging and --no-update-archive without --dry-run (no outputs enabled)."
@@ -525,49 +276,10 @@ parse_args() {
 }
 
 # ------------------------------------------------------------------------------
-# Hash, URL & Metadata Helpers
+# Metadata & Archive Inspection Helpers
 # ------------------------------------------------------------------------------
-validate_download_url() {
-    local url="$1"
-    if [[ "${METADATA_BASE_URL}" == file://* ]]; then
-        if [[ "${url}" != https://* && "${url}" != file://* ]]; then
-            log_error "Invalid download URL scheme (expected https:// or file:// in local-feed mode): ${url}"
-            return 1
-        fi
-    else
-        if [[ "${url}" != https://* ]]; then
-            log_error "Refusing non-HTTPS download URL: ${url}"
-            return 1
-        fi
-    fi
-    return 0
-}
-
-verify_sha512() {
-    local dir="$1"
-    local filename="$2"
-    local expected="$3"
-    local expected_lower="${expected,,}"
-    local actual=""
-
-    if [[ "${SHA512_CMD}" == "sha512sum" ]]; then
-        actual="$(cd "${dir}" && sha512sum -- "${filename}" | awk '{print $1}')"
-    else
-        actual="$(cd "${dir}" && shasum -a 512 -- "${filename}" | awk '{print $1}')"
-    fi
-    actual="${actual,,}"
-
-    if [[ ! "${actual}" =~ ^[0-9a-f]{128}$ ]]; then
-        log_error "Failed to compute SHA-512 checksum for ${filename}"
-        return 1
-    fi
-
-    if [[ "${actual}" != "${expected_lower}" ]]; then
-        log_error "SHA-512 mismatch for ${filename}: expected ${expected_lower}, got ${actual}"
-        return 1
-    fi
-
-    return 0
+_allow_file_scheme() {
+    [[ "${METADATA_BASE_URL}" == file://* ]]
 }
 
 # Fetches releases.json for a channel and emits resolved fields.
@@ -579,11 +291,12 @@ fetch_upstream_metadata() {
     local out_manifest="$2"
 
     local feed_url="${METADATA_BASE_URL%/}/${channel}/releases.json"
-    local json_name="releases-${channel}.json"
-    local json_path="${EXEC_WORKSPACE}/${json_name}"
+    local json_path="${EXEC_WORKSPACE}/releases-${channel}.json"
+    local allow_file=false
+    _allow_file_scheme && allow_file=true
 
     log_debug "Fetching metadata feed for .NET ${channel}: ${feed_url}"
-    if ! (cd "${EXEC_WORKSPACE}" && curl -fsSL --retry 3 --retry-delay 2 -o "${json_name}" "${feed_url}"); then
+    if ! download_asset "${feed_url}" "${json_path}" "" "sha512" "${allow_file}"; then
         log_error "Failed to fetch release metadata from ${feed_url}"
         return 1
     fi
@@ -632,7 +345,7 @@ fetch_upstream_metadata() {
             log_error "Incomplete metadata entry for ${key:-unknown} in .NET ${channel}."
             return 1
         fi
-        validate_download_url "${url}" || return 1
+        validate_download_url "${url}" "${allow_file}" || return 1
         if [[ ! "${hash}" =~ ^[0-9a-fA-F]{128}$ ]]; then
             log_error "Invalid SHA-512 digest format for ${key}: ${hash}"
             return 1
@@ -664,7 +377,7 @@ inspect_local_archive() {
         return 0
     fi
 
-    if ! unzip -tq "${zip_path}" >/dev/null 2>&1; then
+    if ! verify_zip_integrity "${zip_path}"; then
         printf 'CORRUPT\t?\t?\t\n'
         return 0
     fi
@@ -709,20 +422,6 @@ inspect_local_archive() {
     printf 'PRESENT\t%s\t%s\t%s\n' "${rt_ver}" "${sdk_ver}" "${csv}"
 }
 
-csv_contains() {
-    local csv="$1"
-    local needle="$2"
-    local item
-    local -a items=()
-    IFS=',' read -r -a items <<< "${csv}"
-    for item in "${items[@]}"; do
-        if [[ "${item}" == "${needle}" ]]; then
-            return 0
-        fi
-    done
-    return 1
-}
-
 # ------------------------------------------------------------------------------
 # Channel Processing
 # ------------------------------------------------------------------------------
@@ -736,26 +435,15 @@ fail_channel() {
     return 1
 }
 
-atomic_publish_zip() {
+_publish_zip() {
     local src_zip="$1"
     local dest_zip="$2"
     local label="$3"
-    local dest_dir="${dest_zip%/*}"
     local padded_label
 
-    mkdir -p "${dest_dir}"
-    CURRENT_PUBLISH_TMP="${dest_zip}.tmp.$$"
-    cp -f -- "${src_zip}" "${CURRENT_PUBLISH_TMP}"
-    if ! unzip -tq "${CURRENT_PUBLISH_TMP}" >/dev/null 2>&1; then
-        log_error "${label} verification failed before atomic rename: ${CURRENT_PUBLISH_TMP}"
-        rm -f -- "${CURRENT_PUBLISH_TMP}" || true
-        CURRENT_PUBLISH_TMP=""
-        return 1
-    fi
-    mv -f -- "${CURRENT_PUBLISH_TMP}" "${dest_zip}"
-    CURRENT_PUBLISH_TMP=""
+    atomic_publish_file "${src_zip}" "${dest_zip}" "${label}" true || return 1
     printf -v padded_label '%-10s' "[${label}]"
-    log_info "  ${padded_label}   $(display_path "${dest_zip}")"
+    log_info "  ${padded_label}   $(enforce_drive_path "${dest_zip}")"
 }
 
 process_channel() {
@@ -764,6 +452,8 @@ process_channel() {
     local local_zip="${ARCHIVE_DIR}/${zip_name}"
     local staging_zip="${STAGING_DIR}/${zip_name}"
     local manifest="${EXEC_WORKSPACE}/manifest-${channel}.tsv"
+    local allow_file=false
+    _allow_file_scheme && allow_file=true
 
     log_info "=== Processing .NET ${channel} (${zip_name}) ==="
 
@@ -851,12 +541,12 @@ process_channel() {
         if [[ "${FORCE}" -eq 0 && "${local_state}" != "MISSING" && "${local_state}" != "CORRUPT" ]] && csv_contains "${local_csv}" "${fname}"; then
             log_debug "Attempting reuse of ${fname} from ${local_zip}"
             if (cd "${payload_dir}" && unzip -q -j "${local_zip}" "${fname}" >/dev/null 2>&1) && [[ -f "${payload_dir}/${fname}" ]]; then
-                if verify_sha512 "${payload_dir}" "${fname}" "${expected_hash}"; then
+                if verify_file_checksum "${payload_dir}/${fname}" "${expected_hash}" "sha512"; then
                     log_info "  [Reused]     ${fname} (SHA-512 verified)"
                     reused=1
                 else
                     log_warn "  Local copy of ${fname} failed SHA-512 check; re-downloading."
-                    rm -f -- "${payload_dir}/${fname}"
+                    safe_rm_f "${payload_dir}/${fname}"
                 fi
             fi
         fi
@@ -864,15 +554,9 @@ process_channel() {
         if [[ "${reused}" -eq 0 ]]; then
             log_info "  [Download]   ${fname}"
             log_debug "    URL: ${url}"
-            if ! (cd "${payload_dir}" && curl -fsSL --retry 3 --retry-delay 2 -o "${fname}.part" "${url}"); then
-                log_error "Failed to download ${url}"
+            if ! download_asset "${url}" "${payload_dir}/${fname}" "${expected_hash}" "sha512" "${allow_file}"; then
                 fail_channel "${channel}" "${local_rt}" "${local_sdk}" "${upstream_rel}" "${upstream_sdk}" || return 1
             fi
-            if ! verify_sha512 "${payload_dir}" "${fname}.part" "${expected_hash}"; then
-                rm -f -- "${payload_dir}/${fname}.part"
-                fail_channel "${channel}" "${local_rt}" "${local_sdk}" "${upstream_rel}" "${upstream_sdk}" || return 1
-            fi
-            mv -f -- "${payload_dir}/${fname}.part" "${payload_dir}/${fname}"
             log_info "  [Verified]   ${fname} (SHA-512 OK)"
         fi
     done
@@ -884,25 +568,27 @@ process_channel() {
         fail_channel "${channel}" "${local_rt}" "${local_sdk}" "${upstream_rel}" "${upstream_sdk}" || return 1
     fi
 
-    if ! unzip -tq "${built_zip}" >/dev/null 2>&1; then
+    if ! verify_zip_integrity "${built_zip}"; then
         log_error "Built archive failed unzip integrity check: ${built_zip}"
         fail_channel "${channel}" "${local_rt}" "${local_sdk}" "${upstream_rel}" "${upstream_sdk}" || return 1
     fi
 
+    # Stage BEFORE committing to the archive repository so a staging failure
+    # leaves the archive out-of-date and recoverable on retry without --force.
     local status_tags=()
 
-    if [[ "${NO_UPDATE_ARCHIVE}" -eq 0 ]]; then
-        if ! atomic_publish_zip "${built_zip}" "${local_zip}" "Archived"; then
-            fail_channel "${channel}" "${local_rt}" "${local_sdk}" "${upstream_rel}" "${upstream_sdk}" || return 1
-        fi
-        status_tags+=("ARCHIVED")
-    fi
-
     if [[ "${NO_STAGING}" -eq 0 ]]; then
-        if ! atomic_publish_zip "${built_zip}" "${staging_zip}" "Staged"; then
+        if ! _publish_zip "${built_zip}" "${staging_zip}" "Staged"; then
             fail_channel "${channel}" "${local_rt}" "${local_sdk}" "${upstream_rel}" "${upstream_sdk}" || return 1
         fi
         status_tags+=("STAGED")
+    fi
+
+    if [[ "${NO_UPDATE_ARCHIVE}" -eq 0 ]]; then
+        if ! _publish_zip "${built_zip}" "${local_zip}" "Archived"; then
+            fail_channel "${channel}" "${local_rt}" "${local_sdk}" "${upstream_rel}" "${upstream_sdk}" || return 1
+        fi
+        status_tags+=("ARCHIVED")
     fi
 
     local final_action
@@ -931,19 +617,19 @@ print_summary() {
 # Main Entry Point
 # ------------------------------------------------------------------------------
 main() {
-    detect_platform
     check_dependencies
     parse_args "$@"
 
     if [[ "${DRY_RUN}" -eq 0 ]]; then
-        acquire_lock
+        acquire_lock "dotnet_packaging" "${ARCHIVE_DIR}|${STAGING_DIR}" || exit 1
     fi
 
-    EXEC_WORKSPACE="$(mktemp -d /tmp/dotnet_pkg.XXXXXX)"
+    EXEC_WORKSPACE="$(create_temp_workdir "dotnet_pkg_")"
+    log_debug "Platform: ${PLATFORM}"
     log_debug "Workspace: ${EXEC_WORKSPACE}"
-    log_info "Archive directory: $(display_path "${ARCHIVE_DIR}")"
+    log_info "Archive directory: $(enforce_drive_path "${ARCHIVE_DIR}")"
     if [[ "${NO_STAGING}" -eq 0 ]]; then
-        log_info "Staging directory: $(display_path "${STAGING_DIR}")"
+        log_info "Staging directory: $(enforce_drive_path "${STAGING_DIR}")"
     else
         log_info "Staging directory: <disabled via --no-staging>"
     fi
@@ -957,8 +643,8 @@ main() {
     done
 
     print_summary
+    trap - ERR
     return "${overall_rc}"
 }
 
 main "$@"
-

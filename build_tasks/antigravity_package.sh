@@ -59,27 +59,8 @@ HUB_UPDATER_BASE="https://antigravity-hub-auto-updater-974169037036.us-central1.
 IDE_UPDATER_BASE="https://antigravity-ide-auto-updater-974169037036.us-central1.run.app"
 
 # ------------------------------------------------------------------------------
-# Section 7: Resilient Fetch & Dynamic Upstream Endpoint Discovery
+# Section 7: Dynamic Upstream Endpoint Discovery
 # ------------------------------------------------------------------------------
-# fetch_text <url> [timeout_sec]
-# Fetches remote text/JSON with retries and logs diagnostics cleanly on failure.
-fetch_text() {
-    local url="$1"
-    local max_time="${2:-20}"
-    local err_file body rc=0
-    err_file=$(mktemp "${EXEC_WORKSPACE:-${TEMP_ROOT_CYG:-/tmp}}/ag_curl_err.XXXXXX")
-    body=$(curl -fsSL --connect-timeout 10 --max-time "$max_time" --retry 3 --retry-delay 2 "$url" 2> "$err_file") || rc=$?
-    if [[ $rc -ne 0 ]]; then
-        local err_msg
-        err_msg=$(tr '\r\n' '  ' < "$err_file" 2> /dev/null || true)
-        rm -f "$err_file" 2> /dev/null || true
-        log_warn "Request failed (exit=${rc}) for ${url}: ${err_msg:-curl error}"
-        return "$rc"
-    fi
-    rm -f "$err_file" 2> /dev/null || true
-    printf '%s' "$body"
-}
-
 # _extract_first_match <ere_pattern> <text>
 # Returns the first regex match safely under pipefail without early-close SIGPIPE.
 _extract_first_match() {
@@ -226,9 +207,9 @@ verify_required_tools curl zip unzip jq tar gzip xz
 
 # Normalize directories
 SOURCE_PATH=$(enforce_drive_path "$SOURCE_PATH")
-SOURCE_CYG=$(to_cygpath "$SOURCE_PATH")
+SOURCE_CYG=$(to_posix_path "$SOURCE_PATH")
 TARGET_PATH=$(enforce_drive_path "$TARGET_PATH")
-TARGET_CYG=$(to_cygpath "$TARGET_PATH")
+TARGET_CYG=$(to_posix_path "$TARGET_PATH")
 
 TEMP_ROOT_CYG=$(detect_temp_root)
 TEMP_ROOT_PATH=$(enforce_drive_path "$TEMP_ROOT_CYG")

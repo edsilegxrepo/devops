@@ -132,7 +132,7 @@ function fetch_latest_version() {
       return 0
     fi
   fi
-  curl -sI "${BUN_BASE_URL}" 2> /dev/null | grep -i '^Location:' | sed -E "s/.*tag\/${BUN_REPO}-v//I" | tr -d '\r'
+  curl -sI --connect-timeout 10 --max-time 20 --retry 2 "${BUN_BASE_URL}" 2> /dev/null | grep -i '^Location:' | sed -E "s/.*tag\/${BUN_REPO}-v//I" | tr -d '\r'
 }
 
 # -----------------------------------------------------------------------------
@@ -304,12 +304,7 @@ fi
 # -----------------------------------------------------------------------------
 if [ "${DO_INSTALL}" = "true" ] || [ "${DO_UPDATE}" = "true" ]; then
   # Fail-fast check for command-line prerequisites
-  for cmd in curl unzip; do
-    if ! command -v "$cmd" &> /dev/null; then
-      log_error "Prerequisite '$cmd' is not installed or not in PATH."
-      exit 3
-    fi
-  done
+  verify_required_tools curl unzip
 
   # Perform smart version comparison check if --auto is enabled
   if [ "${DO_UPDATE}" = "true" ] && [ "${DO_AUTO}" = "true" ]; then
@@ -358,8 +353,7 @@ if [ "${DO_INSTALL}" = "true" ] || [ "${DO_UPDATE}" = "true" ]; then
 
   # Retrieve release package
   log_info "Downloading Bun..."
-  curl -sSL "${BUN_DOWNLOAD_URL}/${zip_name}" -o "${zip_file}"
-  if [ ! -f "${zip_file}" ] || [ ! -s "${zip_file}" ]; then
+  if ! download_asset "${BUN_DOWNLOAD_URL}/${zip_name}" "${zip_file}" "" "sha256" || [ ! -s "${zip_file}" ]; then
     log_error "Failed to download Bun package."
     exit 4
   fi
@@ -506,9 +500,9 @@ if [ "${DO_PACKAGE}" = "true" ]; then
   SOURCE_PATH="${PKG_SOURCE_PATH:-$(resolve_default_path "n" "softlib/software/public/devel/nodejs")}"
   TARGET_PATH="${PKG_TARGET_PATH:-$(resolve_default_path "f" "stage/upload/pending")}"
   SOURCE_PATH=$(enforce_drive_path "$SOURCE_PATH")
-  SOURCE_CYG=$(to_cygpath "$SOURCE_PATH")
+  SOURCE_CYG=$(to_posix_path "$SOURCE_PATH")
   TARGET_PATH=$(enforce_drive_path "$TARGET_PATH")
-  TARGET_CYG=$(to_cygpath "$TARGET_PATH")
+  TARGET_CYG=$(to_posix_path "$TARGET_PATH")
   GITHUB_TOKEN="${PKG_TOKEN:-}"
 
   verify_required_tools curl unzip jq

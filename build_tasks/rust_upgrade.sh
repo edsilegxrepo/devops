@@ -28,6 +28,19 @@
 # ----- ENVIRONMENT AND CONFIGURATION -----
 RUST_ARCH=$(uname -m)
 
+LOG_INFO_TO_STDERR=1
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CORE_LIB="${SCRIPT_DIR}/lib/pkg_core.sh"
+TRANSFER_LIB="${SCRIPT_DIR}/lib/pkg_transfer.sh"
+if [ ! -f "${CORE_LIB}" ] || [ ! -f "${TRANSFER_LIB}" ]; then
+  echo "ERROR: Shared libraries not found under ${SCRIPT_DIR}/lib" >&2
+  exit 1
+fi
+# shellcheck source=lib/pkg_core.sh
+source "${CORE_LIB}"
+# shellcheck source=lib/pkg_transfer.sh
+source "${TRANSFER_LIB}"
+
 # Optional toolchain components that can be skipped via --core-components or audited in --detect
 OPTIONAL_COMPONENTS=(
   "rust-docs"
@@ -38,8 +51,8 @@ OPTIONAL_COMPONENTS=(
   "llvm-bitcode-linker-preview"
 )
 
-# Resolve system temporary directory based on priority order: TMPDIR, TMP, TEMP, fallback to /tmp
-SYS_TMP_DIR="${TMPDIR:-${TMP:-${TEMP:-/tmp}}}"
+# Resolve system temporary directory via shared detect_temp_root
+SYS_TMP_DIR="$(detect_temp_root)"
 
 # Check if OS_ID or OS_DISTRIB are declared in the environment; otherwise attempt auto-detection
 if [ -z "${OS_ID}" ] || [ -z "${OS_DISTRIB}" ]; then
@@ -113,32 +126,20 @@ ABS_RUST_STD_MUSL_BASE=""
 ABS_TEMP_CARGO_HOME=""
 
 # Cleanup function to purge temporary archives and cache folders on script exit
+# shellcheck disable=SC2329 # Chained onto EXIT trap
 function cleanup() {
-  if [ -n "${ABS_TEMP_CARGO_HOME}" ] && [ -d "${ABS_TEMP_CARGO_HOME}" ]; then
-    rm -rf "${ABS_TEMP_CARGO_HOME}"
-  fi
-  if [ -n "${ABS_RUST_INSTALL_ARCH}" ] && [ -f "${ABS_RUST_INSTALL_ARCH}" ]; then
-    rm -f "${ABS_RUST_INSTALL_ARCH}"
-  fi
-  if [ -n "${ABS_RUST_STD_WIN_ARCH}" ] && [ -f "${ABS_RUST_STD_WIN_ARCH}" ]; then
-    rm -f "${ABS_RUST_STD_WIN_ARCH}"
-  fi
-  if [ -n "${ABS_RUST_STD_MUSL_ARCH}" ] && [ -f "${ABS_RUST_STD_MUSL_ARCH}" ]; then
-    rm -f "${ABS_RUST_STD_MUSL_ARCH}"
-  fi
-  if [ -n "${ABS_RUST_INSTALL_BASE}" ] && [ -d "${ABS_RUST_INSTALL_BASE}" ]; then
-    rm -rf "${ABS_RUST_INSTALL_BASE}"
-  fi
-  if [ -n "${ABS_RUST_STD_WIN_BASE}" ] && [ -d "${ABS_RUST_STD_WIN_BASE}" ]; then
-    rm -rf "${ABS_RUST_STD_WIN_BASE}"
-  fi
-  if [ -n "${ABS_RUST_STD_MUSL_BASE}" ] && [ -d "${ABS_RUST_STD_MUSL_BASE}" ]; then
-    rm -rf "${ABS_RUST_STD_MUSL_BASE}"
-  fi
+  safe_rm_rf "${ABS_TEMP_CARGO_HOME}"
+  safe_rm_f "${ABS_RUST_INSTALL_ARCH}"
+  safe_rm_f "${ABS_RUST_STD_WIN_ARCH}"
+  safe_rm_f "${ABS_RUST_STD_MUSL_ARCH}"
+  safe_rm_rf "${ABS_RUST_INSTALL_BASE}"
+  safe_rm_rf "${ABS_RUST_STD_WIN_BASE}"
+  safe_rm_rf "${ABS_RUST_STD_MUSL_BASE}"
+  cleanup_workspace
 }
 
-# Trap termination signals to ensure cleanup of temporary objects
-trap cleanup EXIT INT TERM HUP
+# Trap EXIT cleanly (signals route through pkg_core.sh handlers -> EXIT)
+trap cleanup EXIT
 
 
 # Helper function to display script usage
@@ -722,7 +723,7 @@ if [ "${STANDALONE_LINTERS}" == "false" ] && [ "${UPGRADE_MODE}" == "AUTO" ]; th
 
   # Fetch the official Rust stable manifest
   MANIFEST_URL="https://static.rust-lang.org/dist/channel-rust-stable.toml"
-  MANIFEST_DATA=$(curl -sSfL "$MANIFEST_URL")
+  MANIFEST_DATA=$(fetch_text "$MANIFEST_URL" 30 || true)
 
   if [ -z "$MANIFEST_DATA" ]; then
     echo "Error: Failed to fetch the Rust release manifest."
@@ -1182,7 +1183,7 @@ if [ -d "${INSTALL_BASE}" ]; then
   # Fetch packages securely:
   # -sSfL ensures curl is silent, reports errors on HTTP failures (like 404),
   # and follows redirects.
-  curl -sSf -L \
+  curl -fsSL --connect-timeout 15 --max-time 600 --retry 3 --retry-delay 2 \
     -C - -O "${RUST_URL_BASE}/${RUST_INSTALL_ARCH}" \
     -C - -O "${RUST_URL_BASE}/${RUST_STD_WIN_ARCH}" \
     -C - -O "${RUST_URL_BASE}/${RUST_STD_MUSL_ARCH}"

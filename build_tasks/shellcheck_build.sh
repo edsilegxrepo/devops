@@ -128,18 +128,8 @@ parse_args() {
 }
 
 # ------------------------------------------------------------------------------
-# Cross-Platform Path & Docker Execution Bridge
+# Cross-Platform Docker Execution Bridge (path helpers provided by build.inc)
 # ------------------------------------------------------------------------------
-to_posix_path() {
-  local raw="${1:-}"
-  [ -z "${raw}" ] && return 0
-  if [ "${HOST_OS}" = "WIN" ] && command -v cygpath &> /dev/null; then
-    cygpath -u "${raw}" 2> /dev/null || echo "${raw}"
-  else
-    echo "${raw}"
-  fi
-}
-
 to_docker_host_path() {
   local p="${1:-}"
   if [ "${HOST_OS}" = "WIN" ]; then
@@ -222,7 +212,7 @@ ensure_prereqs() {
 resolve_temp_base() {
   local raw="${TEMP:-${TMP:-${TMPDIR:-/tmp}}}"
   local posix_tmp
-  posix_tmp="$(to_posix_path "${raw}")"
+  posix_tmp="$(normalize_to_posix_path "${raw}")"
   if [ -d "${posix_tmp}" ] && [ -w "${posix_tmp}" ]; then
     echo "${posix_tmp%/}"
   else
@@ -452,7 +442,7 @@ package_outputs() {
 main() {
   parse_args "$@"
 
-  OUT_DIR="$(to_posix_path "${OUT_DIR}")"
+  OUT_DIR="$(normalize_to_posix_path "${OUT_DIR}")"
   ensure_prereqs
 
   if [ "${DRY_RUN}" = false ]; then

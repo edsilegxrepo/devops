@@ -345,11 +345,11 @@ fi
 # Section 4: Path Normalization & Environment Checks
 # ------------------------------------------------------------------------------
 SOURCE_PATH=$(enforce_drive_path "$SOURCE_PATH")
-SOURCE_CYG=$(to_cygpath "$SOURCE_PATH")
+SOURCE_CYG=$(to_posix_path "$SOURCE_PATH")
 TARGET_PATH=$(enforce_drive_path "$TARGET_PATH")
-TARGET_CYG=$(to_cygpath "$TARGET_PATH")
+TARGET_CYG=$(to_posix_path "$TARGET_PATH")
 DEPLOY_TARGET=$(enforce_drive_path "$DEPLOY_TARGET")
-DEPLOY_TARGET_CYG=$(to_cygpath "$DEPLOY_TARGET")
+DEPLOY_TARGET_CYG=$(to_posix_path "$DEPLOY_TARGET")
 
 TEMP_ROOT_CYG=$(detect_temp_root)
 TEMP_ROOT_PATH=$(enforce_drive_path "$TEMP_ROOT_CYG")
@@ -1228,7 +1228,7 @@ _deploy_single_tool() {
     fi
 
     local lfile_cyg
-    lfile_cyg=$(to_cygpath "$lfile")
+    lfile_cyg=$(to_posix_path "$lfile")
     log_step "Deploying [${E_TOOL}] v${lver} from $(basename "$lfile")..."
 
     if [[ "$DRY_RUN" == true ]]; then

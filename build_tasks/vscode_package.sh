@@ -155,9 +155,9 @@ if is_windows_platform && [[ "$DRY_RUN" == false ]] && ! command -v wsl.exe > /d
 fi
 
 SOURCE_PATH=$(enforce_drive_path "$SOURCE_PATH")
-SOURCE_CYG=$(to_cygpath "$SOURCE_PATH")
+SOURCE_CYG=$(to_posix_path "$SOURCE_PATH")
 TARGET_PATH=$(enforce_drive_path "$TARGET_PATH")
-TARGET_CYG=$(to_cygpath "$TARGET_PATH")
+TARGET_CYG=$(to_posix_path "$TARGET_PATH")
 
 TEMP_ROOT_CYG=$(detect_temp_root)
 TEMP_ROOT_PATH=$(enforce_drive_path "$TEMP_ROOT_CYG")
@@ -194,7 +194,7 @@ _vscode_fetch_meta() {
     local target_id="$1"
     local api_url="${UPDATE_API_BASE}/${target_id}/${CHANNEL}/latest"
     local json
-    json=$(curl -fsSL --retry 3 --retry-delay 2 "$api_url" 2> /dev/null || true)
+    json=$(fetch_text "$api_url" 20 || true)
     if [[ -z "$json" ]]; then
         log_error "Failed to fetch VS Code metadata from $api_url"
         return 1
@@ -225,7 +225,7 @@ _vscode_transform_win_cli() {
         log_error "Downloaded Windows CLI zip failed integrity check"
         return 1
     fi
-    if ! unzip -Z1 "$raw_file" 2> /dev/null | grep -qx "code.exe"; then
+    if ! verify_zip_has_entry "$raw_file" "code.exe"; then
         log_error "Expected code.exe not found inside Windows CLI zip"
         return 1
     fi

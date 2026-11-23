@@ -37,6 +37,19 @@
 
 set -euo pipefail
 
+LOG_INFO_TO_STDERR=0
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CORE_LIB="${SCRIPT_DIR}/lib/pkg_core.sh"
+ARCHIVE_LIB="${SCRIPT_DIR}/lib/pkg_archive.sh"
+if [ ! -f "${CORE_LIB}" ] || [ ! -f "${ARCHIVE_LIB}" ]; then
+  echo "ERROR: Shared libraries not found under ${SCRIPT_DIR}/lib" >&2
+  exit 1
+fi
+# shellcheck source=lib/pkg_core.sh
+source "${CORE_LIB}"
+# shellcheck source=lib/pkg_archive.sh
+source "${ARCHIVE_LIB}"
+
 # ------------------------------------------------------------------------------
 # 1. Directory Path Definitions
 # ------------------------------------------------------------------------------
@@ -44,7 +57,7 @@ set -euo pipefail
 # SOURCES holds raw Zulu JDKs, Maven archives, and the JTLSTester zip.
 # DISTRIB is where completed target archives will be created.
 # STAGING is the temporary scratch area for extraction and logging.
-PKG_DIR="/usr/src/packages"
+PKG_DIR="${PKG_DIR:-/usr/src/packages}"
 SOURCE_DIR="${PKG_DIR}/SOURCES"
 TARGET_DIR="${PKG_DIR}/DISTRIB"
 STAGING_DIR="${PKG_DIR}/STAGING"
@@ -56,7 +69,7 @@ echo "=== Initializing Directories ==="
 # Ensure directories exist and clear any old build artifacts in the work dir.
 mkdir -p "${TARGET_DIR}"
 mkdir -p "${STAGING_DIR}"
-rm -rf "${WORK_DIR}"
+safe_rm_rf "${WORK_DIR}"
 mkdir -p "${WORK_DIR}"
 
 
@@ -102,12 +115,12 @@ echo "  + Windows Archive: ${MAVEN_WIN_ARCHIVE}"
 # This extracts 'jtlstester8.jar' and 'jtlstester11.jar', which will later be
 # copied and renamed to 'tools/jtlstester.jar' inside target JDKs.
 echo -e "\n=== Extracting JTLSTester jars ==="
-rm -rf "${JTLSTESTER_EXTRACT_DIR}"
+safe_rm_rf "${JTLSTESTER_EXTRACT_DIR}"
 mkdir -p "${JTLSTESTER_EXTRACT_DIR}"
 JTLSTESTER_ZIP=$(find "${SOURCE_DIR}" -maxdepth 1 -name "jtlstester-*-java.zip" | head -n 1)
 if [ -n "${JTLSTESTER_ZIP}" ]; then
   JTLSTESTER_VERSION=$(basename "${JTLSTESTER_ZIP}" | grep -oP 'jtlstester-\K[0-9]+\.[0-9]+\.[0-9]+-[a-f0-9]+')
-  unzip -q -d "${JTLSTESTER_EXTRACT_DIR}" "${JTLSTESTER_ZIP}"
+  extract_archive "${JTLSTESTER_ZIP}" "${JTLSTESTER_EXTRACT_DIR}"
   echo "JTLSTester jars extracted successfully (Version: ${JTLSTESTER_VERSION})."
 else
   echo "ERROR: jtlstester zip file not found in ${SOURCE_DIR}"
@@ -156,22 +169,14 @@ process_jdk() {
 
   # Create a clean temporary directory for this specific package build
   local build_temp="${WORK_DIR}/build_${jdk_base}"
-  rm -rf "${build_temp}"
+  safe_rm_rf "${build_temp}"
   mkdir -p "${build_temp}"
 
   # Extract JDK
   echo "Extracting JDK archive..."
+  extract_archive "${SOURCE_DIR}/${jdk_archive}" "${build_temp}"
   local extracted_jdk_root
-  if [ "${os}" = "linux" ]; then
-    # Extract Linux tarballs
-    tar -C "${build_temp}" -xf "${SOURCE_DIR}/${jdk_archive}"
-    # Find the top directory name inside extracted archive (usually starts with zulu)
-    extracted_jdk_root=$(find "${build_temp}" -maxdepth 1 -type d -name "zulu*" | head -n 1)
-  else
-    # Extract Windows zip archives
-    unzip -q -d "${build_temp}" "${SOURCE_DIR}/${jdk_archive}"
-    extracted_jdk_root=$(find "${build_temp}" -maxdepth 1 -type d -name "zulu*" | head -n 1)
-  fi
+  extracted_jdk_root=$(find "${build_temp}" -maxdepth 1 -type d -name "zulu*" | head -n 1)
 
   # Define target root folder name based on platform
   local target_root_name
@@ -243,7 +248,7 @@ EOF
   mkdir -p "${maven_temp}"
 
   if [ "${os}" = "linux" ]; then
-    tar -C "${maven_temp}" -xf "${SOURCE_DIR}/${MAVEN_LINUX_ARCHIVE}"
+    extract_archive "${SOURCE_DIR}/${MAVEN_LINUX_ARCHIVE}" "${maven_temp}"
 
     local maven_extracted_dir
     maven_extracted_dir=$(find "${maven_temp}" -maxdepth 1 -type d -name "apache-maven-*" | head -n 1)
@@ -260,7 +265,7 @@ EOF
     # Create symlink using dynamic version
     ln -sf maven "${target_root}/maven-${MAVEN_VERSION}"
   else
-    unzip -q -d "${maven_temp}" "${SOURCE_DIR}/${MAVEN_WIN_ARCHIVE}"
+    extract_archive "${SOURCE_DIR}/${MAVEN_WIN_ARCHIVE}" "${maven_temp}"
 
     local maven_extracted_dir
     maven_extracted_dir=$(find "${maven_temp}" -maxdepth 1 -type d -name "apache-maven-*" | head -n 1)
@@ -303,23 +308,25 @@ EOF
     touch "${target_root}/jdk-${version_str}.bin"
   fi
 
-  # Build target archive
-  # Packages Linux targets as tar.xz and Windows targets as zip.
+  # Build target archive (stage in build_temp, verify, and publish atomically)
   echo "Building final target package..."
-  local target_file
+  local target_file staged_archive
   if [ "${os}" = "linux" ]; then
     target_file="openjdk${major}u-${version_str}-zulu-x86_64.tar.xz"
-    tar -C "${build_temp}" -cJf "${TARGET_DIR}/${target_file}" "${target_root_name}"
+    staged_archive="${build_temp}/${target_file}"
+    tar -C "${build_temp}" -cJf "${staged_archive}" "${target_root_name}"
   else
     target_file="openjdk${major}u-${version_str}-zulu-windows-x64.zip"
+    staged_archive="${build_temp}/${target_file}"
     # Runs zip inside build_temp directory to avoid prepending absolute path strings
-    (cd "${build_temp}" && zip -q -r "${TARGET_DIR}/${target_file}" "${target_root_name}")
+    (cd "${build_temp}" && zip -q -r "${staged_archive}" "${target_root_name}")
   fi
 
+  atomic_publish_file "${staged_archive}" "${TARGET_DIR}/${target_file}" "jdk" true
   echo "Target generated successfully: ${target_file}"
 
   # Cleanup temp workspace files for this package build to save disk space
-  rm -rf "${build_temp}"
+  safe_rm_rf "${build_temp}"
 }
 
 
@@ -404,9 +411,9 @@ for i in "${!pids[@]}"; do
 done
 
 # Cleanup work area subfolders while keeping STAGING_DIR intact
-rm -rf "${WORK_DIR}"
-rm -rf "${JTLSTESTER_EXTRACT_DIR}"
-rm -rf "${LOGS_DIR}"
+safe_rm_rf "${WORK_DIR}"
+safe_rm_rf "${JTLSTESTER_EXTRACT_DIR}"
+safe_rm_rf "${LOGS_DIR}"
 
 if [ "${failed}" -ne 0 ]; then
   echo "ERROR: One or more packaging tasks failed!"

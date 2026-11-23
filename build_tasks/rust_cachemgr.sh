@@ -22,18 +22,15 @@ PRUNE_DAYS=0
 CARGO_DIR=""
 SCCACHE_PATH=""
 
-# Lockfile details for concurrency protection (fallback sequence: TMPDIR -> TEMP -> TMP -> /tmp)
-LOCK_DIR=""
-if [ -n "$TMPDIR" ]; then
-    LOCK_DIR="$TMPDIR"
-elif [ -n "$TEMP" ]; then
-    LOCK_DIR="$TEMP"
-elif [ -n "$TMP" ]; then
-    LOCK_DIR="$TMP"
-else
-    LOCK_DIR="/tmp"
+LOG_INFO_TO_STDERR=1
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CORE_LIB="${SCRIPT_DIR}/lib/pkg_core.sh"
+if [ ! -f "${CORE_LIB}" ]; then
+    echo "ERROR: Shared core library not found: ${CORE_LIB}" >&2
+    exit 1
 fi
-LOCK_FILE="${LOCK_DIR}/rust_cachemgr.lock"
+# shellcheck source=lib/pkg_core.sh
+source "${CORE_LIB}"
 
 # ANSI Colors: Enabled only if running interactively in a TTY
 if [ -t 1 ]; then
@@ -47,61 +44,6 @@ if [ -t 1 ]; then
 else
     RED='' GREEN='' YELLOW='' BLUE='' CYAN='' NC='' BOLD=''
 fi
-
-# -----------------------------------------------------------------
-#  2. Path Conversion Helpers
-# -----------------------------------------------------------------
-# normalizes paths from Windows/Cygwin formats (C:\path) to Unix POSIX
-to_posix_path() {
-    local raw_path="$1"
-    if [ -z "$raw_path" ]; then
-        echo ""
-        return
-    fi
-    # If running on Cygwin/MSYS2, utilize native cygpath utility
-    if command -v cygpath >/dev/null 2>&1; then
-        cygpath -u "$raw_path"
-    else
-        # Fallback naive normalization for Unix-like environments without cygpath
-        if [[ "$raw_path" =~ ^[a-zA-Z]:\\ ]]; then
-            echo "$raw_path" | sed 's|\\|/|g' | sed -r 's|^([a-zA-Z]):|/\1|'
-        else
-            echo "$raw_path"
-        fi
-    fi
-}
-
-# -----------------------------------------------------------------
-#  3. Concurrency Protection (Lockfile Management)
-# -----------------------------------------------------------------
-# Removes the lockfile upon script completion or termination
-cleanup_lock() {
-    rm -f "$LOCK_FILE"
-}
-
-# Ensures only one instance of the script executes at a time
-acquire_lock() {
-    # Check if a lockfile from a previous/current execution exists
-    if [ -f "$LOCK_FILE" ]; then
-        local lock_pid
-        lock_pid=$(cat "$LOCK_FILE" 2>/dev/null)
-        # Verify if the process ID recorded in the lockfile is still active
-        if [ -n "$lock_pid" ] && ps -p "$lock_pid" >/dev/null 2>&1; then
-            if [ "$JSON_OUTPUT" -eq 1 ]; then
-                echo "{\"status\": \"error\", \"message\": \"Another instance of rust_cachemgr is already running (PID: $lock_pid).\"}"
-            else
-                echo -e "${RED}${BOLD}ERROR: Another instance of rust_cachemgr is already running (PID: $lock_pid).${NC}"
-            fi
-            exit 6
-        fi
-    fi
-
-    # Write current process ID to the lockfile
-    echo "$$" > "$LOCK_FILE" 2>/dev/null
-    
-    # Establish trap handlers to ensure the lockfile is cleared on exit or break signals
-    trap cleanup_lock EXIT INT TERM
-}
 
 # -----------------------------------------------------------------
 #  4. Cache Path Resolution
@@ -619,8 +561,8 @@ done
 
 # Set up logging redirection to the log file via 'tee' if specified
 if [ -n "$LOG_FILE" ]; then
-    mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null
-    exec > >(tee -i "$LOG_FILE") 2>&1
+    init_log_file "$LOG_FILE"
+    RED='' GREEN='' YELLOW='' BLUE='' CYAN='' NC='' BOLD=''
 fi
 
 # Confirm that an action has been selected
@@ -629,8 +571,15 @@ if [ -z "$ACTION" ]; then
     exit 1
 fi
 
-# Acquire lockfile to prevent race conditions during operations
-acquire_lock
+# Acquire race-free lockdir to prevent concurrent cache mutation
+if ! acquire_lock "rust_cachemgr" 2>/dev/null; then
+    if [ "$JSON_OUTPUT" -eq 1 ]; then
+        echo '{"status": "error", "message": "Another instance of rust_cachemgr is already running."}'
+    else
+        echo -e "${RED}${BOLD}ERROR: Another instance of rust_cachemgr is already running.${NC}"
+    fi
+    exit 6
+fi
 
 # Execute corresponding handler
 if [ "$ACTION" = "get-info" ]; then

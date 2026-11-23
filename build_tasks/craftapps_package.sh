@@ -38,7 +38,7 @@
 #      validates package selection early, and supports external config files.
 #   2. Path Normalization & Mount Translation:
 #      Dual-layer path engine: enforce_drive_path for user display/logging,
-#      and to_cygpath for internal POSIX filesystem calls and glob patterns.
+#      and to_posix_path for internal POSIX filesystem calls and glob patterns.
 #   3. Defensive Filesystem Controller:
 #      safe_rm_rf and safe_rm_f wrappers preventing accidental deletions of
 #      empty strings, filesystem roots, or system directories.
@@ -346,94 +346,9 @@ EOF
 # ------------------------------------------------------------------------------
 # Section 8: GitHub API Discovery & Asset Extraction Engine
 # ------------------------------------------------------------------------------
-# fetch_github_release <org> <repo> [token]
-# Queries the GitHub Releases API to retrieve the latest release metadata in JSON.
-#
-# Arguments:
-#   $1 - GitHub organization namespace (e.g., "storytold")
-#   $2 - Repository name (e.g., "soundcraft")
-#   $3 - Optional personal access token for Bearer authentication
-# Outputs:
-#   Raw JSON response from the GitHub API.
-# Resilience & Fallback:
-#   - Connect timeout: 10s; transfer timeout: 30s.
-#   - If /releases/latest returns 404 "Not Found" or empty (common when a release
-#     is flagged as pre-release or draft), falls back to querying `/releases?per_page=1`
-#     and extracts the first release object using jq.
-fetch_github_release() {
-    local org="$1"
-    local repo="$2"
-    local token="${3:-}"
-
-    local url="https://api.github.com/repos/${org}/${repo}/releases/latest"
-    local auth_header=()
-    if [[ -n "$token" ]]; then
-        auth_header=(-H "Authorization: Bearer ${token}")
-    fi
-
-    local response
-    response=$(curl -sSL --connect-timeout 10 --max-time 30 "${auth_header[@]}" \
-        -H "Accept: application/vnd.github+json" \
-        -H "User-Agent: craftapps-packager" \
-        "$url" 2> /dev/null || true)
-
-    # Fallback to /releases?per_page=1 if /releases/latest returns Not Found (e.g. pre-releases)
-    if [[ "$response" == *"Not Found"* ]] || [[ -z "$response" ]]; then
-        local fallback_url="https://api.github.com/repos/${org}/${repo}/releases?per_page=1"
-        local fallback_resp
-        fallback_resp=$(curl -sSL --connect-timeout 10 --max-time 30 "${auth_header[@]}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "User-Agent: craftapps-packager" \
-            "$fallback_url" 2> /dev/null || true)
-        if [[ "$fallback_resp" =~ ^[[:space:]]*\[ ]]; then
-            local first_rel
-            first_rel=$(echo "$fallback_resp" | jq '.[0] // empty' 2> /dev/null)
-            [[ -n "$first_rel" && "$first_rel" != "null" ]] && response="$first_rel"
-        fi
-    fi
-
-    echo "$response"
-}
-
-# ------------------------------------------------------------------------------
-# Parse Release Asset URLs (Linux x86_64 tar.gz & Windows x86_64 zip)
-# ------------------------------------------------------------------------------
-# extract_asset_urls <release_json>
-# Parses GitHub release JSON using jq to locate the two required binary archives:
-#   1. Linux 64-bit archive: *.tar.gz matching x86_64, amd64, or x64.
-#   2. Windows 64-bit archive: *.zip matching win, x86_64, amd64, or x64.
-#
-# Arguments:
-#   $1 - GitHub release JSON payload.
-# Outputs:
-#   Prints two tab-delimited lines to stdout:
-#     Line 1: <linux_asset_filename>\t<linux_download_url>
-#     Line 2: <windows_asset_filename>\t<windows_download_url>
-# Filtering Heuristics:
-#   - Case-insensitive matching for platform and architecture.
-#   - Negative filters exclude source bundles, debug symbol archives, and web assets.
-extract_asset_urls() {
-    local json="$1"
-
-    local linux_info win_info
-    linux_info=$(echo "$json" | jq -r '
-        [ .assets[]? |
-          select(.name | test("linux"; "i")) |
-          select(.name | test("x86_64|amd64|x64"; "i")) |
-          select(.name | test("[.]tar[.](gz|xz)$"; "i")) |
-          select(.name | test("source|src|debug|symbols"; "i") | not)
-        ] | first // empty | "\(.name)\t\(.browser_download_url)"
-    ')
-    win_info=$(echo "$json" | jq -r '
-        [ .assets[]? |
-          select(.name | test("win"; "i")) |
-          select(.name | test("x86_64|amd64|x64"; "i")) |
-          select(.name | test("[.]zip$"; "i")) |
-          select(.name | test("web|source|src|debug|symbols"; "i") | not)
-        ] | first // empty | "\(.name)\t\(.browser_download_url)"
-    ')
-    printf '%s\n%s\n' "$linux_info" "$win_info"
-}
+# GitHub Releases resolution, asset matching, and verified downloads are
+# provided by lib/pkg_transfer.sh (gh_resolve_release, gh_find_asset,
+# gh_download_verified_asset).
 
 # ------------------------------------------------------------------------------
 # Section 8b: Artifact Cleanup & Recompression Engine
@@ -527,7 +442,7 @@ run_deploy_pipeline() {
     log_step "Starting Craft Apps Deployment..."
 
     # Ensure deployment target directory exists
-    DEPLOY_TARGET_CYG=$(to_cygpath "$DEPLOY_TARGET")
+    DEPLOY_TARGET_CYG=$(to_posix_path "$DEPLOY_TARGET")
     if [[ ! -d "$DEPLOY_TARGET_CYG" ]]; then
         log_info "Creating deployment target directory: $(enforce_drive_path "$DEPLOY_TARGET_CYG")"
         if ! mkdir -p "$DEPLOY_TARGET_CYG"; then
@@ -548,7 +463,7 @@ run_deploy_pipeline() {
     # Validate source directory early if local path
     if [[ "$SOURCE_IS_URL" == false ]]; then
         local source_test_cyg
-        source_test_cyg=$(to_cygpath "$SOURCE_PATH")
+        source_test_cyg=$(to_posix_path "$SOURCE_PATH")
         if [[ ! -d "$source_test_cyg" ]]; then
             log_error "Source directory not found: $SOURCE_PATH ($source_test_cyg)"
             return 1
@@ -560,7 +475,7 @@ run_deploy_pipeline() {
     fi
 
     # Execution Workspace
-    EXEC_WORKSPACE=$(mktemp -d "${TEMP_ROOT_CYG}/craftapps_deploy_XXXXXX")
+    EXEC_WORKSPACE=$(create_temp_workdir "craftapps_deploy_") || true
     if [[ -z "$EXEC_WORKSPACE" || ! -d "$EXEC_WORKSPACE" ]]; then
         log_error "Failed to create deployment execution workspace in $TEMP_ROOT_PATH"
         return 1
@@ -576,7 +491,7 @@ run_deploy_pipeline() {
     local url_index_html=""
     if [[ "$SOURCE_IS_URL" == true ]]; then
         log_info "Fetching remote directory index from $SOURCE_PATH..."
-        url_index_html=$(curl -sSL --connect-timeout 10 --max-time 30 "$SOURCE_PATH" 2> /dev/null || true)
+        url_index_html=$(fetch_text "$SOURCE_PATH" 30 true || true)
         if [[ -z "$url_index_html" ]]; then
             log_error "Failed to retrieve directory index from URL: $SOURCE_PATH"
             return 1
@@ -617,18 +532,17 @@ run_deploy_pipeline() {
 
             local download_url="${SOURCE_PATH%/}/${remote_filename}"
             log_info "Downloading $remote_filename from $download_url..."
-            if ! curl -f -sSL --retry 3 --retry-delay 2 -o "${CURRENT_BUILD_DIR}/${remote_filename}" "$download_url"; then
+            if ! download_asset "$download_url" "${CURRENT_BUILD_DIR}/${remote_filename}" "" "sha256" true; then
                 log_error "Failed to download $download_url"
                 error_count=$((error_count + 1))
-                safe_rm_rf "$CURRENT_BUILD_DIR"
-                CURRENT_BUILD_DIR=""
+                cleanup_current_build_dir
                 continue
             fi
             archive_file="${CURRENT_BUILD_DIR}/${remote_filename}"
         else
             # Flat directory lookup in source folder
             local source_cyg
-            source_cyg=$(to_cygpath "$SOURCE_PATH")
+            source_cyg=$(to_posix_path "$SOURCE_PATH")
             shopt -s nullglob
             local candidate_files=("${source_cyg}/${app_name}-"*.zip)
             shopt -u nullglob
@@ -772,7 +686,7 @@ run_deploy_pipeline() {
                         log_info "Excluding CLI binary (--no-cli): $bname"
                         continue
                     fi
-                    if [[ -x "$bin_file" ]] || file "$bin_file" 2> /dev/null | grep -qi "elf"; then
+                    if [[ -x "$bin_file" ]] || grep -qi "elf" <<< "$(file "$bin_file" 2> /dev/null || true)"; then
                         cp -f "$bin_file" "${DEPLOY_TARGET_CYG}/${bname}"
                         chmod 755 "${DEPLOY_TARGET_CYG}/${bname}" 2> /dev/null || true
                         deployed_bins=$((deployed_bins + 1))
@@ -793,7 +707,7 @@ run_deploy_pipeline() {
                 find "$content_root" -type f \( -iname "*-cli.exe" -o -name "*-cli" \) -exec rm -f {} + 2> /dev/null || true
             fi
             log_info "Deploying archive contents to $(enforce_drive_path "$DEPLOY_TARGET_CYG")..."
-            cp -rf "$content_root"/. "$DEPLOY_TARGET_CYG/"
+            cp -Rf "$content_root"/. "$DEPLOY_TARGET_CYG/"
             chmod -R a+rX "$DEPLOY_TARGET_CYG" 2> /dev/null || true
             deploy_success=true
             log_ok "Deployed contents for $app_name."
@@ -942,7 +856,7 @@ done
 # Format per line: "REL_DIR APP_NAME [SUFFIX] [GITHUB_REPO]"
 # ------------------------------------------------------------------------------
 if [[ -n "$CONFIG_FILE" ]]; then
-    CONFIG_CYG=$(to_cygpath "$CONFIG_FILE")
+    CONFIG_CYG=$(to_posix_path "$CONFIG_FILE")
     if [[ ! -f "$CONFIG_CYG" ]]; then
         log_error "Configuration file not found: $CONFIG_FILE ($CONFIG_CYG)"
         exit 1
@@ -1036,16 +950,16 @@ fi
 # Enforce canonical drive:/path/sub format for user display and logs
 if [[ "$SOURCE_IS_URL" == false ]]; then
     SOURCE_PATH=$(enforce_drive_path "$SOURCE_PATH")
-    SOURCE_CYG=$(to_cygpath "$SOURCE_PATH")
+    SOURCE_CYG=$(to_posix_path "$SOURCE_PATH")
 else
     SOURCE_CYG="$SOURCE_PATH"
 fi
 TARGET_PATH=$(enforce_drive_path "$TARGET_PATH")
-TARGET_CYG=$(to_cygpath "$TARGET_PATH")
+TARGET_CYG=$(to_posix_path "$TARGET_PATH")
 
 if [[ -n "$DEPLOY_TARGET" ]]; then
     DEPLOY_TARGET=$(enforce_drive_path "$DEPLOY_TARGET")
-    DEPLOY_TARGET_CYG=$(to_cygpath "$DEPLOY_TARGET")
+    DEPLOY_TARGET_CYG=$(to_posix_path "$DEPLOY_TARGET")
 fi
 
 # Automatically detect the root of the temp folder (TMP -> TEMP -> TMPDIR -> /tmp)
@@ -1096,9 +1010,6 @@ fi
 
 # Ensure directories exist and initialize unique execution workspace for build
 init_exec_workspace "craftapps_exec_" "$SOURCE_CYG" "$TARGET_CYG" "$DRY_RUN" "$UPDATE_SOURCE"
-if [[ "$DRY_RUN" == false && -d "$TEMP_ROOT_CYG" && "$TEMP_ROOT_CYG" != "/" && ! "$TEMP_ROOT_CYG" =~ ^(/cygdrive/|/mnt/|/)[a-zA-Z]$ ]]; then
-    find "$TEMP_ROOT_CYG" -maxdepth 1 -type d -name "craftapps_deploy_*" -mtime +1 -exec rm -rf {} + 2> /dev/null || true
-fi
 
 # Execution Counters
 TOTAL_COUNT=0
@@ -1131,40 +1042,18 @@ for entry in "${PACKAGES[@]}"; do
     log_info "Local version  : ${C_BOLD}${local_ver}${C_RESET} (${local_file:-none found})"
 
     # Step 2: Query GitHub API for latest release metadata
-    release_json=$(fetch_github_release "$GITHUB_ORG" "$repo" "$GITHUB_TOKEN")
-
-    # Check for GitHub errors / rate limits
-    gh_message=$(echo "$release_json" | jq -r '.message // empty' 2> /dev/null)
-
-    if [[ -n "$gh_message" ]]; then
-        if [[ "$gh_message" == *"API rate limit exceeded"* ]]; then
-            log_error "GitHub API rate limit exceeded. Please wait or provide --token <github_pat>."
-            ERROR_COUNT=$((ERROR_COUNT + 1))
-            log_warn "Halting further checks to avoid repeated rate-limit rejections."
-            break
-        elif [[ "$gh_message" == *"Not Found"* ]]; then
-            log_warn "Repository or release not found: https://github.com/$GITHUB_ORG/$repo"
-            ERROR_COUNT=$((ERROR_COUNT + 1))
-            continue
-        else
-            log_warn "GitHub API message for $app_name: $gh_message"
-            ERROR_COUNT=$((ERROR_COUNT + 1))
-            continue
-        fi
-    fi
-
-    # Extract tag_name from release JSON
-    tag_name=$(echo "$release_json" | jq -r '.tag_name // empty' 2> /dev/null)
-
-    if [[ -z "$tag_name" || "$tag_name" == "null" ]]; then
-        log_warn "No published releases found for $app_name."
-        SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+    rel_rc=0
+    rel_info=$(gh_resolve_release "${GITHUB_ORG}/${repo}" "$app_name" "" "$GITHUB_TOKEN") || rel_rc=$?
+    if [[ $rel_rc -eq 2 ]]; then
+        ERROR_COUNT=$((ERROR_COUNT + 1))
+        log_warn "Halting further checks to avoid repeated rate-limit rejections."
+        break
+    elif [[ $rel_rc -ne 0 || -z "$rel_info" ]]; then
+        ERROR_COUNT=$((ERROR_COUNT + 1))
         continue
     fi
 
-    # Normalize remote version (strip leading v/V)
-    remote_ver="${tag_name#v}"
-    remote_ver="${remote_ver#V}"
+    IFS=$'\t' read -r remote_ver tag_name release_json <<< "$rel_info"
     log_info "Remote version : ${C_BOLD}${remote_ver}${C_RESET} (tag: $tag_name)"
 
     # Step 3: Check if update or repackage is needed
@@ -1180,12 +1069,15 @@ for entry in "${PACKAGES[@]}"; do
         continue
     fi
 
-    # Step 4: Extract required asset URLs (Linux x86_64 .tar.gz & Windows x86_64 .zip)
-    asset_info=$(extract_asset_urls "$release_json")
-    linux_name=$(echo "$asset_info" | sed -n '1p' | cut -f1)
-    linux_url=$(echo "$asset_info" | sed -n '1p' | cut -f2)
-    win_name=$(echo "$asset_info" | sed -n '2p' | cut -f1)
-    win_url=$(echo "$asset_info" | sed -n '2p' | cut -f2)
+    # Step 4: Extract required asset URLs (Linux x86_64 tar.gz/xz & Windows x86_64 zip)
+    linux_row=$(gh_find_asset "$release_json" \
+        "(linux.*(x86_64|amd64|x64)|(x86_64|amd64|x64).*linux).*[.]tar[.](gz|xz)$" \
+        "source|src|debug|symbols")
+    win_row=$(gh_find_asset "$release_json" \
+        "(win.*(x86_64|amd64|x64)|(x86_64|amd64|x64).*win).*[.]zip$" \
+        "web|source|src|debug|symbols")
+    IFS=$'\t' read -r linux_name linux_url linux_digest <<< "$linux_row"
+    IFS=$'\t' read -r win_name win_url win_digest <<< "$win_row"
 
     if [[ "$VERBOSE" == true ]]; then
         log_info "Linux asset   : ${linux_name:-NOT FOUND}"
@@ -1237,46 +1129,34 @@ for entry in "${PACKAGES[@]}"; do
         continue
     fi
 
-    # Step 5a: Download Linux asset to tmp
-    log_info "Downloading Linux asset to tmp: $linux_name..."
-    if ! download_asset "$linux_url" "${CURRENT_BUILD_DIR}/${linux_name}"; then
-        safe_rm_rf "$CURRENT_BUILD_DIR"
-        CURRENT_BUILD_DIR=""
+    # Step 5a: Download Linux asset to tmp (verifying SHA-256 when published)
+    if ! gh_download_verified_asset "$release_json" "Linux asset" "$linux_name" "$linux_url" "$linux_digest" "${CURRENT_BUILD_DIR}/${linux_name}" "$CURRENT_BUILD_DIR"; then
+        cleanup_current_build_dir
         ERROR_COUNT=$((ERROR_COUNT + 1))
         continue
     fi
 
-    # Step 5b: Verify Linux asset integrity in tmp (tar -tzf or tar -tJf)
+    # Step 5b: Verify Linux asset integrity in tmp
     log_info "Verifying Linux archive integrity in tmp..."
-    lnx_ok=false
-    if [[ "$linux_name" =~ \.tar\.xz$ ]]; then
-        verify_tar_xz_integrity "${CURRENT_BUILD_DIR}/${linux_name}" && lnx_ok=true
-    else
-        tar --force-local -tzf "${CURRENT_BUILD_DIR}/${linux_name}" > /dev/null 2>&1 && lnx_ok=true
-    fi
-    if [[ "$lnx_ok" == false ]]; then
+    if ! verify_archive_integrity "${CURRENT_BUILD_DIR}/${linux_name}"; then
         log_error "Corrupted or invalid Linux archive downloaded: $linux_name"
-        safe_rm_rf "$CURRENT_BUILD_DIR"
-        CURRENT_BUILD_DIR=""
+        cleanup_current_build_dir
         ERROR_COUNT=$((ERROR_COUNT + 1))
         continue
     fi
 
-    # Step 5c: Download Windows asset to tmp
-    log_info "Downloading Windows asset to tmp: $win_name..."
-    if ! download_asset "$win_url" "${CURRENT_BUILD_DIR}/${win_name}"; then
-        safe_rm_rf "$CURRENT_BUILD_DIR"
-        CURRENT_BUILD_DIR=""
+    # Step 5c: Download Windows asset to tmp (verifying SHA-256 when published)
+    if ! gh_download_verified_asset "$release_json" "Windows asset" "$win_name" "$win_url" "$win_digest" "${CURRENT_BUILD_DIR}/${win_name}" "$CURRENT_BUILD_DIR"; then
+        cleanup_current_build_dir
         ERROR_COUNT=$((ERROR_COUNT + 1))
         continue
     fi
 
-    # Step 5d: Verify Windows asset integrity in tmp (unzip -tq)
+    # Step 5d: Verify Windows asset integrity in tmp
     log_info "Verifying Windows archive integrity in tmp..."
-    if ! verify_zip_integrity "${CURRENT_BUILD_DIR}/${win_name}"; then
+    if ! verify_archive_integrity "${CURRENT_BUILD_DIR}/${win_name}"; then
         log_error "Corrupted or invalid Windows zip archive downloaded: $win_name"
-        safe_rm_rf "$CURRENT_BUILD_DIR"
-        CURRENT_BUILD_DIR=""
+        cleanup_current_build_dir
         ERROR_COUNT=$((ERROR_COUNT + 1))
         continue
     fi
@@ -1284,8 +1164,7 @@ for entry in "${PACKAGES[@]}"; do
     # Step 5e: Normalize Windows Archive (Extract, Strip Base Folder, Prune Artifacts & Repackage)
     log_info "Normalizing Windows archive for $app_name (stripping base folder & pruning artifacts)..."
     if ! _normalize_archive "Windows" "$win_name" "$win_name" repack_directory_to_zip; then
-        safe_rm_rf "$CURRENT_BUILD_DIR"
-        CURRENT_BUILD_DIR=""
+        cleanup_current_build_dir
         ERROR_COUNT=$((ERROR_COUNT + 1))
         continue
     fi
@@ -1299,8 +1178,7 @@ for entry in "${PACKAGES[@]}"; do
         *) final_linux_name="${linux_name}.tar.xz" ;;
     esac
     if ! _normalize_archive "Linux" "$linux_name" "$final_linux_name" repack_directory_to_tar_xz; then
-        safe_rm_rf "$CURRENT_BUILD_DIR"
-        CURRENT_BUILD_DIR=""
+        cleanup_current_build_dir
         ERROR_COUNT=$((ERROR_COUNT + 1))
         continue
     fi
@@ -1311,8 +1189,7 @@ for entry in "${PACKAGES[@]}"; do
     log_info "Packaging archives into $NEW_ZIP_NAME in tmp..."
     if ! (cd "$CURRENT_BUILD_DIR" && zip -q "$NEW_ZIP_NAME" "$linux_name" "$win_name"); then
         log_error "Failed to create repackaged zip in tmp: $NEW_ZIP_NAME"
-        safe_rm_rf "$CURRENT_BUILD_DIR"
-        CURRENT_BUILD_DIR=""
+        cleanup_current_build_dir
         ERROR_COUNT=$((ERROR_COUNT + 1))
         continue
     fi
@@ -1321,8 +1198,7 @@ for entry in "${PACKAGES[@]}"; do
     log_info "Verifying repackaged zip integrity in tmp..."
     if [[ ! -s "${CURRENT_BUILD_DIR}/${NEW_ZIP_NAME}" ]] || ! verify_zip_integrity "${CURRENT_BUILD_DIR}/${NEW_ZIP_NAME}"; then
         log_error "Repackaged zip failed integrity verification in tmp: ${NEW_ZIP_NAME}"
-        safe_rm_rf "$CURRENT_BUILD_DIR"
-        CURRENT_BUILD_DIR=""
+        cleanup_current_build_dir
         ERROR_COUNT=$((ERROR_COUNT + 1))
         continue
     fi

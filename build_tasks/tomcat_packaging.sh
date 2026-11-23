@@ -30,6 +30,19 @@
 
 set -euo pipefail
 
+LOG_INFO_TO_STDERR=0
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CORE_LIB="${SCRIPT_DIR}/lib/pkg_core.sh"
+ARCHIVE_LIB="${SCRIPT_DIR}/lib/pkg_archive.sh"
+if [ ! -f "${CORE_LIB}" ] || [ ! -f "${ARCHIVE_LIB}" ]; then
+  echo "ERROR: Shared libraries not found under ${SCRIPT_DIR}/lib" >&2
+  exit 1
+fi
+# shellcheck source=lib/pkg_core.sh
+source "${CORE_LIB}"
+# shellcheck source=lib/pkg_archive.sh
+source "${ARCHIVE_LIB}"
+
 # ==============================================================================
 # BASE DIRECTORY PATHS
 # BASE_DIR: The root workspace path for the RPM structure (/usr/src/redhat).
@@ -37,7 +50,7 @@ set -euo pipefail
 # BUILD_DIR: Folder used for extracting source archives.
 # BUILDROOT_DIR: Folder used for building the customized target directory.
 # ==============================================================================
-BASE_DIR="/usr/src/redhat"
+BASE_DIR="${BASE_DIR:-/usr/src/redhat}"
 SOURCES_DIR="${BASE_DIR}/SOURCES"
 BUILD_DIR="${BASE_DIR}/BUILD"
 BUILDROOT_DIR="${BASE_DIR}/BUILDROOT"
@@ -139,29 +152,28 @@ safe_mv() {
 }
 
 # Safety helper: Remove files/directories recursively only if they reside within BASE_DIR
-# Prevents accidental deletion of system directories (/ or parent traversal /..)
-# by validating that paths are non-empty and reside strictly under BASE_DIR.
-safe_rm_rf() {
+# Delegates canonical/traversal/root checks to pkg_core.sh safe_rm_rf / safe_rm_f
+# without shadowing the shared library helper names.
+tomcat_rm_rf() {
   if [ -z "${BASE_DIR:-}" ]; then
-    echo "ERROR: BASE_DIR is not set before calling safe_rm_rf"
+    echo "ERROR: BASE_DIR is not set before calling tomcat_rm_rf"
     exit 1
   fi
+  local path
   for path in "$@"; do
     if [ -z "$path" ]; then
       echo "ERROR: Attempted to delete an empty path"
       exit 1
     fi
-    # Check for root directory and parent directory traversal attempts
-    if [ "$path" = "/" ] || [ "$path" = "/*" ] || [[ "$path" == *".."* ]]; then
-      echo "ERROR: Dangerous path in safe_rm_rf: $path"
+    if [[ "$path" != "$BASE_DIR"* ]] || [[ "$path" == *".."* ]]; then
+      echo "ERROR: Dangerous or out-of-scope path in tomcat_rm_rf: $path (BASE_DIR=$BASE_DIR)"
       exit 1
     fi
-    # Ensure it starts with BASE_DIR to prevent deletions outside the workspace
-    if [[ "$path" != "$BASE_DIR"* ]]; then
-      echo "ERROR: Path '$path' is outside BASE_DIR '$BASE_DIR'"
-      exit 1
+    if [ -d "$path" ] && [ ! -L "$path" ]; then
+      safe_rm_rf "$path"
+    else
+      safe_rm_f "$path"
     fi
-    rm -rf "$path"
   done
 }
 
@@ -278,7 +290,7 @@ echo "Target Buildroot:         $TARGET_DIR"
 echo ""
 
 # Clean up existing directories to ensure a clean build
-safe_rm_rf "$EXTRACT_ORIG" "$EXTRACT_CUSTOM" "$TARGET_DIR"
+tomcat_rm_rf "$EXTRACT_ORIG" "$EXTRACT_CUSTOM" "$TARGET_DIR"
 mkdir -p "$EXTRACT_ORIG" "$EXTRACT_CUSTOM" "$TARGET_DIR"
 
 # ==============================================================================
@@ -310,9 +322,14 @@ cp -a "$EXTRACT_ORIG"/. "$TARGET_DIR"/
 # 4. Perform original prep work in target buildroot
 echo "Performing preparation work on buildroot Tomcat..."
 # Remove batch files and unwanted webapps
-safe_rm_rf "$TARGET_DIR"/bin/*.bat
-safe_rm_rf "$TARGET_DIR"/webapps/docs
-safe_rm_rf "$TARGET_DIR"/webapps/examples
+shopt -s nullglob
+bat_files=("$TARGET_DIR"/bin/*.bat)
+shopt -u nullglob
+if [ ${#bat_files[@]} -gt 0 ]; then
+  tomcat_rm_rf "${bat_files[@]}"
+fi
+tomcat_rm_rf "$TARGET_DIR"/webapps/docs
+tomcat_rm_rf "$TARGET_DIR"/webapps/examples
 
 # Rename files in bin
 for f in "${bin_files[@]}"; do
@@ -513,17 +530,20 @@ mkdir -p "${BASE_DIR}/RPMS/x86_64"
 # Set up a temp folder to control archive root path name
 local_temp_parent="${BUILD_DIR}/temp_archive_$$"
 local_temp_build="${local_temp_parent}/apache-tomcat-${ORIG_VER}"
-safe_rm_rf "$local_temp_parent"
+tomcat_rm_rf "$local_temp_parent"
 mkdir -p "$local_temp_parent"
 
 # Copy target buildroot directly to the temp folder (renaming root folder name to apache-tomcat-ORIG_VER)
 safe_cp "$TARGET_DIR" "$local_temp_build"
 
-# Package using tar xz compression (tar -cJf)
-tar -cJf "${BASE_DIR}/RPMS/x86_64/apache-tomcat-${ORIG_VER}-custom.tar.xz" -C "$local_temp_parent" "apache-tomcat-${ORIG_VER}"
+# Stage and publish verified xz archive atomically
+target_pkg_name="apache-tomcat-${ORIG_VER}-custom.tar.xz"
+staged_pkg="${local_temp_parent}/${target_pkg_name}"
+tar -cJf "$staged_pkg" -C "$local_temp_parent" "apache-tomcat-${ORIG_VER}"
+atomic_publish_file "$staged_pkg" "${BASE_DIR}/RPMS/x86_64/${target_pkg_name}" "tomcat" true
 
 # Clean up temp folder
-safe_rm_rf "$local_temp_parent"
+tomcat_rm_rf "$local_temp_parent"
 echo ""
 
 echo "[8/8] Completing Packaging & Staging Status..."
@@ -532,7 +552,7 @@ echo "=== Tomcat Packaging Complete ==="
 echo "=========================================================================="
 if [ "$PURGE_ON_SUCCESS" = true ]; then
   echo "Purging temporary build and buildroot folders..."
-  safe_rm_rf "$EXTRACT_ORIG" "$EXTRACT_CUSTOM" "$TARGET_DIR"
+  tomcat_rm_rf "$EXTRACT_ORIG" "$EXTRACT_CUSTOM" "$TARGET_DIR"
   echo "Successfully cleaned up: $EXTRACT_ORIG, $EXTRACT_CUSTOM, and $TARGET_DIR"
 else
   echo "Original extracted files kept in: $EXTRACT_ORIG"

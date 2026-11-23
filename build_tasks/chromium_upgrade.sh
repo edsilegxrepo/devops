@@ -55,8 +55,6 @@ set -euo pipefail
 #  DEFAULT CONFIGURATION GLOBALS
 # =============================================================================
 
-CURL_OPTS=("-f" "-s" "-S" "-L")
-
 DEFAULT_WIN_FROM_URL="https://github.com/Hibbiki/chromium-win64/releases/"
 DEFAULT_LNX_FROM_URL="https://ungoogled-software.github.io/ungoogled-chromium-binaries/"
 
@@ -64,65 +62,29 @@ DEFAULT_RELEASE_PATH="n:/softlib/software/public/inet/www/browser/chrome/"
 DEFAULT_ARCHIVE_PATH="f:/stage/upload/pending/"
 
 # =============================================================================
-#  PLATFORM DETECTION & PATH UTILITIES
+#  SHARED LIBRARY INITIALIZATION & PATH ENVIRONMENT
 # =============================================================================
-
-IS_WINDOWS="false"
-HAS_CYGPATH="false"
-if [[ "$(uname -s)" == *"CYGWIN"* || "$(uname -s)" == *"MSYS"* || "$(uname -s)" == *"MINGW"* ]]; then
-  IS_WINDOWS="true"
-  if command -v cygpath &> /dev/null; then HAS_CYGPATH="true"; fi
+LOG_INFO_TO_STDERR=1
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_LIB="${SCRIPT_DIR}/client_package_common.sh"
+if [ ! -f "${COMMON_LIB}" ]; then
+  echo "[ERROR] Shared library not found: ${COMMON_LIB}" >&2
+  exit 3
 fi
+# shellcheck source=client_package_common.sh
+source "${COMMON_LIB}"
+# chromium_upgrade.sh uses granular exit codes (1..7) and logs explicitly before exit
+trap - ERR
 
 # shellcheck disable=SC2034
 NUM_JOBS=$(nproc 2> /dev/null || echo 4)
 
-# Format path for Windows as <drive>:/path/sub with forward slashes
-function format_path() {
-  local p="${1:-}"
-  [ -z "${p}" ] && echo "" && return 0
-  local clean_p="${p//\\//}"
-  if [ "${IS_WINDOWS}" = "true" ] && [ "${HAS_CYGPATH}" = "true" ]; then
-    cygpath -m "${clean_p}" 2> /dev/null || echo "${clean_p}"
-  else
-    echo "${clean_p}"
-  fi
-}
-
-# Translate path to POSIX format for bash internal operations
-function to_posix_path() {
-  local p="${1:-}"
-  [ -z "${p}" ] && echo "" && return 0
-  local clean_p="${p//\\//}"
-  if [ "${IS_WINDOWS}" = "true" ] && [ "${HAS_CYGPATH}" = "true" ]; then
-    cygpath -u "${clean_p}" 2> /dev/null || echo "${clean_p}"
-  else
-    echo "${clean_p}"
-  fi
-}
-
-# Sanitize environmental path variables upfront
-[ -n "${TMPDIR:-}" ] && TMPDIR=$(format_path "${TMPDIR}")
-[ -n "${TMP:-}" ] && TMP=$(format_path "${TMP}")
-[ -n "${TEMP:-}" ] && TEMP=$(format_path "${TEMP}")
-[ -n "${USERPROFILE:-}" ] && USERPROFILE=$(format_path "${USERPROFILE}")
-[ -n "${HOME:-}" ] && HOME=$(format_path "${HOME}")
-
-# =============================================================================
-#  LOGGING UTILITIES
-# =============================================================================
-
-function log_info() {
-  echo "[INFO] $1" >&2
-}
-
-function log_warn() {
-  echo "[WARN] $1" >&2
-}
-
-function log_error() {
-  echo "[ERROR] $1" >&2
-}
+# Sanitize environmental path variables upfront for Windows native tools
+[ -n "${TMPDIR:-}" ] && TMPDIR=$(to_mixed_path "${TMPDIR}")
+[ -n "${TMP:-}" ] && TMP=$(to_mixed_path "${TMP}")
+[ -n "${TEMP:-}" ] && TEMP=$(to_mixed_path "${TEMP}")
+[ -n "${USERPROFILE:-}" ] && USERPROFILE=$(to_mixed_path "${USERPROFILE}")
+[ -n "${HOME:-}" ] && HOME=$(to_mixed_path "${HOME}")
 
 # =============================================================================
 #  PREREQUISITE & TOOL RESOLUTION
@@ -131,6 +93,7 @@ function log_error() {
 WITH_7Z_PATH=""
 RESOLVED_7Z_BIN=""
 RESOLVED_WSL_BIN=""
+SEVENZIP_BIN=""
 
 function find_wsl_binary() {
   local cand=""
@@ -149,39 +112,6 @@ function find_wsl_binary() {
   return 1
 }
 
-# Translate Windows/Cygwin path to WSL mount path (/mnt/<drive>/...)
-function win_to_wsl_path() {
-  local p="${1:-}"
-  [ -z "${p}" ] && echo "" && return 0
-  local wsl_bin="${RESOLVED_WSL_BIN:-wsl.exe}"
-
-  local wsl_p=""
-  if [ -n "${wsl_bin}" ] && command -v "${wsl_bin}" &> /dev/null; then
-    local win_fmt
-    win_fmt=$(format_path "${p}")
-    wsl_p=$("${wsl_bin}" -e wslpath -u "${win_fmt}" 2> /dev/null | tr -d '\r\n' || true)
-    if [ -n "${wsl_p}" ]; then
-      echo "${wsl_p}"
-      return 0
-    fi
-  fi
-
-  local clean_p="${p//\\//}"
-  if [[ "${clean_p}" =~ ^([a-zA-Z]):/(.*) ]]; then
-    local drive="${BASH_REMATCH[1],,}"
-    local rest="${BASH_REMATCH[2]}"
-    echo "/mnt/${drive}/${rest}"
-    return 0
-  elif [[ "${clean_p}" =~ ^/([a-zA-Z])/(.*) ]] || [[ "${clean_p}" =~ ^/cygdrive/([a-zA-Z])/(.*) ]]; then
-    local drive="${BASH_REMATCH[1],,}"
-    local rest="${BASH_REMATCH[2]}"
-    echo "/mnt/${drive}/${rest}"
-    return 0
-  fi
-
-  echo "${clean_p}"
-}
-
 function find_7z_binary() {
   local cand=""
 
@@ -190,22 +120,22 @@ function find_7z_binary() {
     cand=$(to_posix_path "${WITH_7Z_PATH}")
     if [ -d "${cand}" ]; then
       if [ -f "${cand}/7z.exe" ]; then
-        format_path "${cand}/7z.exe"
+        to_mixed_path "${cand}/7z.exe"
         return 0
       fi
       if [ -f "${cand}/7za.exe" ]; then
-        format_path "${cand}/7za.exe"
+        to_mixed_path "${cand}/7za.exe"
         return 0
       fi
       if [ -f "${cand}/7z" ]; then
-        format_path "${cand}/7z"
+        to_mixed_path "${cand}/7z"
         return 0
       fi
     elif [ -f "${cand}" ]; then
-      format_path "${cand}"
+      to_mixed_path "${cand}"
       return 0
     fi
-    log_error "Specified 7z path via --with-7z not found: $(format_path "${WITH_7Z_PATH}")"
+    log_error "Specified 7z path via --with-7z not found: $(to_mixed_path "${WITH_7Z_PATH}")"
     return 1
   fi
 
@@ -216,15 +146,15 @@ function find_7z_binary() {
     cand=$(to_posix_path "${env_7z_home}")
     if [ -d "${cand}" ]; then
       if [ -f "${cand}/7z.exe" ]; then
-        format_path "${cand}/7z.exe"
+        to_mixed_path "${cand}/7z.exe"
         return 0
       fi
       if [ -f "${cand}/7za.exe" ]; then
-        format_path "${cand}/7za.exe"
+        to_mixed_path "${cand}/7za.exe"
         return 0
       fi
     elif [ -f "${cand}" ]; then
-      format_path "${cand}"
+      to_mixed_path "${cand}"
       return 0
     fi
   fi
@@ -238,7 +168,7 @@ function find_7z_binary() {
   for p in "${std_paths[@]}"; do
     cand=$(to_posix_path "${p}")
     if [ -f "${cand}" ]; then
-      format_path "${cand}"
+      to_mixed_path "${cand}"
       return 0
     fi
   done
@@ -246,7 +176,7 @@ function find_7z_binary() {
   # 4. Check system PATH
   local path_7z=""
   if path_7z=$(command -v 7z.exe 2> /dev/null || command -v 7z 2> /dev/null || command -v 7za.exe 2> /dev/null || command -v 7za 2> /dev/null) && [ -n "${path_7z}" ]; then
-    format_path "${path_7z}"
+    to_mixed_path "${path_7z}"
     return 0
   fi
 
@@ -261,9 +191,10 @@ function verify_prerequisites() {
   if ! command -v grep &> /dev/null; then missing+=("grep"); fi
   if ! command -v sed &> /dev/null; then missing+=("sed"); fi
 
-  if [ "${IS_WINDOWS}" = "true" ]; then
+  if is_windows_platform; then
     RESOLVED_7Z_BIN=$(find_7z_binary || true)
     RESOLVED_WSL_BIN=$(find_wsl_binary || true)
+    SEVENZIP_BIN="${RESOLVED_7Z_BIN}"
   fi
 
   if [[ "${target_platform}" == *"windows"* ]]; then
@@ -275,22 +206,22 @@ function verify_prerequisites() {
     if [ -z "${RESOLVED_7Z_BIN}" ]; then
       missing+=("7z (specify via --with-7z <path> or 7Z_HOME)")
     else
-      log_info "Using 7z binary: $(format_path "${RESOLVED_7Z_BIN}")"
+      log_info "Using 7z binary: $(to_mixed_path "${RESOLVED_7Z_BIN}")"
     fi
   fi
 
   if [[ "${target_platform}" == *"linux"* ]]; then
-    if [ "${IS_WINDOWS}" = "true" ]; then
+    if is_windows_platform; then
       if [ -z "${RESOLVED_WSL_BIN}" ]; then
         missing+=("wsl (WSL is required on Windows to preserve Linux POSIX execution attributes)")
       else
-        log_info "Using WSL binary for Linux packaging: $(format_path "${RESOLVED_WSL_BIN}")"
+        log_info "Using WSL binary for Linux packaging: $(to_mixed_path "${RESOLVED_WSL_BIN}")"
       fi
     else
       if ! command -v tar &> /dev/null; then missing+=("tar"); fi
       if ! command -v xz &> /dev/null; then missing+=("xz"); fi
       if [ -n "${RESOLVED_7Z_BIN}" ]; then
-        log_info "Using 7z binary: $(format_path "${RESOLVED_7Z_BIN}")"
+        log_info "Using 7z binary: $(to_mixed_path "${RESOLVED_7Z_BIN}")"
       fi
     fi
   fi
@@ -319,11 +250,11 @@ function exec_7z() {
   for arg in "$@"; do
     if [[ "${arg}" == -o* ]]; then
       local out_dir="${arg#-o}"
-      win_args+=("-o$(format_path "${out_dir}")")
+      win_args+=("-o$(to_mixed_path "${out_dir}")")
     elif [[ "${arg}" == -* ]]; then
       win_args+=("${arg}")
     else
-      win_args+=("$(format_path "${arg}")")
+      win_args+=("$(to_mixed_path "${arg}")")
     fi
   done
 
@@ -368,7 +299,7 @@ function show_help() {
 }
 
 ACTION=""
-PLATFORM=""
+TARGET_PLATFORM=""
 FROM_URL=""
 RELEASE_PATH=""
 ARCHIVE_PATH=""
@@ -387,10 +318,10 @@ while [ $# -gt 0 ]; do
     --platform)
       [ -z "${2:-}" ] || [[ "$2" == -* ]] && log_error "--platform requires 'windows', 'linux', or 'windows,linux'." && exit 2
       new_plat=$(echo "$2" | tr '[:upper:]' '[:lower:]')
-      if [ -n "${PLATFORM:-}" ]; then
-        PLATFORM="${PLATFORM},${new_plat}"
+      if [ -n "${TARGET_PLATFORM:-}" ]; then
+        TARGET_PLATFORM="${TARGET_PLATFORM},${new_plat}"
       else
-        PLATFORM="${new_plat}"
+        TARGET_PLATFORM="${new_plat}"
       fi
       shift 2
       ;;
@@ -445,11 +376,11 @@ while [ $# -gt 0 ]; do
 done
 
 # Sanitize all CLI input paths for Cygwin/MSYS2 compatibility
-[ -n "${RELEASE_PATH}" ] && RELEASE_PATH=$(format_path "${RELEASE_PATH}")
-[ -n "${ARCHIVE_PATH}" ] && ARCHIVE_PATH=$(format_path "${ARCHIVE_PATH}")
-[ -n "${FROM_FOLDER}" ] && FROM_FOLDER=$(format_path "${FROM_FOLDER}")
-[ -n "${TO_FOLDER}" ] && TO_FOLDER=$(format_path "${TO_FOLDER}")
-[ -n "${WITH_7Z_PATH}" ] && WITH_7Z_PATH=$(format_path "${WITH_7Z_PATH}")
+[ -n "${RELEASE_PATH}" ] && RELEASE_PATH=$(to_mixed_path "${RELEASE_PATH}")
+[ -n "${ARCHIVE_PATH}" ] && ARCHIVE_PATH=$(to_mixed_path "${ARCHIVE_PATH}")
+[ -n "${FROM_FOLDER}" ] && FROM_FOLDER=$(to_mixed_path "${FROM_FOLDER}")
+[ -n "${TO_FOLDER}" ] && TO_FOLDER=$(to_mixed_path "${TO_FOLDER}")
+[ -n "${WITH_7Z_PATH}" ] && WITH_7Z_PATH=$(to_mixed_path "${WITH_7Z_PATH}")
 
 if [ -z "${ACTION}" ]; then
   log_error "--action parameter is mandatory (package or deploy)."
@@ -464,22 +395,22 @@ fi
 
 # Platform Auto-Detection / Validation
 if [ "${ACTION}" = "deploy" ]; then
-  if [ -n "${PLATFORM:-}" ]; then
+  if [ -n "${TARGET_PLATFORM:-}" ]; then
     log_error "--platform option is not allowed for deployment mode. Deployment target platform is always auto-detected."
     exit 2
   fi
 
-  if [ "${IS_WINDOWS}" = "true" ]; then
-    PLATFORM="windows"
+  if is_windows_platform; then
+    TARGET_PLATFORM="windows"
   else
     local_hint="${FROM_URL}${FROM_FOLDER}${TO_FOLDER}"
     if [[ "${local_hint}" == *"win"* || "${local_hint}" == *"w64"* ]]; then
-      PLATFORM="windows"
+      TARGET_PLATFORM="windows"
     else
-      PLATFORM="linux"
+      TARGET_PLATFORM="linux"
     fi
   fi
-  log_info "Auto-detected deployment platform target: ${PLATFORM}"
+  log_info "Auto-detected deployment platform target: ${TARGET_PLATFORM}"
 else
   # Packaging mode: default to both windows and linux if not specified
   if [ "${PURGE}" = "true" ]; then
@@ -487,23 +418,23 @@ else
     exit 2
   fi
 
-  if [ -z "${PLATFORM:-}" ]; then
-    PLATFORM="windows,linux"
+  if [ -z "${TARGET_PLATFORM:-}" ]; then
+    TARGET_PLATFORM="windows,linux"
     log_info "Packaging platform target not specified; defaulting to both: windows, linux"
   fi
 
-  case "${PLATFORM}" in
+  case "${TARGET_PLATFORM}" in
     windows | win)
-      PLATFORM="windows"
+      TARGET_PLATFORM="windows"
       ;;
     linux | lnx)
-      PLATFORM="linux"
+      TARGET_PLATFORM="linux"
       ;;
     windows,linux | linux,windows | win,linux | linux,win)
-      PLATFORM="windows,linux"
+      TARGET_PLATFORM="windows,linux"
       ;;
     *)
-      log_error "Invalid --platform '${PLATFORM}'. Supported values for packaging are: windows, linux, or windows,linux."
+      log_error "Invalid --platform '${TARGET_PLATFORM}'. Supported values for packaging are: windows, linux, or windows,linux."
       exit 2
       ;;
   esac
@@ -517,7 +448,7 @@ function verify_specified_paths() {
     local posix_ref
     posix_ref=$(to_posix_path "${check_ref}")
     if [ ! -e "${posix_ref}" ]; then
-      invalid+=("Specified --release-path does not exist: $(format_path "${check_ref}")")
+      invalid+=("Specified --release-path does not exist: $(to_mixed_path "${check_ref}")")
     fi
   fi
 
@@ -529,7 +460,7 @@ function verify_specified_paths() {
       local parent_arch
       parent_arch=$(dirname "${posix_arch}")
       if [ ! -d "${parent_arch}" ]; then
-        invalid+=("Target --archive-path parent directory does not exist: $(format_path "${check_arch}")")
+        invalid+=("Target --archive-path parent directory does not exist: $(to_mixed_path "${check_arch}")")
       fi
     fi
   fi
@@ -538,7 +469,7 @@ function verify_specified_paths() {
     local posix_src
     posix_src=$(to_posix_path "${FROM_FOLDER}")
     if [ ! -e "${posix_src}" ]; then
-      invalid+=("Specified --from-folder does not exist: $(format_path "${FROM_FOLDER}")")
+      invalid+=("Specified --from-folder does not exist: $(to_mixed_path "${FROM_FOLDER}")")
     fi
   fi
 
@@ -548,7 +479,7 @@ function verify_specified_paths() {
     local parent_to
     parent_to=$(dirname "${posix_to}")
     if [ ! -d "${parent_to}" ] && [ ! -d "${posix_to}" ]; then
-      invalid+=("Target --to-folder parent directory does not exist: $(format_path "${TO_FOLDER}")")
+      invalid+=("Target --to-folder parent directory does not exist: $(to_mixed_path "${TO_FOLDER}")")
     fi
   fi
 
@@ -556,7 +487,7 @@ function verify_specified_paths() {
     local posix_7z
     posix_7z=$(to_posix_path "${WITH_7Z_PATH}")
     if [ ! -e "${posix_7z}" ]; then
-      invalid+=("Specified 7z path via --with-7z does not exist: $(format_path "${WITH_7Z_PATH}")")
+      invalid+=("Specified 7z path via --with-7z does not exist: $(to_mixed_path "${WITH_7Z_PATH}")")
     fi
   fi
 
@@ -570,75 +501,26 @@ function verify_specified_paths() {
 }
 
 verify_specified_paths
-verify_prerequisites "${PLATFORM}"
+verify_prerequisites "${TARGET_PLATFORM}"
 
 # =============================================================================
 #  WORKSPACE TEMP MANAGEMENT
 # =============================================================================
 
+EXEC_WORKSPACE=""
 TEMP_WORKSPACE=""
 
-# Safe, highly defensive directory/file deletion helper
-# shellcheck disable=SC2329
-function safe_rm_rf() {
-  local target="${1:-}"
-  if [ -z "${target}" ]; then
-    log_warn "Safety Guard Triggered: Refusing to delete empty path."
-    return 1
-  fi
-
-  local posix_t
-  posix_t=$(to_posix_path "${target}")
-  local clean_t="${posix_t%/}"
-
-  # 1. Refuse dangerous/root system paths
-  if [ -z "${clean_t}" ] || [ "${clean_t}" = "/" ] || [ "${clean_t}" = "." ] || [ "${clean_t}" = ".." ] || [[ "${clean_t}" =~ ^/[a-zA-Z]$ ]]; then
-    log_error "Safety Guard Violation: Refusing rm -rf on root or system path: '${target}'"
-    return 1
-  fi
-
-  # 2. Require directory/file existence
-  if [ ! -e "${clean_t}" ] && [ ! -L "${clean_t}" ]; then
-    return 0
-  fi
-
-  # 3. Require path safety scope (must contain 'chromium-' or be inside TEMP/tmp)
-  local norm_path
-  norm_path=$(format_path "${clean_t}")
-  if [[ "${norm_path}" != *"chromium-"* ]] && [[ "${norm_path}" != *"TEMP"* ]] && [[ "${norm_path}" != *"/tmp"* ]]; then
-    log_error "Safety Guard Violation: Refusing rm -rf outside expected workspace scope: '${target}'"
-    return 1
-  fi
-
-  rm -rf "${clean_t}"
-}
-
-# shellcheck disable=SC2329
-function cleanup_workspace() {
-  if [ -n "${TEMP_WORKSPACE:-}" ] && [ -d "${TEMP_WORKSPACE}" ]; then
-    log_info "Cleaning up workspace: $(format_path "${TEMP_WORKSPACE}")"
-    safe_rm_rf "${TEMP_WORKSPACE}"
-  fi
-}
-
-trap cleanup_workspace EXIT INT TERM
-
 function create_temp_workspace() {
-  local base_tmp="${TMPDIR:-${TMP:-${TEMP:-/tmp}}}"
-  local posix_base
-  posix_base=$(to_posix_path "${base_tmp}")
-  [ ! -d "${posix_base}" ] && mkdir -p "${posix_base}"
-
-  local ts
-  ts=$(date +%Y%m%d%H%M%S)
-  TEMP_WORKSPACE="${posix_base}/chromium-${ts}"
-  mkdir -p "${TEMP_WORKSPACE}"
-  log_info "Created workspace: $(format_path "${TEMP_WORKSPACE}")"
+  if [ -z "${EXEC_WORKSPACE}" ] || [ ! -d "${EXEC_WORKSPACE}" ]; then
+    EXEC_WORKSPACE=$(create_temp_workdir "chromium_")
+  fi
+  TEMP_WORKSPACE="${EXEC_WORKSPACE}"
+  log_info "Created workspace: $(to_mixed_path "${TEMP_WORKSPACE}")"
 }
 
 function terminate_running_chrome_processes() {
   log_info "Ensuring any active Chromium/Chrome processes are terminated..."
-  if [ "${IS_WINDOWS}" = "true" ]; then
+  if is_windows_platform; then
     taskkill.exe /F /IM chrome.exe /T &> /dev/null || true
     taskkill.exe /F /IM chromium.exe /T &> /dev/null || true
     taskkill.exe /F /IM chromedriver.exe /T &> /dev/null || true
@@ -674,7 +556,7 @@ function extract_version_from_string() {
 # -----------------------------------------------------------------------------
 function resolve_reference_version() {
   local ref_path="$1"
-  local platform="${2:-${PLATFORM}}"
+  local platform="${2:-${TARGET_PLATFORM}}"
   local posix_ref
   posix_ref=$(to_posix_path "${ref_path}")
 
@@ -693,7 +575,7 @@ function resolve_reference_version() {
 
   [ -z "${target_file}" ] || [ ! -f "${target_file}" ] && echo "0.0.0.0" && return 0
 
-  log_info "Inspecting reference archive contents: $(format_path "${target_file}")"
+  log_info "Inspecting reference archive contents: $(to_mixed_path "${target_file}")"
 
   local listing=""
   if [[ "${target_file}" == *.tar.xz ]] || [[ "${target_file}" == *.tar.gz ]]; then
@@ -800,13 +682,13 @@ function normalize_extracted_layout() {
 # -----------------------------------------------------------------------------
 function prune_locales() {
   local target_dir="$1"
-  log_info "Pruning non-English locales in: $(format_path "${target_dir}")"
+  log_info "Pruning non-English locales in: $(to_mixed_path "${target_dir}")"
 
   local found_any="false"
   while IFS= read -r locales_dir; do
     [ -z "${locales_dir}" ] || [ ! -d "${locales_dir}" ] && continue
     found_any="true"
-    log_info "Target locales directory: $(format_path "${locales_dir}")"
+    log_info "Target locales directory: $(to_mixed_path "${locales_dir}")"
     local count_before
     count_before=$(find "${locales_dir}" -maxdepth 1 -type f | wc -l || echo 0)
 
@@ -814,11 +696,11 @@ function prune_locales() {
 
     local count_after
     count_after=$(find "${locales_dir}" -maxdepth 1 -type f | wc -l || echo 0)
-    log_info "Locale pruning complete for $(format_path "${locales_dir}"): files reduced from ${count_before} to ${count_after} (retained en-US*)."
+    log_info "Locale pruning complete for $(to_mixed_path "${locales_dir}"): files reduced from ${count_before} to ${count_after} (retained en-US*)."
   done < <(find "${target_dir}" -type d \( -iname "locales" -o -iname "Locales" \) || true)
 
   if [ "${found_any}" = "false" ]; then
-    log_warn "No locales directory found under $(format_path "${target_dir}"). Skipping locale pruning."
+    log_warn "No locales directory found under $(to_mixed_path "${target_dir}"). Skipping locale pruning."
   fi
 }
 
@@ -835,11 +717,11 @@ function fetch_github_release_asset() {
 
   local api_url="https://api.github.com/repos/${repo_owner_name}/releases/latest"
   local release_json=""
-  release_json=$(curl "${CURL_OPTS[@]}" "${api_url}" 2> /dev/null || true)
+  release_json=$(fetch_text "${api_url}" 30 false "chromium-updater" "${GITHUB_TOKEN:-}" "application/vnd.github+json" 2> /dev/null || true)
 
   local dl_url=""
   local tag=""
-  if [ -n "${release_json}" ] && echo "${release_json}" | grep -q "browser_download_url"; then
+  if [ -n "${release_json}" ] && grep -q "browser_download_url" <<< "${release_json}"; then
     dl_url=$(echo "${release_json}" | grep -oE "https://[^\"]+${asset_pattern}" | head -n 1 || true)
     tag=$(echo "${release_json}" | grep -oE '"tag_name": *"[^\"]+"' | cut -d'"' -f4 || true)
   fi
@@ -847,7 +729,9 @@ function fetch_github_release_asset() {
   if [ -z "${dl_url}" ] && [ -n "${fallback_page_url}" ]; then
     log_warn "GitHub API check did not return direct asset. Scraping release page..."
     local page_html
-    page_html=$(curl "${CURL_OPTS[@]}" "${fallback_page_url}" 2> /dev/null || true)
+    local allow_file=false
+    [[ "${fallback_page_url}" == file://* ]] && allow_file=true
+    page_html=$(fetch_text "${fallback_page_url}" 30 "${allow_file}" 2> /dev/null || true)
     dl_url=$(echo "${page_html}" | grep -oE "href=\"[^\"]+${asset_pattern}\"" | head -n 1 | sed 's/href="//;s/"//' || true)
     if [[ "${dl_url}" == /* ]]; then dl_url="https://github.com${dl_url}"; fi
     tag=$(echo "${dl_url}" | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(-r[0-9]+|-1)?' || true)
@@ -858,9 +742,9 @@ function fetch_github_release_asset() {
 
 # -----------------------------------------------------------------------------
 # Function: finalize_package_archive
-# Objective: Moves newly generated output package archive from temporary workspace
-#            to the final staging directory (--archive-path).
-# Data Flow: Workspace archive path + Target archive dir -> Move file -> Log confirmation.
+# Objective: Atomically promotes newly generated package archive from temporary
+#            workspace to the final staging directory (--archive-path).
+# Data Flow: Workspace archive path + Target archive dir -> Atomic verify & move.
 # -----------------------------------------------------------------------------
 function finalize_package_archive() {
   local output_archive="$1"
@@ -868,14 +752,15 @@ function finalize_package_archive() {
 
   local posix_arch_dir
   posix_arch_dir=$(to_posix_path "${arch_path}")
-  mkdir -p "${posix_arch_dir}"
-
   local pkg_filename
   pkg_filename=$(basename "${output_archive}")
-  mv -f "${output_archive}" "${posix_arch_dir}/${pkg_filename}"
+
+  if ! atomic_publish_file "${output_archive}" "${posix_arch_dir}/${pkg_filename}" "archive" true; then
+    exit 6
+  fi
 
   log_info "Package successfully created and moved to target archive directory:"
-  log_info "  -> $(format_path "${arch_path}/${pkg_filename}")"
+  log_info "  -> $(to_mixed_path "${arch_path}/${pkg_filename}")"
 }
 
 # -----------------------------------------------------------------------------
@@ -896,7 +781,7 @@ function extract_package_archive() {
   mkdir -p "${posix_target}"
 
   if [[ "${posix_archive}" == *.7z ]] || [[ "${posix_archive}" == *.zip ]]; then
-    if [ "${PLATFORM}" = "windows" ]; then
+    if [ "${TARGET_PLATFORM}" = "windows" ]; then
       log_info "Extracting archive using 7z..."
       if ! exec_7z x -y "-o${posix_target}" "${posix_archive}" > /dev/null; then
         log_error "Extraction of deployment archive failed."
@@ -913,10 +798,10 @@ function extract_package_archive() {
       fi
     fi
   elif [[ "${posix_archive}" == *.tar.xz ]] || [[ "${posix_archive}" == *.tar.gz ]]; then
-    if [ "${IS_WINDOWS}" = "true" ] || [ -n "${RESOLVED_7Z_BIN:-}" ] || command -v 7z &> /dev/null; then
+    if is_windows_platform || [ -n "${RESOLVED_7Z_BIN:-}" ] || command -v 7z &> /dev/null; then
       log_info "Extracting tar archive using 7z..."
       local extract_ok="false"
-      if [ "${IS_WINDOWS}" = "true" ] || [ -n "${RESOLVED_7Z_BIN:-}" ]; then
+      if is_windows_platform || [ -n "${RESOLVED_7Z_BIN:-}" ]; then
         if exec_7z x -y "-o${posix_target}" "${posix_archive}" > /dev/null; then
           extract_ok="true"
         fi
@@ -937,7 +822,7 @@ function extract_package_archive() {
         fi
 
         if [ -n "${intermediate_tar}" ] && [ -f "${intermediate_tar}" ]; then
-          if [ "${IS_WINDOWS}" = "true" ] || [ -n "${RESOLVED_7Z_BIN:-}" ]; then
+          if is_windows_platform || [ -n "${RESOLVED_7Z_BIN:-}" ]; then
             exec_7z x -y "-o${posix_target}" "${intermediate_tar}" > /dev/null
           else
             7z x -y "-o${posix_target}" "${intermediate_tar}" > /dev/null
@@ -960,7 +845,7 @@ function extract_package_archive() {
     fi
   else
     # Fallback extraction attempt
-    if [ "${PLATFORM}" = "windows" ]; then
+    if [ "${TARGET_PLATFORM}" = "windows" ]; then
       exec_7z x -y "-o${posix_target}" "${posix_archive}" > /dev/null
     else
       tar -xf "${posix_archive}" -C "${posix_target}"
@@ -987,8 +872,8 @@ function do_package_windows() {
 
   log_info "Executing Windows packaging workflow..."
   log_info "Source URL: ${url}"
-  log_info "Reference Path: $(format_path "${ref_path}")"
-  log_info "Target Archive Directory: $(format_path "${arch_path}")"
+  log_info "Reference Path: $(to_mixed_path "${ref_path}")"
+  log_info "Target Archive Directory: $(to_mixed_path "${arch_path}")"
 
   log_info "Inspecting remote release details from ${url}..."
   local release_meta
@@ -1019,7 +904,9 @@ function do_package_windows() {
   posix_ws=$(to_posix_path "${TEMP_WORKSPACE}")
 
   log_info "Downloading chrome.7z..."
-  if ! curl "${CURL_OPTS[@]}" "${download_url}" -o "${posix_ws}/chrome.7z"; then
+  local allow_file=false
+  [[ "${download_url}" == file://* ]] && allow_file=true
+  if ! download_asset "${download_url}" "${posix_ws}/chrome.7z" "" "sha256" "${allow_file}"; then
     log_error "Failed to download chrome.7z from ${download_url}"
     exit 4
   fi
@@ -1058,7 +945,7 @@ function do_package_linux_wsl() {
 
   local wsl_bin="${RESOLVED_WSL_BIN:-wsl.exe}"
   local wsl_arch_dest
-  wsl_arch_dest=$(win_to_wsl_path "${arch_path}")
+  wsl_arch_dest=$(to_wsl_path "${arch_path}")
 
   log_info "Delegating Linux packaging to WSL to preserve POSIX executable attributes..."
   log_info "WSL Destination: ${wsl_arch_dest}"
@@ -1151,7 +1038,7 @@ EOF_WSL
   fi
 
   log_info "Package successfully created via WSL and staged to destination:"
-  log_info "  -> $(format_path "${arch_path}/${pkg_filename}")"
+  log_info "  -> $(to_mixed_path "${arch_path}/${pkg_filename}")"
 }
 
 # -----------------------------------------------------------------------------
@@ -1170,8 +1057,8 @@ function do_package_linux() {
 
   log_info "Executing Linux packaging workflow..."
   log_info "Source URL: ${url}"
-  log_info "Reference Path: $(format_path "${ref_path}")"
-  log_info "Target Archive Directory: $(format_path "${arch_path}")"
+  log_info "Reference Path: $(to_mixed_path "${ref_path}")"
+  log_info "Target Archive Directory: $(to_mixed_path "${arch_path}")"
 
   log_info "Inspecting remote release details from ${url}..."
   local release_meta
@@ -1195,7 +1082,7 @@ function do_package_linux() {
 
   local pkg_filename="chromium-${remote_ver}-ungoogled-x86_64_linux.tar.xz"
 
-  if [ "${IS_WINDOWS}" = "true" ]; then
+  if is_windows_platform; then
     do_package_linux_wsl "${download_url}" "${remote_ver}" "${arch_path}" "${pkg_filename}"
   else
     create_temp_workspace
@@ -1203,7 +1090,9 @@ function do_package_linux() {
     posix_ws=$(to_posix_path "${TEMP_WORKSPACE}")
 
     log_info "Downloading Linux tar.xz archive..."
-    if ! curl "${CURL_OPTS[@]}" "${download_url}" -o "${posix_ws}/chromium.tar.xz"; then
+    local allow_file=false
+    [[ "${download_url}" == file://* ]] && allow_file=true
+    if ! download_asset "${download_url}" "${posix_ws}/chromium.tar.xz" "" "sha256" "${allow_file}"; then
       log_error "Failed to download tar.xz from ${download_url}"
       exit 4
     fi
@@ -1255,7 +1144,7 @@ function do_deploy() {
   local posix_target
   posix_target=$(to_posix_path "${TO_FOLDER}")
   posix_target="${posix_target%/}"
-  log_info "Executing deployment to target folder: $(format_path "${posix_target}")"
+  log_info "Executing deployment to target folder: $(to_mixed_path "${posix_target}")"
 
   create_temp_workspace
   local posix_ws
@@ -1267,7 +1156,9 @@ function do_deploy() {
     raw_name=$(basename "${FROM_URL%%#*}" | cut -d? -f1)
     archive_file="${posix_ws}/${raw_name:-downloaded_package}"
     log_info "Downloading package from URL: ${FROM_URL}"
-    if ! curl "${CURL_OPTS[@]}" "${FROM_URL}" -o "${archive_file}"; then
+    local allow_file=false
+    [[ "${FROM_URL}" == file://* ]] && allow_file=true
+    if ! download_asset "${FROM_URL}" "${archive_file}" "" "sha256" "${allow_file}"; then
       log_error "Failed to download deployment package from ${FROM_URL}"
       exit 4
     fi
@@ -1277,19 +1168,19 @@ function do_deploy() {
     if [ -f "${posix_src}" ]; then
       archive_file="${posix_src}"
     elif [ -d "${posix_src}" ]; then
-      log_info "Locating packaged archive for platform '${PLATFORM}' in folder: $(format_path "${FROM_FOLDER}")"
-      if [ "${PLATFORM}" = "windows" ]; then
+      log_info "Locating packaged archive for platform '${TARGET_PLATFORM}' in folder: $(to_mixed_path "${FROM_FOLDER}")"
+      if [ "${TARGET_PLATFORM}" = "windows" ]; then
         archive_file=$(find "${posix_src}" -maxdepth 1 -type f \( -name "chromium-*-x64.7z" -o -name "chromium-*-w64.zip" \) | sort -V | tail -n 1 || true)
       else
         archive_file=$(find "${posix_src}" -maxdepth 1 -type f \( -name "chromium-*-ungoogled-x86_64_linux.tar.xz" -o -name "chromium-*-x86_64_linux.tar.xz" -o -name "chromium-*-lnx.zip" \) | sort -V | tail -n 1 || true)
       fi
 
       if [ -z "${archive_file}" ]; then
-        log_error "No valid ${PLATFORM} chromium package found in folder: $(format_path "${FROM_FOLDER}")"
+        log_error "No valid ${TARGET_PLATFORM} chromium package found in folder: $(to_mixed_path "${FROM_FOLDER}")"
         exit 5
       fi
     else
-      log_error "Specified --from-folder does not exist: $(format_path "${FROM_FOLDER}")"
+      log_error "Specified --from-folder does not exist: $(to_mixed_path "${FROM_FOLDER}")"
       exit 2
     fi
   else
@@ -1301,12 +1192,12 @@ function do_deploy() {
   local archive_base
   archive_base=$(basename "${archive_file}" | tr '[:upper:]' '[:lower:]')
 
-  if [ "${PLATFORM}" = "windows" ]; then
+  if [ "${TARGET_PLATFORM}" = "windows" ]; then
     if [[ "${archive_base}" == *"linux"* || "${archive_base}" == *"ungoogled"* || "${archive_base}" == *".tar.xz"* ]]; then
       log_error "Cross-platform deployment prohibited: Cannot install Linux package '$(basename "${archive_file}")' on Windows environment."
       exit 2
     fi
-  elif [ "${PLATFORM}" = "linux" ]; then
+  elif [ "${TARGET_PLATFORM}" = "linux" ]; then
     if [[ "${archive_base}" == *"win"* || "${archive_base}" == *"x64"* || "${archive_base}" == *".7z"* ]]; then
       log_error "Cross-platform deployment prohibited: Cannot install Windows package '$(basename "${archive_file}")' on Linux environment."
       exit 2
@@ -1314,7 +1205,7 @@ function do_deploy() {
   fi
 
   local extract_stage="${posix_ws}/deploy_stage"
-  log_info "Deploying package archive: $(format_path "${archive_file}")"
+  log_info "Deploying package archive: $(to_mixed_path "${archive_file}")"
   extract_package_archive "${archive_file}" "${extract_stage}"
 
   local target_tmp="${posix_ws}/deploy_payload"
@@ -1332,7 +1223,7 @@ function do_deploy() {
   log_info "Stripping top-level container directory and copying ${item_count} item(s) to temporary staging..."
 
   if ! cp -af "${src_dir}/." "${target_tmp}/"; then
-    log_error "Failed to copy deployed contents to temporary staging: $(format_path "${target_tmp}")"
+    log_error "Failed to copy deployed contents to temporary staging: $(to_mixed_path "${target_tmp}")"
     exit 7
   fi
 
@@ -1351,7 +1242,7 @@ function do_deploy() {
     mkdir -p "${posix_target}"
     find "${posix_target}" -mindepth 1 -delete 2> /dev/null || true
     if ! cp -af "${target_tmp}/." "${posix_target}/"; then
-      log_error "Failed to deploy release contents to target destination: $(format_path "${TO_FOLDER}")"
+      log_error "Failed to deploy release contents to target destination: $(to_mixed_path "${TO_FOLDER}")"
       exit 7
     fi
   fi
@@ -1362,10 +1253,10 @@ function do_deploy() {
   if [ "${PURGE}" = "true" ]; then
     log_info "--purge flag specified: Purging deployed archive file..."
     if [ -f "${archive_file}" ]; then
-      log_info "  -> Purging archive: $(format_path "${archive_file}")"
+      log_info "  -> Purging archive: $(to_mixed_path "${archive_file}")"
       rm -f "${archive_file}"
     else
-      log_warn "Archive file not found or already removed: $(format_path "${archive_file}")"
+      log_warn "Archive file not found or already removed: $(to_mixed_path "${archive_file}")"
     fi
   fi
 }
@@ -1380,12 +1271,12 @@ function display_deployed_version() {
   local target_dir="$1"
   local version_str=""
 
-  if [ "${PLATFORM}" = "windows" ]; then
+  if [ "${TARGET_PLATFORM}" = "windows" ]; then
     local exe_path
     exe_path=$(find "${target_dir}" -type f -iname "chrome.exe" | head -n 1 || true)
     if [ -n "${exe_path}" ]; then
       local win_exe
-      win_exe=$(format_path "${exe_path}")
+      win_exe=$(to_mixed_path "${exe_path}")
       local ps_win_exe="${win_exe//\'/\'\'}"
       version_str=$(powershell.exe -NoProfile -Command "(Get-Item -LiteralPath '${ps_win_exe}').VersionInfo.ProductVersion" 2> /dev/null | tr -d '\r' || true)
     fi
@@ -1402,7 +1293,7 @@ function display_deployed_version() {
     log_info "Chromium Version Verification: ${version_str}"
     echo "-----------------------------------------------------------------------------"
   else
-    log_warn "Could not resolve version info from deployed directory $(format_path "${target_dir}")"
+    log_warn "Could not resolve version info from deployed directory $(to_mixed_path "${target_dir}")"
   fi
 }
 
@@ -1412,7 +1303,7 @@ function display_deployed_version() {
 
 case "${ACTION}" in
   package)
-    case "${PLATFORM}" in
+    case "${TARGET_PLATFORM}" in
       windows)
         log_info "============================================================================="
         log_info " Executing Windows Packaging Workflow..."

@@ -20,11 +20,23 @@
 set -e # Exit immediately if a command exits with a non-zero status
 set -u # Treat unset variables as an error
 
-# Detect Cygwin or MSYS2 environment
+LOG_INFO_TO_STDERR=1
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_LIB="${SCRIPT_DIR}/client_package_common.sh"
+if [ ! -f "${COMMON_LIB}" ]; then
+  echo -e "\n*** ERROR09: Shared library not found: ${COMMON_LIB}" >&2
+  exit 9
+fi
+# shellcheck source=client_package_common.sh
+source "${COMMON_LIB}"
+# rust_upgrade_win.sh uses custom granular error codes and explicit messages
+trap - ERR
+
+# Validate Windows POSIX host (Cygwin or MSYS2)
 OS_ENV="UNKNOWN"
-if [[ "$(uname -s)" == *"CYGWIN"* ]]; then
+if [ "${PLATFORM}" == "cygwin" ]; then
   OS_ENV="CYGWIN"
-elif [[ "$(uname -s)" == *"MSYS"* || "$(uname -s)" == *"MINGW"* ]]; then
+elif [ "${PLATFORM}" == "msys2" ]; then
   OS_ENV="MSYS"
 fi
 
@@ -33,32 +45,9 @@ if [ "${OS_ENV}" == "UNKNOWN" ]; then
   exit 9
 fi
 
-# Ensure official Cygwin/MSYS2 bin directory has highest priority in PATH
-# to avoid Microsoft/Windows bundled tools taking precedence.
-export PATH="/usr/bin:/bin:${PATH}"
-
-# -----------------------------------------------------------------------------
-# Path Conversion Utilities
-# Purpose:  Bridge native Windows executables and POSIX (Cygwin/MSYS2) bash environment.
-#
-#   to_win_path:   Converts a POSIX path to standard Windows format (backslash).
-#   to_unix_path:  Converts a Windows path to POSIX format (forward slash, /cygdrive).
-#   to_mixed_path: Converts any path to Windows drive-prefix with forward slashes (e.g. d:/path).
-# -----------------------------------------------------------------------------
-function to_win_path() {
-  [ -z "${1:-}" ] && echo "" && return 0
-  cygpath -w "$1" 2>/dev/null || echo "$1"
-}
-
-function to_unix_path() {
-  [ -z "${1:-}" ] && echo "" && return 0
-  cygpath -u "$1" 2>/dev/null || echo "$1"
-}
-
-function to_mixed_path() {
-  [ -z "${1:-}" ] && echo "" && return 0
-  cygpath -m "$1" 2>/dev/null || echo "$1"
-}
+# Backward-local convenience wrappers delegating to shared pkg_core.sh helpers
+function to_win_path() { to_syspath "$@"; }
+function to_unix_path() { to_posix_path "$@"; }
 
 # Default Directories & Configurations (Windows-style paths with forward slashes)
 # These are automatically resolved to POSIX paths (MSYS2 or Cygwin format) at startup.
@@ -87,10 +76,8 @@ GLOBAL_EXCLUDE_COMPONENTS=(
   "${GLOBAL_OPTIONAL_COMPONENTS[@]}"
 )
 
-# Resolve system temporary directory based on priority order: TMPDIR, TMP, TEMP, fallback to /tmp
-# Convert to POSIX format so that it uses MSYS2/Cygwin style paths (resolving colons and backslashes)
-RAW_TEMP="${TMPDIR:-${TMP:-${TEMP:-/tmp}}}"
-SYS_TMP_DIR=$(cygpath -u "${RAW_TEMP}" 2>/dev/null || echo "${RAW_TEMP}")
+# Resolve system temporary directory via shared detect_temp_root
+SYS_TMP_DIR="$(detect_temp_root)"
 
 # Staged variables for traps
 TEMP_WORKSPACE=""
@@ -108,79 +95,25 @@ mkdir -p "${BOOTSTRAP_CARGO_HOME}"
 CARGO_HOME=$(to_win_path "${BOOTSTRAP_CARGO_HOME}")
 export CARGO_HOME
 
-# -----------------------------------------------------------------------------
-# Function:    safe_delete
-# Description: Recursively deletes directories, files, or symbolic links safely.
-#              Performs defensive checks against empty strings, uninitialized 
-#              variables, root (/) paths, and Windows/POSIX drive roots (e.g. C:,
-#              /cygdrive/d, /d) to prevent destructive filesystem deletions.
-# Arguments:   $@ - One or more paths to delete.
-# Returns:     None (Exits with 99 on dangerous input detection).
-# -----------------------------------------------------------------------------
+# Safe deletion delegating to pkg_core.sh (--fast-win async NTFS removal), preserving exit 99
 function safe_delete() {
+  local path
   for path in "$@"; do
-    if [ -z "${path}" ]; then
-      continue
-    fi
-    local normalized
-    # shellcheck disable=SC1003
-    normalized=$(printf '%s\n' "${path}" | tr '\\' '/' | sed 's|//*|/|g' | sed 's|/$||')
-    
-    # Block Unix root or empty path
-    if [ "${normalized}" == "/" ] || [ "${normalized}" == "" ]; then
-      echo "*** ERROR: Dangerous deletion of root (/) or empty path prevented for target: ${path}!"
-      exit 99
-    fi
-    
-    # Block drive root structures (e.g. D:, d:/, D:\, /cygdrive/c, /cygdrive/c/, /c, /c/)
-    if [[ "${normalized}" =~ ^[a-zA-Z]:/?$ ]] || [[ "${normalized}" =~ ^/cygdrive/[a-zA-Z]/?$ ]] || [[ "${normalized}" =~ ^/[a-zA-Z]/?$ ]]; then
-      echo "*** ERROR: Dangerous deletion of drive root prevented for target: ${path}!"
-      exit 99
-    fi
-    
-    if [ -d "${normalized}" ]; then
-      # Fast path: rename directory out of the way instantly, then delete natively in background
-      local rand_suffix
-      rand_suffix=$(date +%s%N 2>/dev/null || echo "${RANDOM}")
-      local trash_dir="${normalized}.trash-${rand_suffix}"
-      local win_trash
-      
-      if mv -f -- "${normalized}" "${trash_dir}" 2>/dev/null; then
-        win_trash=$(to_win_path "${trash_dir}")
-        if [ "${OS_ENV}" == "CYGWIN" ]; then
-          cmd.exe /c rmdir /s /q "${win_trash}" >/dev/null 2>&1 &
-        else
-          cmd.exe //c rmdir //s //q "${win_trash}" >/dev/null 2>&1 &
-        fi
-      else
-        # Fallback if rename fails (e.g. due to lock or volume boundaries)
-        local win_path
-        win_path=$(to_win_path "${normalized}")
-        if [ "${OS_ENV}" == "CYGWIN" ]; then
-          cmd.exe /c rmdir /s /q "${win_path}" >/dev/null 2>&1 || rm -rf -- "${normalized}" || true
-        else
-          cmd.exe //c rmdir //s //q "${win_path}" >/dev/null 2>&1 || rm -rf -- "${normalized}" || true
-        fi
-      fi
-    elif [ -f "${normalized}" ] || [ -L "${normalized}" ]; then
-      rm -f -- "${normalized}" || true
+    [ -z "${path}" ] && continue
+    if [ -d "${path}" ] && [ ! -L "${path}" ]; then
+      safe_rm_rf --fast-win "${path}" || exit 99
+    else
+      safe_rm_f "${path}" || exit 99
     fi
   done
 }
 
-# Cleanup routine for exit signals
-# -----------------------------------------------------------------------------
-# Function:    cleanup
-# Description: Standard exit signal handler. Safely deletes the entire
-#              temporary compilation workspace sandboxes.
-# Arguments:   None
-# Returns:     None
-# -----------------------------------------------------------------------------
-# shellcheck disable=SC2329 # Invoked indirectly via trap on EXIT/INT/TERM/HUP
+# shellcheck disable=SC2329 # Chained onto EXIT trap
 cleanup() {
-  safe_delete "${TEMP_WORKSPACE}" "${DETECT_TMP_DIR}"
+  safe_delete "${TEMP_WORKSPACE:-}" "${DETECT_TMP_DIR:-}"
+  cleanup_workspace
 }
-trap cleanup EXIT INT TERM HUP
+trap cleanup EXIT
 
 # -----------------------------------------------------------------------------
 # Function:    configure_compiler_env
@@ -1070,7 +1003,7 @@ fi
 if [ "${HAS_AUTO}" == "true" ]; then
   echo -e "\n>> Auto-detecting latest stable Rust version..."
   MANIFEST_URL="https://static.rust-lang.org/dist/channel-rust-stable.toml"
-  MANIFEST_DATA=$(curl -sSfL "$MANIFEST_URL")
+  MANIFEST_DATA=$(fetch_text "$MANIFEST_URL" 30 || true)
   
   if [ -z "$MANIFEST_DATA" ]; then
     echo "ERROR: Failed to download Rust release manifest." && exit 1
@@ -1381,7 +1314,7 @@ if [ "${RUN_DEPLOY}" == "true" ]; then
   for dir in bin lib share etc libexec; do
     if [ -d "${DEPLOY_STAGING}/${dir}" ]; then
       mv "${DEPLOY_STAGING}/${dir}" "${TARGET_DIR}/" 2>/dev/null || {
-        cp -rf "${DEPLOY_STAGING}/${dir}" "${TARGET_DIR}/"
+        cp -Rf "${DEPLOY_STAGING}/${dir}" "${TARGET_DIR}/"
       }
     fi
   done
