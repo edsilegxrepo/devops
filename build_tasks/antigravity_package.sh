@@ -59,7 +59,7 @@ HUB_UPDATER_BASE="https://antigravity-hub-auto-updater-974169037036.us-central1.
 IDE_UPDATER_BASE="https://antigravity-ide-auto-updater-974169037036.us-central1.run.app"
 
 # ------------------------------------------------------------------------------
-# Section 7: Dynamic Upstream Endpoint Discovery
+# Section 2: Dynamic Upstream Endpoint Discovery
 # ------------------------------------------------------------------------------
 # _extract_first_match <ere_pattern> <text>
 # Returns the first regex match safely under pipefail without early-close SIGPIPE.
@@ -111,7 +111,7 @@ discover_endpoints() {
 }
 
 # ------------------------------------------------------------------------------
-# Section 8: Help / Usage
+# Section 3: Help / Usage
 # ------------------------------------------------------------------------------
 show_help() {
     cat << EOF
@@ -138,7 +138,7 @@ EOF
 }
 
 # ------------------------------------------------------------------------------
-# Section 9: CLI Argument Parsing
+# Section 4: CLI Argument Parsing
 # ------------------------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -201,7 +201,7 @@ case "$SPECIFIC_APP" in
 esac
 
 # ------------------------------------------------------------------------------
-# Section 10: Prerequisite Verification
+# Section 5: Prerequisite Verification
 # ------------------------------------------------------------------------------
 verify_required_tools curl zip unzip jq tar gzip xz
 
@@ -238,7 +238,7 @@ echo "==========================================================================
 init_exec_workspace "antigravity_exec_" "$SOURCE_CYG" "$TARGET_CYG" "$DRY_RUN" "$UPDATE_SOURCE"
 
 # ------------------------------------------------------------------------------
-# Section 11: Packaging Pipelines & Transformations
+# Section 6: Packaging Pipelines & Transformations
 # ------------------------------------------------------------------------------
 
 # Transform callbacks for run_dual_platform_package
@@ -418,7 +418,7 @@ package_ide() {
 }
 
 # ------------------------------------------------------------------------------
-# Section 14: Main Processing Loop
+# Section 7: Main Processing Loop
 # ------------------------------------------------------------------------------
 TOTAL_COUNT=0
 UPDATED_COUNT=0

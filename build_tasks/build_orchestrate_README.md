@@ -33,10 +33,10 @@ This document provides the architectural specification, operational flow analysi
 7. **Signal & Process Reaper Trap:** Guarantees orderly termination of background workers and safe purging of temporary directories upon receiving `EXIT`, `INT`, or `TERM` signals.
 
 ### Central Templates and Files
-* **[LICENSE](LICENSE)**: Organization's standard MIT License applied across private sub-projects.
-* **[SECURITY.md](SECURITY.md)**: Standard vulnerability reporting policies and response procedures.
-* **[TMPL.gitignore](TMPL.gitignore)**: Master `.gitignore` template detailing default build outputs, credentials, secrets, transient files, and editor caches.
-* **[build.inc](build.inc)**: Shared library providing diagnostic exit codes, logging primitives, temporary directory tracking, OS detection, and cryptographic helpers.
+* **[LICENSE](../../../LICENSE)**: Organization's standard MIT License applied across private sub-projects.
+* **[SECURITY.md](../../../SECURITY.md)**: Standard vulnerability reporting policies and response procedures.
+* **[TMPL.gitignore](../../../TMPL.gitignore)**: Master `.gitignore` template detailing default build outputs, credentials, secrets, transient files, and editor caches.
+* **[build.inc](build.inc)**: Go/RPM/DEB include (exit codes, NDJSON logging, temp dir tracking, and cryptographic helpers); shares stateless helpers via `lib/pkg_{paths,json,wsl}.sh`.
 * **[build_go_README.md](build_go_README.md)**: Technical reference for the underlying Go compilation, quality auditing, and packaging engine.
 * **[build_SIGNING.md](build_SIGNING.md)**: Master reference guide detailing OpenSSH release artifact signing architecture, keypair lifecycle management, hardened permissions, allowed signers configuration, and cryptographic verification workflows.
 
@@ -201,9 +201,9 @@ graph LR
 | :--- | :--- | :--- | :--- |
 | **Bash** | System Shell | `4.0+` | Shell runtime supporting arrays, parameter expansion, and process tracking. |
 | **GNU Coreutils** | System Utilities | POSIX | `cp -af`, `mkdir`, `rm -rf`, `mktemp`, `kill`, `date`. |
-| **[build.inc](build.inc)** | Shared Include | `2.0.1+` | Central exit codes, host detection, logging, version sanitizing, and keygen helpers. |
+| **[build.inc](build.inc)** + **`lib/pkg_{paths,json,wsl}.sh`** | Shared Include & Libs | `2.0.1+` | Central exit codes, shared OS/path/JSON/WSL helpers, logging, version sanitizing, and keygen helpers. |
 | **[build_go.sh](build_go.sh)** | Compiler Engine | `2.2.1+` | Module compiler, linter runner, test harness, and distribution packager. |
-| **[git_autosync.sh](private/devops/git_repomgr/git_autosync.sh)** | Internal Script | `1.0.0+` | Multi-repository Git sync manager. |
+| **[git_autosync.sh](../git_repomgr/git_autosync.sh)** | Internal Script | `1.0.0+` | Multi-repository Git sync manager. |
 | **OpenSSH (ssh-keygen)** | Cryptographic Tool | `8.0+` | Ed25519 signing keypair generation and release artifact verification (see [build_SIGNING.md](build_SIGNING.md)). |
 | **Governance Templates** | Config Assets | Latest | `TMPL.gitignore`, `SECURITY.md`, `LICENSE`. |
 
@@ -443,4 +443,4 @@ wsl --shutdown
 * **[build_wslconfig.example](build_wslconfig.example)**: WSL 2 performance tuning template configuring CPU core limits, memory caps, swap size, and automatic memory reclamation for parallel compilation workpools.
 * **[build_SIGNING.md](build_SIGNING.md)**: Master architectural guide and reference manual for OpenSSH Ed25519 release artifact signing, key generation, trust anchors (`allowed_signers`), automated verification scripts, and CI/CD security policies.
 * **[build_go_README.md](build_go_README.md)**: In-depth documentation for the module compilation engine (`build_go.sh`), covering `build.json` schema specifications, multi-stage static analysis, dependency vendoring, and packaging mechanics.
-* **[build.inc](build.inc)**: Core include library providing standardized exit codes, host detection, NDJSON audit logging, directory lifecycle tracking, and cryptographic helper routines.
+* **[build.inc](build.inc)** (`lib/pkg_{paths,json,wsl}.sh`): Core include library providing standardized exit codes, shared host/path/JSON/WSL primitives, NDJSON audit logging, directory lifecycle tracking, and cryptographic helper routines.

@@ -148,7 +148,7 @@ write_sha256_manifest() {
     }
 
     mkdir -p "$(dirname "$out_file")" || return 1
-    local tmp_out="${out_file}.tmp.$$"
+    local tmp_out="${out_file}.tmp.${BASHPID:-$$}"
     _CURRENT_TMP_FILE="$tmp_out"
     : > "$tmp_out"
 
@@ -191,7 +191,7 @@ download_asset() {
     validate_download_url "$url" "$allow_file" || return 1
     mkdir -p "$(dirname "$dest_file")" || return 1
 
-    local part_file="${dest_file}.part.$$"
+    local part_file="${dest_file}.part.${BASHPID:-$$}"
     _CURRENT_TMP_FILE="$part_file"
 
     if ! curl -fsSL --connect-timeout 15 --max-time 300 --retry 3 --retry-delay 2 -o "$part_file" "$url"; then
@@ -238,7 +238,6 @@ gh_fetch_releases_json() {
     local url="https://api.github.com/repos/${repo}/releases?per_page=${per_page}"
     if [[ -z "$token" ]] && command -v gh > /dev/null 2>&1; then
         token=$(gh auth token 2> /dev/null || true)
-        GITHUB_TOKEN="$token"
     fi
 
     local response=""

@@ -128,7 +128,7 @@ parse_args() {
 }
 
 # ------------------------------------------------------------------------------
-# Cross-Platform Docker Execution Bridge (path helpers provided by build.inc)
+# Cross-Platform Docker Execution Bridge (helpers provided by lib/pkg_{paths,wsl}.sh via build.inc)
 # ------------------------------------------------------------------------------
 to_docker_host_path() {
   local p="${1:-}"
@@ -143,8 +143,8 @@ to_docker_host_path() {
 docker_host_exec() {
   local script_body="$1"
   if [ "${HOST_OS}" = "WIN" ]; then
-    local wsl_bin="wsl"
-    command -v wsl.exe &> /dev/null && wsl_bin="wsl.exe"
+    local wsl_bin
+    wsl_bin="$(resolve_wsl_binary || echo "wsl")"
     printf '%s\n' "${script_body}" | MSYS_NO_PATHCONV=1 "${wsl_bin}" --cd / bash -s
   else
     printf '%s\n' "${script_body}" | bash -s

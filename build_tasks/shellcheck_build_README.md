@@ -12,6 +12,7 @@ Every build clones the latest commit on `master` into an isolated ephemeral work
 
 ## Prerequisites
 
+- **Shared Include:** Sources [`build.inc`](build.inc) (`lib/pkg_{paths,json,wsl}.sh`) for host OS detection, `normalize_to_posix_path`, `mixed_to_wsl_path`, and `resolve_wsl_binary`.
 - **On Windows (Cygwin / MSYS2 / Git Bash):**
   - `git` and `wsl.exe` with a Docker-enabled WSL distribution (Rancher Desktop, Docker Desktop WSL integration, or `dockerd` inside WSL), plus `zip` and `xz` in WSL for default archive packaging.
 - **On Native Linux:**

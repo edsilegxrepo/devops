@@ -76,7 +76,7 @@ log_fail() {
 # Uses 'PRAGMA compile_options' to verify if a feature was included at build time.
 check_option() {
     local opt="$1"
-    if "$SQLITE_BIN" :memory: "PRAGMA compile_options;" | grep -q "^${opt}$"; then
+    if grep -qxF "${opt}" < <("$SQLITE_BIN" :memory: "PRAGMA compile_options;"); then
         log_pass "Feature/Config active: ${opt}"
     else
         log_fail "Feature/Config missing: ${opt}"

@@ -65,6 +65,7 @@ graph TD
 
 | Tool | Purpose |
 | :--- | :--- |
+| [`client_package_common.sh`](client_package_common.sh) | Shared platform, path, lock, workspace, transfer, and archive helpers (`lib/pkg_*.sh`) |
 | `bash` (4.0+) | Associative arrays and lowercase parameter expansion (`,,`) |
 | `curl` | Fetching `releases.json` metadata and installer `.exe` binaries |
 | `jq` | Parsing `latest-release`, `latest-sdk`, URLs, and SHA-512 hashes |

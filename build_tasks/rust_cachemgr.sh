@@ -46,7 +46,7 @@ else
 fi
 
 # -----------------------------------------------------------------
-#  4. Cache Path Resolution
+#  2. Cache Path Resolution
 # -----------------------------------------------------------------
 # Resolves Cargo and Sccache cache roots considering Env overrides
 resolve_caches() {

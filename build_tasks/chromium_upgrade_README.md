@@ -6,7 +6,7 @@ This document provides architectural specifications, design workflows, and execu
 
 ## 1. Objectives & Key Requirements Summary
 
-`chromium_upgrade.sh` implements all functional specifications from [chromium_upgrade.txt](chromium_upgrade.txt):
+`chromium_upgrade.sh` implements all functional specifications for the Chromium packaging and deployment pipeline:
 
 ### 1.1 Packaging Pipeline (`--action package`)
 * **Windows Packaging Pipeline**:
@@ -46,6 +46,7 @@ This document provides architectural specifications, design workflows, and execu
 1. **Mandatory Platform Flag & Detection**: `--platform <windows|linux>` (with automatic environment/path hint detection if omitted).
 2. **Prerequisites Verification & Fail-Fast**: All required environmental prerequisites (`curl`, `grep`, `sed`, `cygpath`, `powershell`, `tar`, `xz`, `7z`, `wsl`) must be present or execution aborts (exit code `3`). On Windows, `7z` location is inspected via `--with-7z <path>` (e.g. `c:/tls/arc/7zip/`), `7Z_HOME`, `PATH`, and standard installation paths (`c:/tls/arc/7zip/7z.exe`, `C:/Program Files/7-Zip/7z.exe`), while `wsl.exe` is required for Linux target packaging.
 3. **Windows Path Format**: All Windows paths are output/formatted in mixed drive prefix notation: `<drive>:/path/sub`.
+4. **Shared Foundation Library**: Sources [`client_package_common.sh`](client_package_common.sh) (`lib/pkg_{paths,wsl,core,transfer,archive}.sh`) for platform/path normalization, logging, temporary workspaces, safe deletion, `curl` retries, and atomic archive publishing.
 
 ---
 

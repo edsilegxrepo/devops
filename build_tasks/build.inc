@@ -9,11 +9,14 @@
 #  Objective:
 #    Provides a centralized, single-source-of-truth configuration library and
 #    shared utility engine sourced by both the multi-module orchestrator
-#    (build_orchestrate.sh) and the individual module compiler engine (build_go.sh).
+#    (build_orchestrate.sh), the module compiler engine (build_go.sh), and
+#    host CI build scripts (shellcheck_build.sh).
 #
 #  Core Components:
 #    1. Granular Exit Codes: Standardized numeric codes for automated triage.
-#    2. Host OS Detection: Automatic detection of Linux vs. Windows (Cygwin/MSYS2).
+#    2. Shared Library Foundation & Host OS Detection: Sources stateless primitives
+#       from lib/pkg_{paths,json,wsl}.sh (OS detection, Windows/POSIX/WSL paths,
+#       4-tier JSON parser, NDJSON escaping, and WSL execution helpers).
 #    3. Corporate & Cryptographic Defaults: Maintainer, corporate URL, signing key
 #       paths, and mandatory key generation parameters.
 #    4. Workspace, Directory & Toolchain Defaults: Standard relative output paths
@@ -22,12 +25,10 @@
 #    6. Template Sync & Git AutoSync Defaults: Configuration file paths and messages.
 #    7. Packaging & Security Exclusions: Strict file exclusion filters for archives.
 #    8. Artifact Cleaning & Temp Directory Tracking: Safe lifecycle cleaners.
-#    9. Structured NDJSON Audit Logging: Machine-readable audit trails.
-#   10. ANSI Colored Logging Primitives: Human-readable terminal telemetry.
-#   11. Path Normalizers: Windows/Cygwin/MSYS2 path conversions.
-#   12. Multi-Engine JSON Parser: Fallback chain (jq -> python3 -> python -> awk).
-#   13. Packaging Metadata Sanitizers & Formatters: RPM spec, Debian control & RFC 822 changelogs.
-#   14. SSH Code Signing Engine: Ed25519 key generation and path resolution.
+#    9. ANSI Colored Logging with NDJSON Audit Capture: Console + NDJSON telemetry.
+#   10. Packaging Metadata Sanitizers & Formatters: RPM spec, Debian control & RFC 822 changelogs.
+#   11. SSH Code Signing Engine: Ed25519 key generation and path resolution.
+#   12. Package Artifact Verification Engine: SHA256, RPM, DEB, ZIP & TAR validation.
 #
 #  Functionality & Data Flows:
 #    - Sourced at startup by build_orchestrate.sh and build_go.sh via dynamic SCRIPT_DIR.
@@ -61,26 +62,16 @@ export EXIT_PACKAGE=8
 export EXIT_SYNC=9
 
 # ------------------------------------------------------------------------------
-# 2. Host Operating System Detection
+# 2. Shared Library Foundation & Host Operating System Detection
 # ------------------------------------------------------------------------------
-# Function: detect_host_os
-# Objective: Determines whether the script is running under Linux or Windows
-#            (native Windows_NT, Cygwin, MinGW, or MSYS2 environment).
-# Outputs: Echoes "WIN" or "LINUX" to stdout.
-detect_host_os() {
-  if [ "${OS:-}" == "Windows_NT" ]; then
-    echo "WIN"
-    return
-  fi
-  case "$(uname -s 2> /dev/null)" in
-    CYGWIN* | MINGW* | MSYS*)
-      echo "WIN"
-      ;;
-    *)
-      echo "LINUX"
-      ;;
-  esac
-}
+_BUILD_INC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+# shellcheck source=lib/pkg_paths.sh
+source "${_BUILD_INC_DIR}/lib/pkg_paths.sh"
+# shellcheck source=lib/pkg_json.sh
+source "${_BUILD_INC_DIR}/lib/pkg_json.sh"
+# shellcheck source=lib/pkg_wsl.sh
+source "${_BUILD_INC_DIR}/lib/pkg_wsl.sh"
+
 HOST_OS="$(detect_host_os)"
 export HOST_OS
 
@@ -101,7 +92,6 @@ export DEFAULT_PARALLEL_JOBS
 # 4. Workspace, Directory & Toolchain Search Defaults
 # ------------------------------------------------------------------------------
 # Resolve Code Home (3 levels above private/devops/build_tasks)
-_BUILD_INC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 CODE_HOME="$(cd "${_BUILD_INC_DIR}/../../.." &> /dev/null && pwd)"
 export CODE_HOME
 export BUILD_HOME="${CODE_HOME}"
@@ -270,59 +260,8 @@ cleanup_tracked_temp_dirs() {
 }
 
 # ------------------------------------------------------------------------------
-# 9. NDJSON Audit Logging & Escaping Helpers
-# ------------------------------------------------------------------------------
-NDJSON_LOG_FILE=""
-
-# Function: json_escape
-# Objective: Sanitizes raw strings for RFC 8259 JSON embedding (escapes backslashes,
-#            quotes, and replaces newlines/carriage returns/tabs with spaces).
-# Arguments:
-#   $1 - Raw text string
-# Outputs: Prints escaped text string to stdout.
-json_escape() {
-  local s="${1:-}"
-  s="${s//\\/\\\\}"
-  s="${s//\"/\\\"}"
-  s="$(printf '%s' "${s}" | tr '\n' ' ' | tr '\r' ' ' | tr '\t' ' ')"
-  printf '%s' "${s}"
-}
-
-# Function: log_ndjson
-# Objective: Appends structured NDJSON audit entries to the file defined by NDJSON_LOG_FILE.
-# Arguments:
-#   $1 - Severity level (INFO, SUCCESS, WARN, ERROR)
-#   $2 - Event name (e.g., "log", "start", "finish", "abort")
-#   $3 - Log message text
-#   $4 - Optional extra JSON details object (e.g., '{"exit_code":0}')
-log_ndjson() {
-  local level="$1"
-  local event="$2"
-  local msg="$3"
-  local extra="${4:-}"
-
-  [ -z "${NDJSON_LOG_FILE:-}" ] && return 0
-
-  local timestamp
-  timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2> /dev/null || date +"%Y-%m-%dT%H:%M:%SZ")"
-  local esc_module esc_level esc_event esc_msg
-  esc_module="$(json_escape "${APP_NAME:-$(basename "$(pwd)")}")"
-  esc_level="$(json_escape "${level}")"
-  esc_event="$(json_escape "${event}")"
-  esc_msg="$(json_escape "${msg}")"
-
-  local line="{\"timestamp\":\"${timestamp}\",\"module\":\"${esc_module}\",\"level\":\"${esc_level}\",\"event\":\"${esc_event}\",\"message\":\"${esc_msg}\""
-  if [ -n "${extra}" ]; then
-    line="${line},\"details\":${extra}}"
-  else
-    line="${line}}"
-  fi
-
-  printf '%s\n' "${line}" >> "${NDJSON_LOG_FILE}" 2> /dev/null || true
-}
-
-# ------------------------------------------------------------------------------
-# 10. Standardized Logging Helpers (ANSI formatting with NDJSON audit capture)
+# 9. Standardized Logging Helpers (ANSI formatting with NDJSON audit capture;
+#    json_escape & log_ndjson provided by lib/pkg_json.sh)
 # ------------------------------------------------------------------------------
 COLOR_BLUE="\033[1;34m"
 COLOR_GREEN="\033[1;32m"
@@ -378,225 +317,10 @@ log_error() {
   log_ndjson "ERROR" "log" "$*"
 }
 
-# ------------------------------------------------------------------------------
-# 11. Path & Environment Normalizers
-# ------------------------------------------------------------------------------
-# Function: normalize_to_mixed_path
-# Objective: Converts any path (Windows C:\, Cygwin /cygdrive/c, MSYS /c)
-#            into canonical mixed path format: drive:/path/sub with forward slashes.
-# Arguments:
-#   $1 - Path to normalize
-# Outputs: Prints normalized mixed path (drive:/path/sub) to stdout.
-normalize_to_mixed_path() {
-  local p="${1:-}"
-  [ -z "$p" ] && return
-  if [ "${HOST_OS:-}" != "WIN" ]; then
-    echo "$p"
-    return
-  fi
-  if [[ "$p" =~ ^/mnt/([a-zA-Z])/(.*) ]]; then
-    echo "${BASH_REMATCH[1],,}:/${BASH_REMATCH[2]}"
-  elif [[ "$p" =~ ^/cygdrive/([a-zA-Z])/(.*) ]]; then
-    echo "${BASH_REMATCH[1],,}:/${BASH_REMATCH[2]}"
-  elif [[ "$p" =~ ^/([a-zA-Z])/(.*) ]]; then
-    echo "${BASH_REMATCH[1],,}:/${BASH_REMATCH[2]}"
-  elif [[ "$p" =~ ^([a-zA-Z]):[/\\](.*) ]]; then
-    echo "${BASH_REMATCH[1],,}:/${BASH_REMATCH[2]//\\//}"
-  elif command -v cygpath &> /dev/null; then
-    cygpath -m "$p"
-  else
-    echo "$p"
-  fi
-}
-
-# Function: normalize_to_posix_path
-# Objective: Converts any Windows/mixed path to native POSIX mount path using
-#            cygpath -u when running on a Windows host shell.
-# Arguments:
-#   $1 - Path to normalize
-# Outputs: Prints POSIX path to stdout.
-normalize_to_posix_path() {
-  local raw="${1:-}"
-  [ -z "${raw}" ] && return 0
-  if [ "${HOST_OS:-}" = "WIN" ] && command -v cygpath &> /dev/null; then
-    cygpath -u "${raw}" 2> /dev/null || echo "${raw}"
-  else
-    echo "${raw}"
-  fi
-}
-
-# Function: mixed_to_wsl_path
-# Objective: Transforms a mixed path (drive:/path/sub) into standard WSL mount path (/mnt/drive/path/sub).
-# Arguments:
-#   $1 - Path to convert
-# Outputs: Prints resolved WSL mount path to stdout.
-mixed_to_wsl_path() {
-  local p="${1:-}"
-  [ -z "$p" ] && return
-  if [[ "$p" =~ ^/mnt/([a-zA-Z])/(.*) ]]; then
-    echo "$p"
-    return
-  fi
-  local mixed
-  mixed="$(normalize_to_mixed_path "$p")"
-  if [[ "$mixed" =~ ^([a-zA-Z]):/(.*) ]]; then
-    echo "/mnt/${BASH_REMATCH[1],,}/${BASH_REMATCH[2]}"
-  else
-    echo "$mixed"
-  fi
-}
-
-# Function: check_wsl_available
-# Objective: Verifies whether the WSL CLI tool is available on the Windows host.
-# Returns: 0 if wsl/wsl.exe is available, 1 otherwise.
-check_wsl_available() {
-  command -v wsl &> /dev/null || command -v wsl.exe &> /dev/null
-}
-
-# Function: run_in_wsl
-# Objective: Executes commands inside the default WSL Linux distribution
-#            using an interactive login shell (bash -lc) in the converted target directory.
-# Arguments:
-#   $1 - Target working directory (Windows, MSYS, or mixed format)
-#   $2..@ - Command arguments to execute in WSL
-# Returns: Propagates the exit code from WSL.
-run_in_wsl() {
-  local target_dir="$1"
-  shift
-  local wsl_cwd
-  wsl_cwd="$(mixed_to_wsl_path "${target_dir}")"
-
-  local cmd
-  cmd="$(printf '%q ' "$@")"
-  wsl --cd / bash -lc "cd \"${wsl_cwd}\" && ${cmd}"
-}
-
-# Function: normalize_and_add_to_path
-# Objective: Converts Windows drive-letter paths to POSIX paths (using cygpath
-#            or bash regex substitution) and prepends them to $PATH.
-# Arguments:
-#   $1 - Target directory path
-# Returns: 0 if directory exists and was added to PATH, 1 otherwise.
-normalize_and_add_to_path() {
-  local target_dir="${1:-}"
-  [ -z "${target_dir}" ] && return 1
-
-  if [ -d "${target_dir}" ]; then
-    if command -v cygpath &> /dev/null; then
-      target_dir="$(cygpath -u "${target_dir}")"
-    elif [[ "${target_dir}" =~ ^([a-zA-Z]):[/\\](.*) ]]; then
-      target_dir="/${BASH_REMATCH[1],,}/${BASH_REMATCH[2]//\\//}"
-    fi
-    export PATH="${target_dir}:${PATH:-}"
-    return 0
-  fi
-  return 1
-}
+# (Path normalizers, WSL helpers, and JSON extractors are sourced from lib/pkg_{paths,wsl,json}.sh)
 
 # ------------------------------------------------------------------------------
-# 12. JSON Field Parser
-# ------------------------------------------------------------------------------
-# Function: parse_json_field
-# Objective: Robust multi-engine JSON value extractor with a 4-tier fallback:
-#            1. jq (fastest, full JSON parser)
-#            2. python3 (standard python JSON library)
-#            3. python (python 2/3 fallback)
-#            4. awk (pure POSIX regex key-value extraction)
-# Arguments:
-#   $1 - Path to JSON file
-#   $2 - Key name to extract
-#   $3 - Default fallback value if key is not found
-# Outputs: Prints extracted string value to stdout.
-parse_json_field() {
-  local json_file="${1:-}"
-  local key="${2:-}"
-  local default_val="${3:-}"
-  local result=""
-
-  if [ ! -f "${json_file}" ]; then
-    echo "${default_val}"
-    return
-  fi
-
-  if command -v jq &> /dev/null; then
-    result=$(jq -r ".${key} // empty" "${json_file}" 2> /dev/null || true)
-  elif command -v python3 &> /dev/null; then
-    result=$(python3 -c "import json, sys; d=json.load(open(sys.argv[1])); v=d.get(sys.argv[2], ''); print(v if v is not None else '')" "${json_file}" "${key}" 2> /dev/null || true)
-  elif command -v python &> /dev/null; then
-    result=$(python -c "import json, sys; d=json.load(open(sys.argv[1])); v=d.get(sys.argv[2], ''); print(v if v is not None else '')" "${json_file}" "${key}" 2> /dev/null || true)
-  else
-    result=$(awk -v k="\"$key\"" '
-      $0 ~ k {
-        sub(/^[^:]*:[[:space:]]*/, "");
-        sub(/,[[:space:]]*$/, "");
-        sub(/^"/, "");
-        sub(/"$/, "");
-        print;
-        exit;
-      }
-    ' "${json_file}" 2> /dev/null || true)
-  fi
-
-  if [ -n "${result}" ] && [ "${result}" != "null" ]; then
-    echo "${result}"
-  else
-    echo "${default_val}"
-  fi
-}
-
-# Function: parse_json_history
-# Objective: Extracts changelog history records from build.json supporting either
-#            a JSON array of string entries or a multi-line string.
-#            Employs a 4-tier engine fallback: jq -> python3 -> python -> awk.
-# Arguments:
-#   $1 - Path to JSON configuration file
-# Outputs: Prints extracted history records line by line to stdout.
-parse_json_history() {
-  local json_file="${1:-}"
-  [ ! -f "${json_file}" ] && return
-
-  local result=""
-  if command -v jq &> /dev/null; then
-    result=$(jq -r 'if .history == null then empty elif (.history | type) == "array" then .history[] elif (.history | type) == "string" then .history else empty end' "${json_file}" 2> /dev/null || true)
-  elif command -v python3 &> /dev/null; then
-    result=$(python3 -c "import json, sys; d=json.load(open(sys.argv[1], encoding='utf-8')); h=d.get('history'); (sys.stdout.write('\n'.join(h) + '\n') if isinstance(h, list) else sys.stdout.write(str(h) + '\n')) if h else None" "${json_file}" 2> /dev/null || true)
-  elif command -v python &> /dev/null; then
-    result=$(python -c "import json, sys; d=json.load(open(sys.argv[1], encoding='utf-8')); h=d.get('history'); (sys.stdout.write('\n'.join(h) + '\n') if isinstance(h, list) else sys.stdout.write(str(h) + '\n')) if h else None" "${json_file}" 2> /dev/null || true)
-  else
-    result=$(awk '
-      BEGIN { in_arr = 0; }
-      /"history"[[:space:]]*:[[:space:]]*\[/ {
-        in_arr = 1;
-        next;
-      }
-      in_arr {
-        if ($0 ~ /\]/) {
-          in_arr = 0;
-          next;
-        }
-        line = $0;
-        sub(/^[[:space:]]*"/, "", line);
-        sub(/",?[[:space:]]*$/, "", line);
-        gsub(/\\"/, "\"", line);
-        print line;
-        next;
-      }
-      /"history"[[:space:]]*:[[:space:]]*"/ {
-        line = $0;
-        sub(/^[^:]*:[[:space:]]*"/, "", line);
-        sub(/"[[:space:]]*,?[[:space:]]*$/, "", line);
-        gsub(/\\n/, "\n", line);
-        gsub(/\\"/, "\"", line);
-        print line;
-      }
-    ' "${json_file}" 2> /dev/null || true)
-  fi
-
-  echo "${result}"
-}
-
-# ------------------------------------------------------------------------------
-# 13. Packaging Metadata Sanitizers & Changelog Formatters
+# 10. Packaging Metadata Sanitizers & Changelog Formatters
 # ------------------------------------------------------------------------------
 # Function: sanitize_version
 # Objective: Extracts a normalized dotted numeric version (major[.minor[.patch...]])
@@ -797,7 +521,7 @@ EOF
 }
 
 # ------------------------------------------------------------------------------
-# 14. SSH Code Signing Key Resolution & Generation Engine
+# 11. SSH Code Signing Key Resolution & Generation Engine
 # ------------------------------------------------------------------------------
 # Function: resolve_signing_key_path
 # Objective: Canonicalizes SSH private key paths by expanding tildes (~),
@@ -902,7 +626,7 @@ generate_signing_key() {
 }
 
 # ------------------------------------------------------------------------------
-# 15. Package Artifact Verification Engine
+# 12. Package Artifact Verification Engine
 # ------------------------------------------------------------------------------
 # Function: verify_package_artifacts
 # Objective: Inspects generated release packages in dist_dir against metadata in build.json.
@@ -996,11 +720,12 @@ verify_package_artifacts() {
 
     local has_rpm_tool=false
     if [ "${HOST_OS}" == "WIN" ] && ! command -v rpm &> /dev/null; then
-      if check_wsl_available; then
+      local wsl_bin
+      if wsl_bin="$(resolve_wsl_binary)"; then
         has_rpm_tool=true
         local wsl_rpm
         wsl_rpm="$(mixed_to_wsl_path "${rpm_file}")"
-        rpm_meta="$(wsl --cd / bash -lc "rpm -qp --queryformat '%{NAME}|%{VERSION}|%{RELEASE}|%{GROUP}|%{LICENSE}\n' \"${wsl_rpm}\" 2> /dev/null || true" | tr -d '\r')"
+        rpm_meta="$("${wsl_bin}" --cd / bash -lc "rpm -qp --queryformat '%{NAME}|%{VERSION}|%{RELEASE}|%{GROUP}|%{LICENSE}\n' \"${wsl_rpm}\" 2> /dev/null || true" | tr -d '\r')"
       fi
     elif command -v rpm &> /dev/null; then
       has_rpm_tool=true
@@ -1059,11 +784,12 @@ verify_package_artifacts() {
 
     local has_dpkg_tool=false
     if [ "${HOST_OS}" == "WIN" ] && ! command -v dpkg-deb &> /dev/null; then
-      if check_wsl_available; then
+      local wsl_bin
+      if wsl_bin="$(resolve_wsl_binary)"; then
         has_dpkg_tool=true
         local wsl_deb
         wsl_deb="$(mixed_to_wsl_path "${deb_file}")"
-        deb_info="$(wsl --cd / bash -lc "dpkg-deb -I \"${wsl_deb}\" 2> /dev/null || true" | tr -d '\r')"
+        deb_info="$("${wsl_bin}" --cd / bash -lc "dpkg-deb -I \"${wsl_deb}\" 2> /dev/null || true" | tr -d '\r')"
       fi
     elif command -v dpkg-deb &> /dev/null; then
       has_dpkg_tool=true
@@ -1156,11 +882,14 @@ verify_package_artifacts() {
       has_tar_tool=true
       tar_contents="$(tar --force-local -tf "${tar_file}" 2> /dev/null || tar -tf "${tar_file}" 2> /dev/null || true)"
     fi
-    if [ -z "${tar_contents}" ] && [ "${HOST_OS}" == "WIN" ] && check_wsl_available; then
-      has_tar_tool=true
-      local wsl_tar
-      wsl_tar="$(mixed_to_wsl_path "${tar_file}")"
-      tar_contents="$(wsl --cd / bash -lc "tar -tf \"${wsl_tar}\" 2> /dev/null || true")"
+    if [ -z "${tar_contents}" ] && [ "${HOST_OS}" == "WIN" ]; then
+      local wsl_bin
+      if wsl_bin="$(resolve_wsl_binary)"; then
+        has_tar_tool=true
+        local wsl_tar
+        wsl_tar="$(mixed_to_wsl_path "${tar_file}")"
+        tar_contents="$("${wsl_bin}" --cd / bash -lc "tar -tf \"${wsl_tar}\" 2> /dev/null || true")"
+      fi
     fi
 
     if [ "${has_tar_tool}" = false ]; then

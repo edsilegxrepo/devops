@@ -136,7 +136,7 @@ graph TD
 
 ## 4. Dependencies
 
-The script relies on standard Linux system utilities. The following tools must be present on the host environment:
+The script sources [`lib/pkg_core.sh`](lib/pkg_core.sh) (workspace/trap/safe-rm helpers) and [`lib/pkg_transfer.sh`](lib/pkg_transfer.sh) (`fetch_text`) alongside standard Linux utilities. The following tools must be present on the host environment:
 
 | Dependency | Purpose | Required Minimum Version |
 | :--- | :--- | :--- |

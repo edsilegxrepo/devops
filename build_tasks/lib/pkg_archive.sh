@@ -11,6 +11,12 @@
 [[ -n "${_PKG_ARCHIVE_SH_LOADED:-}" ]] && return 0
 _PKG_ARCHIVE_SH_LOADED=1
 
+if ! declare -F resolve_wsl_binary > /dev/null 2>&1; then
+    _PKG_ARCHIVE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    # shellcheck source=lib/pkg_wsl.sh
+    source "${_PKG_ARCHIVE_LIB_DIR}/pkg_wsl.sh"
+fi
+
 # ------------------------------------------------------------------------------
 # Archive Verification & Extraction
 # ------------------------------------------------------------------------------
@@ -147,35 +153,40 @@ repack_directory_to_zip() {
     local content_dir="$1"
     local dest_zip="$2"
     [[ -d "$content_dir" ]] || return 1
-    safe_rm_f "$dest_zip"
     normalize_directory_timestamps "$content_dir"
 
-    local dest_dir tmp_rel
+    local dest_dir tmp_rel tmp_zip
     dest_dir=$(dirname "$dest_zip")
     mkdir -p "$dest_dir" || return 1
-    tmp_rel=".__repack_tmp_$$.zip"
-    rm -f "${content_dir}/${tmp_rel}" 2> /dev/null || true
+    tmp_rel=".__repack_tmp_${BASHPID:-$$}.zip"
+    tmp_zip="${content_dir}/${tmp_rel}"
+    rm -f "$tmp_zip" 2> /dev/null || true
+    _CURRENT_TMP_FILE="$tmp_zip"
 
     if ! (
         cd "$content_dir" || exit 1
         zip -q -r "./${tmp_rel}" .
     ); then
-        rm -f "${content_dir}/${tmp_rel}" 2> /dev/null || true
+        rm -f "$tmp_zip" 2> /dev/null || true
+        _CURRENT_TMP_FILE=""
         log_error "Failed creating zip archive: $(basename "$dest_zip")"
         return 1
     fi
 
-    if ! mv -f "${content_dir}/${tmp_rel}" "$dest_zip"; then
-        rm -f "${content_dir}/${tmp_rel}" 2> /dev/null || true
-        log_error "Failed moving zip archive to destination: $(basename "$dest_zip")"
+    if ! verify_zip_integrity "$tmp_zip"; then
+        log_error "Corrupted zip archive generated: $(basename "$dest_zip")"
+        rm -f "$tmp_zip" 2> /dev/null || true
+        _CURRENT_TMP_FILE=""
         return 1
     fi
 
-    if ! verify_zip_integrity "$dest_zip"; then
-        log_error "Corrupted zip archive generated: $(basename "$dest_zip")"
-        safe_rm_f "$dest_zip"
+    if ! mv -f -- "$tmp_zip" "$dest_zip"; then
+        rm -f "$tmp_zip" 2> /dev/null || true
+        _CURRENT_TMP_FILE=""
+        log_error "Failed moving zip archive to destination: $(basename "$dest_zip")"
         return 1
     fi
+    _CURRENT_TMP_FILE=""
     return 0
 }
 
@@ -187,6 +198,7 @@ _tar_dir_to_xz() {
     local -a extra_flags=("$@")
 
     (
+        set -o pipefail
         cd "$content_dir" || exit 1
         shopt -s nullglob dotglob
         local items=(*)
@@ -199,25 +211,45 @@ _tar_dir_to_xz() {
     )
 }
 
+# _finalize_tmp_tar_xz <tmp_xz> <dest_tar_xz>
+# Verifies non-empty xz integrity on tmp_xz before atomically promoting it.
+_finalize_tmp_tar_xz() {
+    local tmp_xz="$1"
+    local dest_tar_xz="$2"
+
+    if [[ ! -s "$tmp_xz" ]] || ! verify_tar_xz_integrity "$tmp_xz"; then
+        log_error "Corrupted xz archive generated: $(basename "$dest_tar_xz")"
+        safe_rm_f "$tmp_xz"
+        _CURRENT_TMP_FILE=""
+        return 1
+    fi
+    if ! mv -f -- "$tmp_xz" "$dest_tar_xz"; then
+        log_error "Failed finalizing xz archive: $(basename "$dest_tar_xz")"
+        safe_rm_f "$tmp_xz"
+        _CURRENT_TMP_FILE=""
+        return 1
+    fi
+    _CURRENT_TMP_FILE=""
+    return 0
+}
+
 repack_directory_to_tar_xz() {
     local content_dir="$1"
     local dest_tar_xz="$2"
     [[ -d "$content_dir" ]] || return 1
-    safe_rm_f "$dest_tar_xz"
     mkdir -p "$(dirname "$dest_tar_xz")" || return 1
     normalize_directory_timestamps "$content_dir"
 
-    if ! _tar_dir_to_xz "$content_dir" "$dest_tar_xz"; then
+    local tmp_xz="${dest_tar_xz}.tmp.${BASHPID:-$$}"
+    _CURRENT_TMP_FILE="$tmp_xz"
+
+    if ! _tar_dir_to_xz "$content_dir" "$tmp_xz"; then
         log_error "Failed compressing tar.xz archive: $(basename "$dest_tar_xz")"
-        safe_rm_f "$dest_tar_xz"
+        safe_rm_f "$tmp_xz"
+        _CURRENT_TMP_FILE=""
         return 1
     fi
-    if ! verify_tar_xz_integrity "$dest_tar_xz"; then
-        log_error "Corrupted xz archive generated: $(basename "$dest_tar_xz")"
-        safe_rm_f "$dest_tar_xz"
-        return 1
-    fi
-    return 0
+    _finalize_tmp_tar_xz "$tmp_xz" "$dest_tar_xz"
 }
 
 # recompress_folder_to_tar_xz <parent_dir> <folder_to_pack> <dest_tar_xz>
@@ -236,29 +268,16 @@ recompress_folder_to_tar_xz() {
     mkdir -p "$(dirname "$dest_tar_xz")" || return 1
     normalize_directory_timestamps "$target_sub"
 
-    local tmp_xz="${dest_tar_xz}.tmp.$$"
+    local tmp_xz="${dest_tar_xz}.tmp.${BASHPID:-$$}"
     _CURRENT_TMP_FILE="$tmp_xz"
 
-    if ! (cd "$parent_dir" && tar --force-local --owner=0 --group=0 --numeric-owner -cf - "$folder_to_pack" | xz -9 -T0 > "$tmp_xz"); then
+    if ! (set -o pipefail; cd "$parent_dir" && tar --force-local --owner=0 --group=0 --numeric-owner -cf - "$folder_to_pack" | xz -9 -T0 > "$tmp_xz"); then
         log_error "Failed creating xz archive: $(basename "$dest_tar_xz")"
         safe_rm_f "$tmp_xz"
         _CURRENT_TMP_FILE=""
         return 1
     fi
-    if ! verify_tar_xz_integrity "$tmp_xz"; then
-        log_error "Corrupted xz archive generated: $(basename "$dest_tar_xz")"
-        safe_rm_f "$tmp_xz"
-        _CURRENT_TMP_FILE=""
-        return 1
-    fi
-    if ! mv -f -- "$tmp_xz" "$dest_tar_xz"; then
-        log_error "Failed finalizing xz archive: $(basename "$dest_tar_xz")"
-        safe_rm_f "$tmp_xz"
-        _CURRENT_TMP_FILE=""
-        return 1
-    fi
-    _CURRENT_TMP_FILE=""
-    return 0
+    _finalize_tmp_tar_xz "$tmp_xz" "$dest_tar_xz"
 }
 
 prune_electron_locales() {
@@ -297,7 +316,10 @@ repack_tar_gz_to_xz_preserving_perms() {
         log_error "Source archive not found: $src_tar_gz"
         return 1
     }
-    safe_rm_f "$dest_tar_xz"
+    mkdir -p "$(dirname "$dest_tar_xz")" || return 1
+
+    local tmp_xz="${dest_tar_xz}.tmp.${BASHPID:-$$}"
+    _CURRENT_TMP_FILE="$tmp_xz"
 
     # shellcheck disable=SC2016
     local inner_script='
@@ -333,12 +355,19 @@ fi
 '
 
     if ! is_windows_platform; then
-        bash -c "$inner_script" _ "$src_tar_gz" "$dest_tar_xz" "$pack_target" "$transform_cmds"
+        if ! bash -c "$inner_script" _ "$src_tar_gz" "$tmp_xz" "$pack_target" "$transform_cmds"; then
+            safe_rm_f "$tmp_xz"
+            _CURRENT_TMP_FILE=""
+            return 1
+        fi
+        _finalize_tmp_tar_xz "$tmp_xz" "$dest_tar_xz"
         return $?
     fi
 
-    if ! command -v wsl.exe > /dev/null 2>&1; then
+    local wsl_bin
+    if ! wsl_bin="$(resolve_wsl_binary)"; then
         log_error "wsl.exe not found; required on Windows to preserve Linux archive permissions."
+        _CURRENT_TMP_FILE=""
         return 1
     fi
 
@@ -347,35 +376,31 @@ fi
     wsl_dst_dir=$(to_wsl_path "$(dirname "$dest_tar_xz")" || true)
 
     if [[ -n "$wsl_src" && -n "$wsl_dst_dir" ]] &&
-        wsl.exe -e test -f "$wsl_src" < /dev/null 2> /dev/null &&
-        wsl.exe -e test -d "$wsl_dst_dir" < /dev/null 2> /dev/null; then
-        local wsl_dst
-        wsl_dst="${wsl_dst_dir}/$(basename "$dest_tar_xz")"
-        if ! wsl.exe -e bash -c "$inner_script" _ "$wsl_src" "$wsl_dst" "$pack_target" "$transform_cmds" < /dev/null; then
+        "$wsl_bin" -e test -f "$wsl_src" < /dev/null 2> /dev/null &&
+        "$wsl_bin" -e test -d "$wsl_dst_dir" < /dev/null 2> /dev/null; then
+        local wsl_tmp_dst
+        wsl_tmp_dst="${wsl_dst_dir}/$(basename "$tmp_xz")"
+        if ! "$wsl_bin" -e bash -c "$inner_script" _ "$wsl_src" "$wsl_tmp_dst" "$pack_target" "$transform_cmds" < /dev/null; then
             log_error "WSL archive recompression failed for $(basename "$dest_tar_xz")"
-            safe_rm_f "$dest_tar_xz"
+            safe_rm_f "$tmp_xz"
+            _CURRENT_TMP_FILE=""
             return 1
         fi
     else
-        if ! wsl.exe -e bash -c "$inner_script" _ "-" "-" "$pack_target" "$transform_cmds" < "$src_tar_gz" > "$dest_tar_xz"; then
+        if ! "$wsl_bin" -e bash -c "$inner_script" _ "-" "-" "$pack_target" "$transform_cmds" < "$src_tar_gz" > "$tmp_xz"; then
             log_error "WSL streaming archive recompression failed for $(basename "$dest_tar_xz")"
-            safe_rm_f "$dest_tar_xz"
+            safe_rm_f "$tmp_xz"
+            _CURRENT_TMP_FILE=""
             return 1
         fi
     fi
 
-    if [[ ! -s "$dest_tar_xz" ]] || ! verify_tar_xz_integrity "$dest_tar_xz"; then
-        log_error "Corrupted xz archive generated: $(basename "$dest_tar_xz")"
-        safe_rm_f "$dest_tar_xz"
-        return 1
-    fi
-    return 0
+    _finalize_tmp_tar_xz "$tmp_xz" "$dest_tar_xz"
 }
 
 repack_directory_to_tar_xz_preserving_perms() {
     local stage_dir="$1" dest_tar_xz="$2" strip_base="${3:-true}"
     [[ -d "$stage_dir" ]] || return 1
-    safe_rm_f "$dest_tar_xz"
     mkdir -p "$(dirname "$dest_tar_xz")" || return 1
 
     if ! is_windows_platform; then
@@ -384,8 +409,12 @@ repack_directory_to_tar_xz_preserving_perms() {
         return $?
     fi
 
-    if command -v wsl.exe > /dev/null 2>&1; then
-        local src_tar="${stage_dir}_raw.tar"
+    local tmp_xz="${dest_tar_xz}.tmp.${BASHPID:-$$}"
+    _CURRENT_TMP_FILE="$tmp_xz"
+
+    local wsl_bin
+    if wsl_bin="$(resolve_wsl_binary)"; then
+        local src_tar="${stage_dir}_raw.${BASHPID:-$$}.tar"
         safe_rm_f "$src_tar"
         if (
             cd "$stage_dir" || exit 1
@@ -432,27 +461,25 @@ else
     tar --force-local --owner=0 --group=0 --numeric-owner -cf - --files-from /dev/null | xz -9 -T0
 fi
 '
-            if wsl.exe -e bash -c "$inner" _ "$strip_base" < "$src_tar" > "$dest_tar_xz" 2> /dev/null &&
-                [[ -s "$dest_tar_xz" ]] && verify_tar_xz_integrity "$dest_tar_xz"; then
+            if "$wsl_bin" -e bash -c "$inner" _ "$strip_base" < "$src_tar" > "$tmp_xz" 2> /dev/null &&
+                _finalize_tmp_tar_xz "$tmp_xz" "$dest_tar_xz"; then
                 safe_rm_f "$src_tar"
                 return 0
             fi
         fi
         safe_rm_f "$src_tar"
-        safe_rm_f "$dest_tar_xz"
+        safe_rm_f "$tmp_xz"
     fi
 
     [[ "$strip_base" == true ]] && strip_base_directory "$stage_dir"
     normalize_directory_timestamps "$stage_dir"
-    if ! _tar_dir_to_xz "$stage_dir" "$dest_tar_xz" "--mode=a+rX,u+w"; then
-        safe_rm_f "$dest_tar_xz"
+    _CURRENT_TMP_FILE="$tmp_xz"
+    if ! _tar_dir_to_xz "$stage_dir" "$tmp_xz" "--mode=a+rX,u+w"; then
+        safe_rm_f "$tmp_xz"
+        _CURRENT_TMP_FILE=""
         return 1
     fi
-    if ! verify_tar_xz_integrity "$dest_tar_xz"; then
-        safe_rm_f "$dest_tar_xz"
-        return 1
-    fi
-    return 0
+    _finalize_tmp_tar_xz "$tmp_xz" "$dest_tar_xz"
 }
 
 # ------------------------------------------------------------------------------
@@ -609,7 +636,7 @@ atomic_publish_file() {
     dest_dir=$(dirname "$dest_file")
     mkdir -p "$dest_dir" || return 1
 
-    local tmp_dest="${dest_file}.tmp.$$"
+    local tmp_dest="${dest_file}.tmp.${BASHPID:-$$}"
     CURRENT_TARGET_TMP="$tmp_dest"
 
     if ! cp -f -- "$src_file" "$tmp_dest"; then

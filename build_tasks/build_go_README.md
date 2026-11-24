@@ -37,7 +37,7 @@ This document provides the architectural specification, operational sequence bre
 * **Artifact Lifecycle Management:** Supports `--clean` to cleanly wipe previously built module binaries and distribution packages.
 
 ### Related Documentation & Toolchain Links
-* **[build.inc](build.inc)**: Shared library providing diagnostic exit codes, logging primitives, temporary directory tracking, OS detection, and cryptographic helpers.
+* **[build.inc](build.inc)**: Go/RPM/DEB configuration include (diagnostic exit codes, NDJSON-backed logging, temp dir tracking, sanitizers, signing, and artifact verification); shares stateless primitives from `lib/pkg_{paths,json,wsl}.sh`.
 * **[gosanitize/README.md](gosanitize/README.md)**: Architecture and security reference for the `gosanitize` utility used when `--remove-buildinfo` is enabled.
 * **[build_orchestrate_README.md](build_orchestrate_README.md)**: Technical reference for the multi-module orchestrator, parallel workpool scheduler, and template governance engine.
 * **[build_SIGNING.md](build_SIGNING.md)**: Complete guide covering OpenSSH release artifact signing and verification workflows.
@@ -105,7 +105,7 @@ graph TD
 ### 2.2. Design Principles & Choices
 1. **100% Static Binaries (`CGO_ENABLED=0`):** Linux binaries are built completely static with no libc/musl runtime links. This ensures maximum portability across CentOS, RHEL, Rocky Linux, Ubuntu, Debian, Alpine, and Amazon Linux.
 2. **Metadata Architecture (`build.json`):** Replaces legacy flat files (`version.txt`, `main.txt`) with structured, declarative JSON configuration. Supported fields include semantic versioning, application entrypoints, summary/description, maintainer, license, URL, and packaging classifications.
-3. **Multi-Engine Fallback JSON Parser:** [parse_json_field](build.inc#L469-L506) queries JSON fields using `jq`, falling back to `python3`, `python`, or a native `awk` stream scanner if dedicated tools are unavailable on minimal build nodes.
+3. **Multi-Engine Fallback JSON Parser:** [`parse_json_field`](lib/pkg_json.sh#L67-L100) (loaded via `build.inc`) queries JSON fields using `jq`, falling back to `python3`, `python`, or an anchored `awk` stream scanner if dedicated tools are unavailable on minimal build nodes.
 4. **Per-Archive Checksum Generation:** Replaces monolithic `SHA256SUMS` files with individual `<archive>.sha256` files generated concurrently alongside each package in `../distrib/`. This eliminates race conditions during parallel module orchestration.
 5. **OpenSSH Cryptographic Signing:** Creates `<archive>.sig` signatures using native `ssh-keygen -Y sign -f <key> -n file <artifact>`, establishing cryptographic publisher identity verifiable without GPG/PGP dependencies.
 6. **Path Trimming, PIE Hardening & Symbol Stripping:** Uses `-trimpath`, `-buildmode=pie`, and `-buildvcs=false` alongside `-ldflags="-s -w"` (stamping `v<sanitized_version>-<UTC YYYYmmdd>` via `-X`), reducing final binary footprint and hardening executables; `--remove-buildinfo` optionally strips embedded Go `buildinfo` via [`gosanitize`](gosanitize/README.md).
@@ -213,7 +213,7 @@ func main() {
 
 ## 5. Multi-Format Distribution Packaging
 
-When packaging flags are supplied, artifacts are staged in isolated temporary directories created via [make_temp_dir](build.inc#L282-L300) and emitted directly to `../distrib/` (relative to `CODE_HOME`):
+When packaging flags are supplied, artifacts are staged in isolated temporary directories created via [make_temp_dir](build.inc#L238-L249) and emitted directly to `../distrib/` (relative to `CODE_HOME`):
 
 ### 1. Linux Tarball Release Archive (`.tar.xz`)
 * **Trigger:** `--linux --archive` (or `--all-pkg`)
@@ -277,7 +277,7 @@ checkcert (0.2.1-1) stable; urgency=low
 
 ### 6. Sanitized Source Archive (`-src.tar.xz` / `-src.zip`)
 * **Trigger:** `--archive` (or `--all-pkg`)
-* **Security Filter:** Enforces `SOURCE_EXCLUDES` denylist from [build.inc](build.inc#L168-L200) to strip `.git`, `.env*`, `*.key`, `*.pem`, `*.token`, `id_*`, binaries, and temporary files.
+* **Security Filter:** Enforces `SOURCE_EXCLUDES` denylist (`DEFAULT_SOURCE_EXCLUDES`) from [build.inc](build.inc#L165-L181) to strip `.git`, `.env*`, `*.key`, `*.pem`, `*.token`, `id_*`, binaries, and temporary files.
 
 ### 7. Package Verification Engine (`--verify-pkg`)
 * **Trigger:** `--verify-pkg` (or `--verify-packages`)
@@ -299,7 +299,7 @@ checkcert (0.2.1-1) stable; urgency=low
 | :--- | :--- | :--- | :--- |
 | **Go** | Compiler | **Required** | Go build toolchain (v1.18+ recommended). |
 | **Bash** | Shell Runtime | **Required** | Execution environment (Linux, Cygwin, MSYS2). |
-| **[build.inc](build.inc)** | Shared Include | **Required** | Shared constants, exit codes, path normalization, JSON parser. |
+| **[build.inc](build.inc)** + **`lib/pkg_{paths,json,wsl}.sh`** | Shared Include & Libs | **Required** | Shared constants, exit codes, path normalization, JSON parser, and WSL bridge. |
 | **gofumpt** | Formatter | Recommended | Strict code formatting. |
 | **go vet** | Static Analyzer | **Required** | Standard Go correctness analysis (included with Go). |
 | **golangci-lint** | Linter Runner | Recommended | Aggregated static analysis framework. |
@@ -550,7 +550,7 @@ WSL uses its native Linux `gcc` toolchain to compile the binary, producing a gen
 
 ## 10. References & Related Documentation
 
-* **[build.inc](build.inc)**: Shared library providing diagnostic exit codes, logging primitives, temporary directory tracking, OS detection, and cryptographic helpers.
+* **[build.inc](build.inc)**: Go/RPM/DEB configuration include (diagnostic exit codes, NDJSON-backed logging, temp dir tracking, sanitizers, signing, and artifact verification); shares stateless primitives from `lib/pkg_{paths,json,wsl}.sh`.
 * **[gosanitize/README.md](gosanitize/README.md)**: Architecture and security reference for the `gosanitize` utility used when `--remove-buildinfo` is enabled.
 * **[build_orchestrate_README.md](build_orchestrate_README.md)**: Technical reference for the multi-module orchestrator, parallel workpool scheduler, and template governance engine.
 * **[build_SIGNING.md](build_SIGNING.md)**: Complete guide covering OpenSSH release artifact signing and verification workflows.

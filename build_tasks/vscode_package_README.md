@@ -155,7 +155,7 @@ Release metadata is queried from Microsoft's official Visual Studio Code stable 
 
 ## 5. Prerequisites and Dependencies
 
-The utility relies on the shared foundation library [`client_package_common.sh`](file:///e:/data/devel/build/code/private/devops/build_tasks/client_package_common.sh) for platform detection, path translation, archive manipulation, WSL permission-preserving recompression, dual-platform orchestration, and transactional staging. Standard POSIX tool requirements (`bash`, `curl`, `zip`, `unzip`, `tar`, `gzip`, `xz`) and platform compatibility matrices are documented in detail in [`client_package_common_README.md#6-prerequisites-and-platform-compatibility`](file:///e:/data/devel/build/code/private/devops/build_tasks/client_package_common_README.md#6-prerequisites-and-platform-compatibility).
+The utility relies on the shared foundation library [`client_package_common.sh`](client_package_common.sh) for platform detection, path translation, archive manipulation, WSL permission-preserving recompression, dual-platform orchestration, and transactional staging. Module APIs and platform compatibility details are documented in [`client_package_common_README.md`](client_package_common_README.md).
 
 In addition to the foundation library requirements, `vscode_package.sh` requires:
 

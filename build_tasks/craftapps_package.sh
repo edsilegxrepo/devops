@@ -194,7 +194,7 @@ TEMP_ROOT_PATH=""
 # ------------------------------------------------------------------------------
 
 # ------------------------------------------------------------------------------
-# Section 5: Package Configuration Table
+# Section 2: Package Configuration Table
 # ------------------------------------------------------------------------------
 # Default application catalog for storytold desktop software.
 # Easily add or remove packages below (or load via --config <file>).
@@ -223,7 +223,7 @@ PACKAGES=(
 )
 
 # ------------------------------------------------------------------------------
-# Section 6: Terminal Formatting, Category Mapping & Catalogs
+# Section 3: Terminal Formatting, Category Mapping & Catalogs
 # ------------------------------------------------------------------------------
 # (Terminal Formatting & Logging functions provided by client_package_common.sh)
 
@@ -339,23 +339,10 @@ EOF
 }
 
 # ------------------------------------------------------------------------------
-# Section 7: Version Evaluation & Local Discovery
+# Section 4: Artifact Cleanup & Recompression Engine
 # ------------------------------------------------------------------------------
-# (is_version_newer and find_local_version are provided by client_package_common.sh)
-
-# ------------------------------------------------------------------------------
-# Section 8: GitHub API Discovery & Asset Extraction Engine
-# ------------------------------------------------------------------------------
-# GitHub Releases resolution, asset matching, and verified downloads are
-# provided by lib/pkg_transfer.sh (gh_resolve_release, gh_find_asset,
-# gh_download_verified_asset).
-
-# ------------------------------------------------------------------------------
-# Section 8b: Artifact Cleanup & Recompression Engine
-# ------------------------------------------------------------------------------
-# Archive extraction, base folder stripping, and zip/xz recompression utilities
-# are provided by client_package_common.sh (extract_archive,
-# strip_base_directory, repack_directory_to_zip, repack_directory_to_tar_xz).
+# Version comparison, local discovery, GitHub Release lookup, archive extraction,
+# and zip/xz recompression are provided by client_package_common.sh / lib/pkg_*.sh.
 
 ARTIFACT_DIR_NAMES=("licenses" "license")
 ARTIFACT_FILE_PATTERNS=(
@@ -427,7 +414,7 @@ _normalize_archive() {
 }
 
 # ------------------------------------------------------------------------------
-# Section 8c: Application Deployment Pipeline (--action deploy)
+# Section 5: Application Deployment Pipeline (--action deploy)
 # ------------------------------------------------------------------------------
 # run_deploy_pipeline
 # Executes the install and deploy workflow:
@@ -759,7 +746,7 @@ run_deploy_pipeline() {
 }
 
 # ------------------------------------------------------------------------------
-# Section 9: CLI Argument Parsing & Early Dispatchers
+# Section 6: CLI Argument Parsing & Early Dispatchers
 # ------------------------------------------------------------------------------
 # Process command-line flags and parameters.
 while [[ $# -gt 0 ]]; do
@@ -945,7 +932,7 @@ if [[ -n "$SPECIFIC_APP" ]]; then
 fi
 
 # ------------------------------------------------------------------------------
-# Section 10: Path Normalization, Temp Initialization & Workspace Setup
+# Section 7: Path Normalization, Temp Initialization & Workspace Setup
 # ------------------------------------------------------------------------------
 # Enforce canonical drive:/path/sub format for user display and logs
 if [[ "$SOURCE_IS_URL" == false ]]; then
@@ -1018,7 +1005,7 @@ SKIPPED_COUNT=0
 ERROR_COUNT=0
 
 # ------------------------------------------------------------------------------
-# Section 11: Main Processing Loop (Transactional Packaging Engine)
+# Section 8: Main Processing Loop (Transactional Packaging Engine)
 # ------------------------------------------------------------------------------
 # Iterates through all configured applications, evaluates local vs remote versions,
 # and executes the end-to-end transactional repackaging workflow.
@@ -1227,7 +1214,7 @@ for entry in "${PACKAGES[@]}"; do
 done
 
 # ------------------------------------------------------------------------------
-# Section 12: Summary & Workspace Destruction
+# Section 9: Summary & Workspace Destruction
 # ------------------------------------------------------------------------------
 # Destroys the unique execution workspace in temp root and displays metrics table.
 if [[ -n "$EXEC_WORKSPACE" ]]; then

@@ -96,20 +96,7 @@ RESOLVED_WSL_BIN=""
 SEVENZIP_BIN=""
 
 function find_wsl_binary() {
-  local cand=""
-  if cand=$(command -v wsl.exe 2> /dev/null || command -v wsl 2> /dev/null) && [ -n "${cand}" ]; then
-    echo "${cand}"
-    return 0
-  fi
-  if [ -f "/c/Windows/System32/wsl.exe" ]; then
-    echo "/c/Windows/System32/wsl.exe"
-    return 0
-  fi
-  if [ -f "C:/Windows/System32/wsl.exe" ]; then
-    echo "C:/Windows/System32/wsl.exe"
-    return 0
-  fi
-  return 1
+  resolve_wsl_binary
 }
 
 function find_7z_binary() {
@@ -944,17 +931,17 @@ function do_package_linux_wsl() {
   local pkg_filename="$4"
 
   local wsl_bin="${RESOLVED_WSL_BIN:-wsl.exe}"
-  local wsl_arch_dest
-  wsl_arch_dest=$(to_wsl_path "${arch_path}")
-
-  log_info "Delegating Linux packaging to WSL to preserve POSIX executable attributes..."
-  log_info "WSL Destination: ${wsl_arch_dest}"
-  log_info "Target Package: ${pkg_filename}"
-
   if ! "${wsl_bin}" -e true 2> /dev/null; then
     log_error "WSL is installed but failed to execute. Ensure a default WSL distribution is installed and running."
     exit 3
   fi
+
+  local wsl_arch_dest
+  wsl_arch_dest=$(to_wsl_path "${arch_path}" || true)
+
+  log_info "Delegating Linux packaging to WSL to preserve POSIX executable attributes..."
+  log_info "WSL Destination: ${wsl_arch_dest}"
+  log_info "Target Package: ${pkg_filename}"
 
   local wsl_script
   wsl_script=$(cat << 'EOF_WSL'

@@ -160,7 +160,7 @@ sequenceDiagram
 
 ### 4. Dependencies
 
-Running this script successfully requires the following system modules, utility binaries, and shell versions:
+Running this script successfully requires [`lib/pkg_core.sh`](lib/pkg_core.sh) and [`lib/pkg_archive.sh`](lib/pkg_archive.sh) (for scoped safe deletion and atomic archive publishing) alongside the following system utilities:
 
 | Dependency | Required Version / Standard | Purpose |
 | :--- | :--- | :--- |

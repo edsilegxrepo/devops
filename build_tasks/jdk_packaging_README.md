@@ -139,7 +139,7 @@ The script does not accept arguments via standard command-line parameters (e.g. 
 
 ### Staging and Workspace Configuration Variables
 
-These configuration paths are defined directly in [jdk_packaging.sh](jdk_packaging.sh#L45-L51):
+These configuration paths are defined directly in [jdk_packaging.sh](jdk_packaging.sh#L60-L66) (with shared deletion, archive extraction, and atomic publishing loaded from [`lib/pkg_core.sh`](lib/pkg_core.sh) and [`lib/pkg_archive.sh`](lib/pkg_archive.sh)):
 
 | Variable Name | Type | Default Value | Description |
 |:---|:---|:---|:---|

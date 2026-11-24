@@ -360,6 +360,7 @@ apply_post_install() {
     chmod 755 "./${PKIDIR}/CA/"{private,certs,crl,newcerts}
 
     # Update openssl.cnf to support modular includes from conf.d
+    # shellcheck disable=SC2016 # ${__DIR__} is literal OpenSSL config syntax
     sed -i '/#.include filename/a \\n# Includes custom configuration\n.include ${__DIR__}/conf.d' ./${TLSDIR}/openssl.cnf
   popd &>/dev/null
 

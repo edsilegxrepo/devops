@@ -7,7 +7,7 @@ A cross-platform, automated release discovery, normalized bundling, and local de
 ## 1. Application Overview and Objectives
 
 ### 1.1 Executive Summary
-The **CI / DevSecOps Tools Packaging & Deployment Utility** ([`citools_package.sh`](file:///e:/data/devel/build/code/private/devops/build_tasks/citools_package.sh)) automates the end-to-end lifecycle for **20 tools** organized into **7 functional classes**:
+The **CI / DevSecOps Tools Packaging & Deployment Utility** ([`citools_package.sh`](citools_package.sh)) automates the end-to-end lifecycle for **20 tools** organized into **7 functional classes**:
 1. **Python Tooling (`python`)**: `uv`, `ruff`
 2. **JS / Web Linters & Formatters (`js`)**: `biome`, `oxfmt`, `oxlint`, `dart-sass`
 3. **Code Search & Static Sites (`devtools`)**: `astgrep`, `hugo`
@@ -187,7 +187,7 @@ flowchart TD
 
 ## 5. Prerequisites and Dependencies
 
-The utility relies on the shared foundation library [`client_package_common.sh`](file:///e:/data/devel/build/code/private/devops/build_tasks/client_package_common.sh) for platform detection, dual-layer path translation, defensive deletion bounds, workspace lifecycle traps, SHA-256 verification, GitHub release discovery, and transactional `.tmp` staging. Standard tool compatibility matrices are documented in [`client_package_common_README.md`](file:///e:/data/devel/build/code/private/devops/build_tasks/client_package_common_README.md#L1).
+The utility relies on the shared foundation library [`client_package_common.sh`](client_package_common.sh) for platform detection, dual-layer path translation, defensive deletion bounds, workspace lifecycle traps, SHA-256 verification, GitHub release discovery, and transactional `.tmp` staging. Module APIs and compatibility details are documented in [`client_package_common_README.md`](client_package_common_README.md).
 
 Tool requirements are validated per action upfront:
 

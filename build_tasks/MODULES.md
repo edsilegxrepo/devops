@@ -8,9 +8,13 @@ This document defines the phased plan to harden the shared client packaging fram
 
 ```text
 build_tasks/
-├── client_package_common.sh   # 26-line facade sourcing all 4 modules in dependency order
+├── client_package_common.sh   # 26-line facade sourcing core/transfer/archive/pipeline (pkg_core sources pkg_paths)
+├── build.inc                  # Go/RPM/DEB defaults, NDJSON-backed logging, sanitizers, signing & artifact verify (sources pkg_{paths,json,wsl})
 └── lib/
-    ├── pkg_core.sh            # Platform/PATH guard, logging, path engine, safe_rm_*, workspaces, mkdir locks, traps, CLI/CSV/UI helpers
+    ├── pkg_paths.sh           # Stateless OS/platform detection & cross-platform Windows/POSIX/WSL path engine
+    ├── pkg_json.sh            # Portable 4-tier JSON field/history extractors, json_escape, log_ndjson
+    ├── pkg_wsl.sh             # Shared WSL availability check & command execution bridge
+    ├── pkg_core.sh            # Logging, safe_rm_*, workspaces, mkdir locks, traps, CLI/CSV/UI helpers
     ├── pkg_transfer.sh        # HTTPS/file URL guard, sha256/sha512 verifier, download_asset, fetch_text, GitHub Releases API (gh_*)
     ├── pkg_archive.sh         # Archive integrity, extraction, WSL permission-preserving repacking, semver/pruning, atomic_publish_file/atomic_stage_package
     └── pkg_pipeline.sh        # High-level dual-platform packaging pipeline (run_dual_platform_package)
@@ -19,7 +23,7 @@ build_tasks/
 ### Facade Policy (`client_package_common.sh` vs. Direct `lib/pkg_*.sh`)
 - **Full packagers & multi-platform upgraders** (`antigravity_package.sh`, `bun_upgrade.sh`, `citools_package.sh`, `craftapps_package.sh`, `dotnet_packaging.sh`, `vscode_package.sh`, `chromium_upgrade.sh`, `build_python_win.sh`) source `client_package_common.sh` so they do not duplicate ordered `source` statements across four modules.
 - **Minimal / specialized utilities** (e.g., `rust_cachemgr.sh`, `jdk_packaging.sh`, `tomcat_packaging.sh`) may source only the required module(s) (`lib/pkg_core.sh`, and optionally `lib/pkg_archive.sh`), avoiding unused transfer/pipeline code.
-- **`build.inc` boundary:** Go/RPM/DEB compiler pipelines (`build_go.sh`, `build_go_exec.sh`, `build_orchestrate.sh`, `shellcheck_build.sh`, `gobuild_code-analyzers.sh`) stay on `build.inc` rather than mixing two competing `EXIT` trap and `EXIT_*` constant models.
+- **`build.inc` boundary:** Go/RPM/DEB compiler pipelines (`build_go.sh`, `build_go_exec.sh`, `build_orchestrate.sh`, `shellcheck_build.sh`, `gobuild_code-analyzers.sh`) stay on `build.inc` (which shares `lib/pkg_{paths,json,wsl}.sh` without mixing two competing `EXIT` trap and `EXIT_*` constant models).
 
 ---
 
@@ -93,6 +97,11 @@ Fix known bugs and contract gaps in the shared library before touching additiona
   - Sourced `lib/pkg_core.sh` + `lib/pkg_archive.sh` directly (`LOG_INFO_TO_STDERR=0`) for safe directory deletion (`safe_rm_rf`, `tomcat_rm_rf` scoped wrapper preserving `pkg_core.sh` non-shadowing), standardized archive extraction (`extract_archive` in `jdk_packaging.sh`), and verified atomic `.tar.xz`/`.zip` publishing (`atomic_publish_file` without stripping original package timestamps or symlinks); allowed env overrides (`PKG_DIR`, `BASE_DIR`) for isolated E2E tests.
 - [x] **`build.inc` & `shellcheck_build.sh`:** Added `normalize_to_posix_path()` to `build.inc` and removed the redundant `to_posix_path()` definition from `shellcheck_build.sh` (`475 -> 465` lines), keeping `build_go*` / `gobuild_code-analyzers.sh` on `build.inc`.
 
+### Phase 4 — Shared Foundation Extraction (`build.inc` <-> `lib/`) (Done)
+
+- [x] **`lib/pkg_paths.sh` (stateless OS/path engine):** Extracted `detect_platform`, `is_windows_platform`, `get_target_os`, `detect_host_os`, `strip_trailing_slashes`, `enforce_drive_path`, `to_posix_path`, `to_syspath`, `to_mixed_path`, `normalize_to_mixed_path`, `normalize_to_posix_path`, `resolve_default_path`, `mixed_to_wsl_path`, `to_wsl_path`, and `normalize_and_add_to_path` so both `lib/pkg_core.sh` and `build.inc` share one path/OS foundation with zero trap/logging conflicts.
+- [x] **`lib/pkg_json.sh` & `lib/pkg_wsl.sh`:** Extracted `json_escape`, `log_ndjson`, `parse_json_field`, `parse_json_history` into `lib/pkg_json.sh` and `check_wsl_available`, `run_in_wsl` into `lib/pkg_wsl.sh`; pruned duplicate definitions from `build.inc`.
+
 ---
 
 ## 4. Mandatory Verification Gate (Per Phase / PR)
@@ -111,5 +120,5 @@ Every change batch must pass before moving to the next script:
 
 ## 5. Current Progress
 
-- **Completed:** Modular split of `client_package_common.sh` into `lib/pkg_{core,transfer,archive,pipeline}.sh`; migrated `dotnet_packaging.sh` (`964 -> 650` lines); updated callers off `to_cygpath`; completed **Phase 0** (`lib/pkg_*` contract & `.7z`/`to_mixed_path` hardening), **Phase 1** (`bun_upgrade.sh`, `antigravity_package.sh`, `vscode_package.sh`, `craftapps_package.sh`), **Phase 2** (`build_python_win.sh`, `rust_cachemgr.sh`, `chromium_upgrade.sh`, `rust_upgrade_win.sh`, `rust_upgrade.sh`), and **Phase 3** (`jdk_packaging.sh`, `tomcat_packaging.sh`, `build.inc`, `shellcheck_build.sh`), verified via `bash -n`, `shellcheck -x` across all 20 files, CLI smoke checks, and offline E2E suites.
-- **Next:** Ready to review `git diff` and commit Phases 0–3 changes.
+- **Completed:** Modular split of `client_package_common.sh` into `lib/pkg_{core,transfer,archive,pipeline}.sh`; migrated `dotnet_packaging.sh` (`964 -> 650` lines); updated callers off `to_cygpath`; completed **Phase 0**–**Phase 3** (committed `3f5690c`) and **Phase 4** (`lib/pkg_{paths,json,wsl}.sh` extracted and wired into both `lib/pkg_core.sh` and `build.inc`).
+- **Next:** Review `git diff` and commit Phase 4 changes.

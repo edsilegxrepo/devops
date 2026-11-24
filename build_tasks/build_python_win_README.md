@@ -181,6 +181,10 @@ graph LR
         Core["build_python_win.sh"]
     end
 
+    subgraph SharedLib ["Shared Foundation (client_package_common.sh)"]
+        CommonLib["lib/pkg_{paths,core,transfer,archive}.sh"]
+    end
+
     subgraph CygwinTools ["POSIX / Cygwin System Utilities"]
         Bash["Bash (4.0+)"]
         Cygpath["cygpath"]
@@ -198,6 +202,7 @@ graph LR
         Distrib["Destination: --distrib-dir/*.zip"]
     end
 
+    Core --> CommonLib
     Core --> Bash
     Core --> Cygpath
     Core --> Coreutils

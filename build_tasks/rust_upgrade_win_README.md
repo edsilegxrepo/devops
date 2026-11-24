@@ -18,7 +18,7 @@ The primary objective of `rust_upgrade_win.sh` is to manage the lifecycle of a c
 
 ## 2. Architecture and Design Choices
 
-The utility is structured as a monolithic shell script that coordinates system-level processes, compilers, and archive utilities. It divides its behavior into isolated, modular phases (Detect, Build, Package, Deploy) governed by defensive shell execution settings (`set -euo pipefail`).
+The utility coordinates system-level processes, compilers, and archive utilities while sourcing shared platform, path, workspace, safe-deletion, and HTTP helpers from [`client_package_common.sh`](client_package_common.sh) (`lib/pkg_{core,transfer,...}.sh`). It divides its behavior into isolated, modular phases (Detect, Build, Package, Deploy) governed by defensive shell execution settings (`set -euo pipefail`).
 
 ```mermaid
 graph TD
@@ -89,11 +89,11 @@ To achieve optimal execution speeds under Windows file systems (NTFS) and shell 
     *   If `--force` is specified during Build Mode, the script ignores any auto-discovered precompiled linter packages in the build directory, forcing Cargo to rebuild all code-quality tools from source.
 *   **Cygwin cygpath Empty-Input Safeguard:**
     *   By default, calling `cygpath` with an empty string returns `.` (current directory), which could cause accidental folder operations.
-    *   The path helper wrappers (`to_win_path`, `to_unix_path`, `to_mixed_path`) are guarded to immediately return `""` on empty inputs.
+    *   The path helper wrappers (`to_win_path`, `to_unix_path`, `to_mixed_path`) delegate to [`lib/pkg_paths.sh`](lib/pkg_paths.sh) (`to_syspath` / `to_posix_path` / `to_mixed_path`) and immediately return `""` on empty inputs.
 *   **Registry PATH Duplicate Prevention:**
     *   Persistent registry updates are guarded to normalize path separators, strip trailing slashes, and compare folder paths case-insensitively, avoiding duplicate entries in Windows Registry variables.
 *   **Destructive Deletion Safeguard & Fast Deletion (`safe_delete`):**
-    *   Replaces generic `rm -rf` commands. It checks that inputs are non-empty, do not equal `/`, and do not match physical or virtual drive roots (`C:`, `/cygdrive/d`, etc.), halting with exit code `99` on violation.
+    *   Delegates directory/file removal to [`safe_rm_rf --fast-win`](lib/pkg_core.sh) / `safe_rm_f` (halting with exit code `99` on unsafe/root paths) instead of raw `rm -rf`.
     *   Uses native Windows `cmd.exe //c rmdir //s //q` in the background for directory removal, preceded by an instantaneous filesystem rename (`mv -f --`) to free the build path instantly.
     *   Addresses Windows CLI parsing bugs by stripping trailing slashes before translation to avoid escaped quote (`\"`) errors, and adds the POSIX option terminator (`--`) to protect against paths starting with a hyphen.
     *   Shielded with `|| true` exit-status protection to ensure file locking errors do not abort script EXIT cleanup traps.

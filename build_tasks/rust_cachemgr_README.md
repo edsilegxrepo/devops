@@ -84,7 +84,7 @@ graph TD
 
 ## 4. Dependencies
 
-The script relies solely on standard POSIX and GNU system command line tools.
+The script sources [`lib/pkg_core.sh`](lib/pkg_core.sh) (plus [`lib/pkg_paths.sh`](lib/pkg_paths.sh)) for path conversion, logging, and PID-reaping mkdir locks alongside standard POSIX and GNU command line tools.
 
 | Dependency | Purpose | Availability |
 | :--- | :--- | :--- |
