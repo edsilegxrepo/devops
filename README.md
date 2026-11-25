@@ -75,6 +75,7 @@ Low-level system adjustments and service delegations.
 - `ubuntu_upgrade.sh`: Orchestrates non-interactive system package updates, telemetry/ESM disabling, parallel Flatpak upgrades, and mainline kernel updates.
 - `ubuntu_kernel_updater.sh`: Detects, installs, and manages mainline upstream kernels bypassing APT dependency checks, and purges older kernels.
 - `proxmox_update.sh`: Proxmox VE update orchestrator with pre-flight storage gating, early archive purging, strict dist-upgrade semantics, kernel lifecycle management, and bootloader synchronization.
+- `proxmox_kernel_cleanup.sh`: Standalone, safety-gated Proxmox VE kernel and header pruning utility with pending-reboot gating, bounded family retention, boot-tool pin and metapackage BFS overrides, `apt-get -s` simulation verification, and ESP/GRUB bootloader synchronization.
 - `proxmox_tune.sh`: Idempotent Proxmox VE `proxmox-widget-toolkit` subscription notice patcher.
 - `lib/`: Shared 3-tier OS abstraction library (`system.sh`, `debian_sys.sh`, `rhel_sys.sh`) providing common logging, distro detection, and package management helpers.
 - `max_root.sh`: Cross-platform pre-upgrade storage maximization utility reclaiming disk space across systemd journals, logs, caches, and package manager databases.
