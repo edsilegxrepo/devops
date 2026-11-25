@@ -1055,6 +1055,7 @@ _package_single_tool() {
     fi
 
     # 4. Pack combined bundle zip & atomically stage to --source + --target
+    find "$bundle_staging" -maxdepth 1 -type f -exec chmod 644 {} + 2> /dev/null || true
     local out_bundle="${CURRENT_BUILD_DIR}/${new_bundle}"
     log_info "Creating normalized bundle archive: ${new_bundle}..."
     if ! repack_directory_to_zip "$bundle_staging" "$out_bundle" ||

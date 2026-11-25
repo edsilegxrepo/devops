@@ -223,6 +223,7 @@ _finalize_tmp_tar_xz() {
         _CURRENT_TMP_FILE=""
         return 1
     fi
+    chmod 644 "$tmp_xz" 2> /dev/null || true
     if ! mv -f -- "$tmp_xz" "$dest_tar_xz"; then
         log_error "Failed finalizing xz archive: $(basename "$dest_tar_xz")"
         safe_rm_f "$tmp_xz"
@@ -351,6 +352,7 @@ if [[ "$out_file" == "-" ]]; then
     cat "$lx_work/out.tar.xz"
 else
     cp -f "$lx_work/out.tar.xz" "$out_file"
+    chmod 644 "$out_file" 2>/dev/null || true
 fi
 '
 
