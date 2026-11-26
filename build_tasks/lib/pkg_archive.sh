@@ -17,6 +17,11 @@ if ! declare -F resolve_wsl_binary > /dev/null 2>&1; then
     source "${_PKG_ARCHIVE_LIB_DIR}/pkg_wsl.sh"
 fi
 
+# Shared GNU tar option sets (arrays prevent word-splitting & caller collisions)
+_PKG_TAR_OPTS=(--force-local)
+_PKG_TAR_EXTRACT_OPTS=("${_PKG_TAR_OPTS[@]}" --warning=no-unknown-keyword)
+_PKG_TAR_CREATE_OPTS=("${_PKG_TAR_OPTS[@]}" --owner=0 --group=0 --numeric-owner)
+
 # ------------------------------------------------------------------------------
 # Archive Verification & Extraction
 # ------------------------------------------------------------------------------
@@ -33,7 +38,7 @@ verify_zip_has_entry() {
 
 verify_tar_xz_integrity() {
     local tar_xz_path="$1"
-    tar --force-local -tJf "$tar_xz_path" > /dev/null 2>&1
+    tar "${_PKG_TAR_EXTRACT_OPTS[@]}" -tJf "$tar_xz_path" > /dev/null 2>&1
 }
 
 # verify_archive_integrity <file_path>
@@ -52,10 +57,10 @@ verify_archive_integrity() {
             verify_tar_xz_integrity "$archive_path"
             ;;
         *.tar.gz | *.tgz)
-            tar --force-local -tzf "$archive_path" > /dev/null 2>&1
+            tar "${_PKG_TAR_EXTRACT_OPTS[@]}" -tzf "$archive_path" > /dev/null 2>&1
             ;;
         *.tar)
-            tar --force-local -tf "$archive_path" > /dev/null 2>&1
+            tar "${_PKG_TAR_EXTRACT_OPTS[@]}" -tf "$archive_path" > /dev/null 2>&1
             ;;
         *.7z)
             local sz_bin="${SEVENZIP_BIN:-7z}"
@@ -89,13 +94,13 @@ extract_archive() {
             unzip -q "$archive" -d "$dest_dir"
             ;;
         *.tar.gz | *.tgz)
-            tar --force-local -xzf "$archive" -C "$dest_dir"
+            tar "${_PKG_TAR_EXTRACT_OPTS[@]}" -xzf "$archive" -C "$dest_dir"
             ;;
         *.tar.xz)
-            tar --force-local -xJf "$archive" -C "$dest_dir"
+            tar "${_PKG_TAR_EXTRACT_OPTS[@]}" -xJf "$archive" -C "$dest_dir"
             ;;
         *.tar)
-            tar --force-local -xf "$archive" -C "$dest_dir"
+            tar "${_PKG_TAR_EXTRACT_OPTS[@]}" -xf "$archive" -C "$dest_dir"
             ;;
         *.7z)
             local sz_bin="${SEVENZIP_BIN:-7z}"
@@ -204,9 +209,9 @@ _tar_dir_to_xz() {
         local items=(*)
         shopt -u nullglob dotglob
         if [[ ${#items[@]} -gt 0 ]]; then
-            tar --force-local --owner=0 --group=0 --numeric-owner "${extra_flags[@]}" -cf - "${items[@]}" | xz -9 -T0 > "$dest_tar_xz"
+            tar "${_PKG_TAR_CREATE_OPTS[@]}" "${extra_flags[@]}" -cf - "${items[@]}" | xz -9 -T0 > "$dest_tar_xz"
         else
-            tar --force-local --owner=0 --group=0 --numeric-owner "${extra_flags[@]}" -cf - --files-from /dev/null | xz -9 -T0 > "$dest_tar_xz"
+            tar "${_PKG_TAR_CREATE_OPTS[@]}" "${extra_flags[@]}" -cf - --files-from /dev/null | xz -9 -T0 > "$dest_tar_xz"
         fi
     )
 }
@@ -276,7 +281,7 @@ recompress_folder_to_tar_xz() {
     local tmp_xz="${dest_tar_xz}.tmp.${BASHPID:-$$}"
     _CURRENT_TMP_FILE="$tmp_xz"
 
-    if ! (set -o pipefail; cd "$parent_dir" && tar --force-local --owner=0 --group=0 --numeric-owner -cf - "$folder_to_pack" | xz -9 -T0 > "$tmp_xz"); then
+    if ! (set -o pipefail; cd "$parent_dir" && tar "${_PKG_TAR_CREATE_OPTS[@]}" -cf - "$folder_to_pack" | xz -9 -T0 > "$tmp_xz"); then
         log_error "Failed creating xz archive: $(basename "$dest_tar_xz")"
         safe_rm_f "$tmp_xz"
         _CURRENT_TMP_FILE=""
@@ -339,11 +344,7 @@ cleanup_lx() { rm -rf "$lx_work"; }
 trap cleanup_lx EXIT
 
 mkdir -p "$lx_work/unpack"
-if [[ "$in_file" == "-" ]]; then
-    tar --force-local -xzpf - -C "$lx_work/unpack"
-else
-    tar --force-local -xzpf "$in_file" -C "$lx_work/unpack"
-fi
+tar --force-local --warning=no-unknown-keyword -xzpf "$in_file" -C "$lx_work/unpack"
 
 if [[ -n "$transform_cmds" ]]; then
     (cd "$lx_work/unpack" && eval "$transform_cmds") >&2
@@ -428,9 +429,9 @@ repack_directory_to_tar_xz_preserving_perms() {
             local items=(*)
             shopt -u nullglob dotglob
             if [[ ${#items[@]} -gt 0 ]]; then
-                tar --force-local -cf "$src_tar" "${items[@]}"
+                tar "${_PKG_TAR_OPTS[@]}" -cf "$src_tar" "${items[@]}"
             else
-                tar --force-local -cf "$src_tar" --files-from /dev/null
+                tar "${_PKG_TAR_OPTS[@]}" -cf "$src_tar" --files-from /dev/null
             fi
         ); then
             # shellcheck disable=SC2016
