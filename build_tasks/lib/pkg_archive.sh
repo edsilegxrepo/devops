@@ -253,21 +253,25 @@ repack_directory_to_tar_xz() {
     _finalize_tmp_tar_xz "$tmp_xz" "$dest_tar_xz"
 }
 
-# recompress_folder_to_tar_xz <parent_dir> <folder_to_pack> <dest_tar_xz>
-# Preserves folder_to_pack as the single top-level directory in dest_tar_xz,
-# normalizes timestamps, and writes atomically via a temporary sibling file.
+# recompress_folder_to_tar_xz <parent_dir> <entry_to_pack> <dest_tar_xz>
+# Preserves entry_to_pack (directory or file) as the single top-level entry in
+# dest_tar_xz, normalizes timestamps, and writes atomically via a temporary sibling file.
 recompress_folder_to_tar_xz() {
     local parent_dir="$1"
     local folder_to_pack="$2"
     local dest_tar_xz="$3"
     local target_sub="${parent_dir}/${folder_to_pack}"
 
-    [[ -d "$target_sub" ]] || {
-        log_error "Folder to compress not found: $target_sub"
+    [[ -n "$folder_to_pack" && ( -e "$target_sub" || -L "$target_sub" ) ]] || {
+        log_error "Entry to compress not found: $target_sub"
         return 1
     }
     mkdir -p "$(dirname "$dest_tar_xz")" || return 1
-    normalize_directory_timestamps "$target_sub"
+    if [[ -d "$target_sub" ]]; then
+        normalize_directory_timestamps "$target_sub"
+    elif [[ -f "$target_sub" ]]; then
+        touch "$target_sub" 2> /dev/null || true
+    fi
 
     local tmp_xz="${dest_tar_xz}.tmp.${BASHPID:-$$}"
     _CURRENT_TMP_FILE="$tmp_xz"
