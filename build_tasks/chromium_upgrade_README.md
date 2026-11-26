@@ -15,20 +15,24 @@ This document provides architectural specifications, design workflows, and execu
   * **Download & Workspace**: Downloads `chrome.7z` (e.g., `https://github.com/Hibbiki/chromium-win64/releases/download/v150.0.7871.187-r1639810/chrome.7z`) into `TEMP/unique_workspace` (where `unique_workspace` = `chromium-YYYYMMDDhhmmss`).
   * **Directory Normalization**: Renames internal folder `Chrome-bin` $\rightarrow$ `chromium`.
   * **Locale Pruning**: In `<version>/Locales` (e.g., `<version>` = `150.0.7871.187`), deletes all files except `en-US*.pak` (retaining `en-US.pak`, `en-US_FEMININE.pak`, `en-US_MASCULINE.pak`, and `en-US_NEUTER.pak`).
-  * **Repackaging**: Repacks tree as 7z maximum compression (`7z a -t7z -m0=lzma2 -mx=9`) into packaged archive `chromium-150.0.7871.187_1639810-x64.7z`.
-  * **Staging**: Moves packaged archive to `--archive-path` (default: `f:/stage/upload/pending/`).
+  * **Repackaging**: Repacks tree as 7z maximum compression (`7z a -t7z -m0=lzma2 -mx=9`) into packaged archive `chromium-158.0.8127.37_1727472-x64.7z`.
+  * **Staging & Envelope Publishing**:
+    * Atomically publishes the inner `.7z` payload to `--archive-path` (default: `f:/stage/upload/pending/`) and purges obsolete Windows `.7z` archives there.
+    * Unless `--no-update-source` is specified, wraps the inner `.7z` into `chromium-<major>.<minor>-w64.zip` (e.g., `chromium-158.0-w64.zip`), atomically publishes it to `--release-path` (default: `n:/softlib/software/public/inet/www/browser/chrome/`), and purges obsolete `chromium-*-w64.zip` envelopes there.
   * **Cleanup**: Deletes temporary workspace upon successful completion.
 
 * **Linux Packaging Pipeline**:
   * **Inspect URL**: Checks `--from-url` (default: `https://ungoogled-software.github.io/ungoogled-chromium-binaries/`) for new Portable Linux 64-bit releases.
-  * **Version Check**: Evaluates reference release path (e.g., `n:/softlib/software/public/inet/www/browser/chrome/chromium-150.0-lnx.zip`).
-  * **WSL Delegation (Windows Hosts)**: When executed on a Windows host, the script automatically delegates the Linux download, extraction, locale pruning, attribute preservation, and tar repackaging into **WSL (Windows Subsystem for Linux)**. This avoids NTFS file mode flattening and guarantees that native Linux executable bits (`chmod 755`), file capabilities, and library attributes are preserved.
-  * **Download & Workspace**: Downloads release archive (e.g., `https://github.com/ungoogled-software/ungoogled-chromium-portablelinux/releases/download/150.0.7871.186-1/ungoogled-chromium-150.0.7871.186-1-x86_64_linux.tar.xz`) into isolated Linux `/tmp` workspace.
+  * **Version Check**: Evaluates reference release path (e.g., `n:/softlib/software/public/inet/www/browser/chrome/chromium-156.0-lnx.zip`).
+  * **WSL Delegation (Windows Hosts)**: When executed on a Windows host, the script automatically delegates the Linux download, extraction, locale pruning, attribute preservation, and tar repackaging into **WSL (Windows Subsystem for Linux)**, writing the resulting `.tar.xz` back to the host temp workspace. This avoids NTFS file mode flattening and guarantees that native Linux executable bits (`chmod 755`), file capabilities, and library attributes are preserved.
+  * **Download & Workspace**: Downloads release archive (e.g., `https://github.com/ungoogled-software/ungoogled-chromium-portablelinux/releases/download/156.0.8078.79-1/ungoogled-chromium-156.0.8078.79-1-x86_64_linux.tar.xz`) into isolated Linux `/tmp` workspace.
   * **Directory Normalization**: Creates internal directory `chromium/` and moves all extracted files into `chromium/`.
   * **Locale Pruning**: In `locales/`, deletes all files except `en-US*.pak` (retaining `en-US.pak`, `en-US_FEMININE.pak`, `en-US_MASCULINE.pak`, and `en-US_NEUTER.pak`).
   * **POSIX Permissions Enforcement**: Explicitly enforces `chmod 755` on all executable binaries (`chrome`, `chrome_crashpad_handler`, `chrome-sandbox`, `nacl_helper`, `nacl_helper_bootstrap`) and shared objects (`*.so*`).
-  * **Repackaging**: Repacks tree as `tar.xz` maximum compression (`XZ_OPT="-9 -T0" tar -cJf`) into packaged archive `chromium-150.0.7871.186-1-ungoogled-x86_64_linux.tar.xz`.
-  * **Staging**: Moves packaged archive to `--archive-path` (`f:/stage/upload/pending/`).
+  * **Repackaging**: Repacks tree as `tar.xz` maximum compression (`XZ_OPT="-9 -T0" tar -cJf`) into packaged archive `chromium-156.0.8078.79-1-ungoogled-x86_64_linux.tar.xz`.
+  * **Staging & Envelope Publishing**:
+    * Atomically publishes the inner `.tar.xz` payload to `--archive-path` (default: `f:/stage/upload/pending/`) and purges obsolete Linux `.tar.xz` archives there.
+    * Unless `--no-update-source` is specified, wraps the inner `.tar.xz` into `chromium-<major>.<minor>-lnx.zip` (e.g., `chromium-156.0-lnx.zip`), atomically publishes it to `--release-path` (default: `n:/softlib/software/public/inet/www/browser/chrome/`), and purges obsolete `chromium-*-lnx.zip` envelopes there.
   * **Cleanup**: Deletes temporary workspace upon successful completion.
 
 ### 1.2 Deployment Pipeline (`--action deploy`)
@@ -44,7 +48,7 @@ This document provides architectural specifications, design workflows, and execu
 
 ### 1.3 Key Operating Constraints & Notes
 1. **Mandatory Platform Flag & Detection**: `--platform <windows|linux>` (with automatic environment/path hint detection if omitted).
-2. **Prerequisites Verification & Fail-Fast**: All required environmental prerequisites (`curl`, `grep`, `sed`, `cygpath`, `powershell`, `tar`, `xz`, `7z`, `wsl`) must be present or execution aborts (exit code `3`). On Windows, `7z` location is inspected via `--with-7z <path>` (e.g. `c:/tls/arc/7zip/`), `7Z_HOME`, `PATH`, and standard installation paths (`c:/tls/arc/7zip/7z.exe`, `C:/Program Files/7-Zip/7z.exe`), while `wsl.exe` is required for Linux target packaging.
+2. **Prerequisites Verification & Fail-Fast**: All required environmental prerequisites (`curl`, `grep`, `sed`, `zip`, `unzip` when updating `--release-path`, `cygpath`, `powershell`, `tar`, `xz`, `7z`, `wsl`) must be present or execution aborts (exit code `3`). On Windows, `7z` location is inspected via `--with-7z <path>` (e.g. `c:/tls/arc/7zip/`), `7Z_HOME`, `PATH`, and standard installation paths (`c:/tls/arc/7zip/7z.exe`, `C:/Program Files/7-Zip/7z.exe`), while `wsl.exe` is required for Linux target packaging.
 3. **Windows Path Format**: All Windows paths are output/formatted in mixed drive prefix notation: `<drive>:/path/sub`.
 4. **Shared Foundation Library**: Sources [`client_package_common.sh`](client_package_common.sh) (`lib/pkg_{paths,wsl,core,transfer,archive}.sh`) for platform/path normalization, logging, temporary workspaces, safe deletion, `curl` retries, and atomic archive publishing.
 
@@ -66,10 +70,13 @@ graph TD
     G -->|Linux Target on Win| I[WSL Bridge: Download in WSL /tmp -> Extract tar -> Normalize -> Prune locales -> chmod 755 -> Pack tar.xz -9 -T0]
     G -->|Linux Target on Linux| J[Native Linux: Download -> Extract tar -> Normalize -> Prune locales -> chmod 755 -> Pack tar.xz -9 -T0]
     
-    H --> K[Move Package Archive to --archive-path f:/stage/upload/pending/]
+    H --> K[Publish Inner Archive to --archive-path f:/stage/upload/pending/ & Purge Old]
     I --> K
     J --> K
-    K --> L[Delete Temporary Workspace]
+    K --> K2{--no-update-source?}
+    K2 -->|No| K3[Wrap in chromium-maj.min-w64/lnx.zip -> Publish to --release-path & Purge Old]
+    K2 -->|Yes| L[Delete Temporary Workspace]
+    K3 --> L
 
     B -->|--action deploy| M[Verify Prerequisites]
     M --> N{Source Type}
@@ -96,12 +103,14 @@ graph TD
 | `--action` | `package \| deploy` | **Mandatory** | Selects execution mode (packaging or deployment). |
 | `--platform` | `windows \| linux \| windows,linux` | **Mandatory / Auto** | Target operating system platform (default: `windows,linux` for packaging; auto-detected for deploy). |
 | `--from-url` | `<url>` | Optional | Source release page (packaging) or direct download URL (deployment). |
-| `--release-path` | `<path>` | Optional | Reference path/file to compare installed version against (packaging). |
-| `--archive-path` | `<path>` | Optional | Destination directory for final generated packaged archive (default: `f:/stage/upload/pending/`). |
+| `--release-path` | `<path>` | Optional | Reference/library directory or envelope `.zip` path for `chromium-<maj.min>-<w64\|lnx>.zip` (default: `n:/softlib/software/public/inet/www/browser/chrome`). |
+| `--archive-path` | `<path>` | Optional | Destination directory for inner packaged `.7z` / `.tar.xz` archives (default: `f:/stage/upload/pending`). |
 | `--from-folder` | `<folder>` | Mandatory (Deploy 2.1) | Source directory (auto-picks latest build) or direct archive file path. |
 | `--to-folder` | `<folder>` | Mandatory (Deploy) | Destination directory for extraction and deployment. |
 | `--with-7z` | `<path>` | Optional (Win) | Custom 7z executable or directory path (e.g. `c:/tls/arc/7zip/`). |
 | `--force` | None | Optional | Force packaging or deployment even if reference version matches. |
+| `--no-update-source` | None | Optional (Package) | Stage inner archive to `--archive-path` without updating `--release-path`. |
+| `--dry-run` | None | Optional | Preview downloads, envelope packaging, staging, deployment, and pruning without modifying disk. |
 | `--purge` | None | Optional (Deploy) | Delete source archive file after successful deployment (prohibited with `--action package`). |
 | `-h, --help` | None | Optional | Displays execution syntax and usage manual. |
 

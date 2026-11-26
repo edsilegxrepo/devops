@@ -11,8 +11,10 @@
 #      - Downloads official binary distributions (Hibbiki win64 / Ungoogled Linux)
 #      - Normalizes internal folder layout to 'chromium'
 #      - Prunes non-English locales (retains only en-US.*)
-#      - Repacks with maximum compression (7z on Windows, tar.xz on Linux)
-#      - Moves package to designated staging directory
+#      - Repacks inner payload with maximum compression (7z on Windows, tar.xz on Linux)
+#      - Stages inner payload to --archive-path (default: f:/stage/upload/pending/)
+#      - Wraps inner payload into chromium-<major>.<minor>-<w64|lnx>.zip and updates
+#        --release-path (default: n:/softlib/software/public/inet/www/browser/chrome/)
 #
 #    Deployment Mode (--action deploy):
 #      - Extracts packaged archive to target directory (--to-folder)
@@ -21,11 +23,12 @@
 #  Syntax:
 #    chromium_upgrade.sh --action package [--platform windows,linux]
 #                        [--from-url <url>] [--release-path <path>]
-#                        [--archive-path <path>] [--with-7z <path>] [--force]
+#                        [--archive-path <path>] [--with-7z <path>]
+#                        [--force] [--no-update-source] [--dry-run]
 #
 #    chromium_upgrade.sh --action deploy
 #                        [--from-folder <folder>] [--from-url <url>]
-#                        --to-folder <folder> [--with-7z <path>] [--purge]
+#                        --to-folder <folder> [--with-7z <path>] [--purge] [--dry-run]
 #
 #  Examples:
 #    [WINDOWS]
@@ -42,7 +45,7 @@
 #    0 = Success
 #    1 = Release up-to-date (skipped) or operation abort
 #    2 = Invalid arguments or command validation error
-#    3 = Missing environmental prerequisites (curl, 7z, tar, xz, powershell)
+#    3 = Missing environmental prerequisites (curl, zip, unzip, 7z, tar, xz, powershell)
 #    4 = Network download failure
 #    5 = Archive extraction failure
 #    6 = Package creation / compression failure
@@ -50,16 +53,6 @@
 # -----------------------------------------------------------------------------
 
 set -euo pipefail
-
-# =============================================================================
-#  DEFAULT CONFIGURATION GLOBALS
-# =============================================================================
-
-DEFAULT_WIN_FROM_URL="https://github.com/Hibbiki/chromium-win64/releases/"
-DEFAULT_LNX_FROM_URL="https://ungoogled-software.github.io/ungoogled-chromium-binaries/"
-
-DEFAULT_RELEASE_PATH="n:/softlib/software/public/inet/www/browser/chrome/"
-DEFAULT_ARCHIVE_PATH="f:/stage/upload/pending/"
 
 # =============================================================================
 #  SHARED LIBRARY INITIALIZATION & PATH ENVIRONMENT
@@ -75,6 +68,16 @@ fi
 source "${COMMON_LIB}"
 # chromium_upgrade.sh uses granular exit codes (1..7) and logs explicitly before exit
 trap - ERR
+
+# =============================================================================
+#  DEFAULT CONFIGURATION GLOBALS
+# =============================================================================
+
+DEFAULT_WIN_FROM_URL="https://github.com/Hibbiki/chromium-win64/releases/"
+DEFAULT_LNX_FROM_URL="https://ungoogled-software.github.io/ungoogled-chromium-binaries/"
+
+DEFAULT_RELEASE_PATH="$(resolve_default_path "n" "softlib/software/public/inet/www/browser/chrome")"
+DEFAULT_ARCHIVE_PATH="$(resolve_default_path "f" "stage/upload/pending")"
 
 # shellcheck disable=SC2034
 NUM_JOBS=$(nproc 2> /dev/null || echo 4)
@@ -178,6 +181,11 @@ function verify_prerequisites() {
   if ! command -v grep &> /dev/null; then missing+=("grep"); fi
   if ! command -v sed &> /dev/null; then missing+=("sed"); fi
 
+  if [ "${ACTION}" = "package" ] && [ "${UPDATE_SOURCE}" = "true" ]; then
+    if ! command -v zip &> /dev/null; then missing+=("zip"); fi
+    if ! command -v unzip &> /dev/null; then missing+=("unzip"); fi
+  fi
+
   if is_windows_platform; then
     RESOLVED_7Z_BIN=$(find_7z_binary || true)
     RESOLVED_WSL_BIN=$(find_wsl_binary || true)
@@ -262,12 +270,16 @@ function show_help() {
   echo "Options:"
   echo "  --platform <win|linux>   Target OS platform (default: auto-detected from system/URL)."
   echo "  --from-url <url>         Source release page or direct download URL."
-  echo "  --release-path <path>    Reference archive path to evaluate current release version."
-  echo "  --archive-path <path>    Target destination directory for generated packaged archive."
+  echo "  --release-path <path>    Reference/library path for chromium-<maj.min>-<w64|lnx>.zip envelopes"
+  echo "                           (default: ${DEFAULT_RELEASE_PATH})."
+  echo "  --archive-path <path>    Target destination directory for inner .7z / .tar.xz archives"
+  echo "                           (default: ${DEFAULT_ARCHIVE_PATH})."
   echo "  --from-folder <folder>   Source folder (auto-detects latest archive) or exact archive file path."
   echo "  --to-folder <folder>     Destination directory for extraction and deployment."
   echo "  --with-7z <path>         Path to 7z executable or directory (Windows)."
   echo "  --force                  Force packaging or deployment even if up to date."
+  echo "  --no-update-source       In --action package, stage to --archive-path without modifying --release-path."
+  echo "  --dry-run                Preview actions without downloading or modifying files on disk."
   echo "  --purge                  Delete source archive file after successful deployment (--action deploy only)."
   echo "  -h, --help               Display this help menu."
   echo ""
@@ -293,6 +305,8 @@ ARCHIVE_PATH=""
 FROM_FOLDER=""
 TO_FOLDER=""
 FORCE="false"
+UPDATE_SOURCE="true"
+DRY_RUN="false"
 PURGE="false"
 
 while [ $# -gt 0 ]; do
@@ -346,6 +360,14 @@ while [ $# -gt 0 ]; do
       FORCE="true"
       shift
       ;;
+    --no-update-source)
+      UPDATE_SOURCE="false"
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN="true"
+      shift
+      ;;
     --purge)
       PURGE="true"
       shift
@@ -384,6 +406,10 @@ fi
 if [ "${ACTION}" = "deploy" ]; then
   if [ -n "${TARGET_PLATFORM:-}" ]; then
     log_error "--platform option is not allowed for deployment mode. Deployment target platform is always auto-detected."
+    exit 2
+  fi
+  if [ "${UPDATE_SOURCE}" = "false" ]; then
+    log_error "--no-update-source option is only allowed with --action package."
     exit 2
   fi
 
@@ -430,16 +456,20 @@ fi
 function verify_specified_paths() {
   local invalid=()
 
-  if [ "${ACTION}" = "package" ] && [ "${FORCE}" = "false" ]; then
+  if [ "${ACTION}" = "package" ]; then
     local check_ref="${RELEASE_PATH:-${DEFAULT_RELEASE_PATH}}"
     local posix_ref
     posix_ref=$(to_posix_path "${check_ref}")
-    if [ ! -e "${posix_ref}" ]; then
+    if [ "${FORCE}" = "false" ] && [ ! -e "${posix_ref}" ]; then
       invalid+=("Specified --release-path does not exist: $(to_mixed_path "${check_ref}")")
+    elif [ "${UPDATE_SOURCE}" = "true" ] && [ ! -d "${posix_ref}" ]; then
+      local parent_ref
+      parent_ref=$(dirname "${posix_ref}")
+      if [ ! -d "${parent_ref}" ]; then
+        invalid+=("Target --release-path parent directory does not exist: $(to_mixed_path "${check_ref}")")
+      fi
     fi
-  fi
 
-  if [ "${ACTION}" = "package" ]; then
     local check_arch="${ARCHIVE_PATH:-${DEFAULT_ARCHIVE_PATH}}"
     local posix_arch
     posix_arch=$(to_posix_path "${check_arch}")
@@ -567,6 +597,8 @@ function resolve_reference_version() {
   local listing=""
   if [[ "${target_file}" == *.tar.xz ]] || [[ "${target_file}" == *.tar.gz ]]; then
     listing=$(tar -tf "${target_file}" 2> /dev/null || true)
+  elif [[ "${target_file}" == *.zip ]] && command -v unzip > /dev/null 2>&1; then
+    listing=$(unzip -Z1 "${target_file}" 2> /dev/null || true)
   else
     listing=$(exec_7z l "${target_file}" 2> /dev/null || true)
   fi
@@ -580,6 +612,93 @@ function resolve_reference_version() {
 
   ver=$(extract_version_from_string "${base_name}")
   echo "${ver:-0.0.0.0}"
+}
+
+# Extracts <major>.<minor> (e.g. 158.0) from a full Chromium version string.
+function _extract_major_minor() {
+  local ver="$1"
+  if [[ "${ver}" =~ ^([0-9]+\.[0-9]+) ]]; then
+    echo "${BASH_REMATCH[1]}"
+  else
+    echo "${ver%%-*}"
+  fi
+}
+
+# Returns standard package suffix (w64 | lnx) for <platform>.
+function _platform_suffix() {
+  [ "$1" = "windows" ] && echo "w64" || echo "lnx"
+}
+
+# Returns canonical envelope zip name chromium-<major>.<minor>-<w64|lnx>.zip.
+function _envelope_zip_name() {
+  local platform="$1"
+  local ver="$2"
+  local major_minor
+  major_minor=$(_extract_major_minor "${ver}")
+  echo "chromium-${major_minor}-$(_platform_suffix "${platform}").zip"
+}
+
+# Resolves the writable release library directory from --release-path.
+function _resolve_release_dir() {
+  local ref_path="$1"
+  local posix_ref
+  posix_ref=$(to_posix_path "${ref_path}")
+  posix_ref=$(strip_trailing_slashes "${posix_ref}")
+
+  if [ -d "${posix_ref}" ]; then
+    echo "${posix_ref}"
+  elif [[ "${posix_ref,,}" == *.zip ]]; then
+    dirname "${posix_ref}"
+  elif [[ "${ref_path}" == */ || "${ref_path}" == *\\ ]] || [[ ! "${posix_ref,,}" =~ \.(7z|tar\.xz|tar\.gz|zip)$ ]]; then
+    echo "${posix_ref}"
+  fi
+}
+
+# Removes files in <dir> matching any of the trailing globs except <current_name>.
+function _purge_glob_except() {
+  local dir="$1"
+  local label="$2"
+  local current_name="$3"
+  local dry_run="$4"
+  shift 4
+
+  [ -n "${dir}" ] && [ -d "${dir}" ] || return 0
+
+  local pat f bname
+  shopt -s nullglob
+  for pat in "$@"; do
+    for f in "${dir}"/${pat}; do
+      bname=$(basename "${f}")
+      [ "${bname}" != "${current_name}" ] || continue
+      if [ "${dry_run}" = "true" ]; then
+        log_info "[DRY-RUN] Would remove obsolete ${label}: ${bname}"
+      else
+        log_info "Removing obsolete ${label}: ${bname}"
+        safe_rm_f "${f}"
+      fi
+    done
+  done
+  shopt -u nullglob
+}
+
+# Removes stale Chromium envelope archives in --release-path for <platform>.
+function _purge_release_envelopes() {
+  local ref_path="$1"
+  local platform="$2"
+  local current_zip="$3"
+  local dry_run="$4"
+
+  local release_dir
+  release_dir=$(_resolve_release_dir "${ref_path}")
+  [ -n "${release_dir}" ] && [ -d "${release_dir}" ] || return 0
+
+  if [ "${platform}" = "windows" ]; then
+    _purge_glob_except "${release_dir}" "release envelope" "${current_zip}" "${dry_run}" \
+      "chromium-[0-9]*-w64.zip" "chromium-[0-9]*-w64.7z"
+  else
+    _purge_glob_except "${release_dir}" "release envelope" "${current_zip}" "${dry_run}" \
+      "chromium-[0-9]*-lnx.zip" "chromium-[0-9]*-lnx.tar.xz"
+  fi
 }
 
 # -----------------------------------------------------------------------------
@@ -616,6 +735,9 @@ function check_packaging_version_gate() {
 
     if ! is_newer_version "${remote_ver}" "${current_ver}"; then
       log_info "Local release is already up to date (${current_ver}). Skipping packaging for ${target_platform}."
+      if [ "${UPDATE_SOURCE}" = "true" ]; then
+        _purge_release_envelopes "${ref_path}" "${target_platform}" "$(_envelope_zip_name "${target_platform}" "${current_ver}")" "${DRY_RUN}"
+      fi
       return 1
     fi
   fi
@@ -729,25 +851,89 @@ function fetch_github_release_asset() {
 
 # -----------------------------------------------------------------------------
 # Function: finalize_package_archive
-# Objective: Atomically promotes newly generated package archive from temporary
-#            workspace to the final staging directory (--archive-path).
-# Data Flow: Workspace archive path + Target archive dir -> Atomic verify & move.
+# Objective: Atomically publishes the inner payload (.7z / .tar.xz) to --archive-path,
+#            purges obsolete inner payloads there, and (unless --no-update-source)
+#            wraps it in chromium-<major>.<minor>-<w64|lnx>.zip in --release-path.
+# Data Flow: Inner archive + Staging dirs + Platform/Ver -> Atomic stage & purge.
 # -----------------------------------------------------------------------------
 function finalize_package_archive() {
   local output_archive="$1"
   local arch_path="$2"
+  local ref_path="$3"
+  local platform="$4"
+  local remote_ver="$5"
 
-  local posix_arch_dir
+  local posix_arch_dir pkg_filename
   posix_arch_dir=$(to_posix_path "${arch_path}")
-  local pkg_filename
+  posix_arch_dir=$(strip_trailing_slashes "${posix_arch_dir}")
   pkg_filename=$(basename "${output_archive}")
+
+  local plat_suffix outer_zip_name release_dir=""
+  plat_suffix=$(_platform_suffix "${platform}")
+  outer_zip_name=$(_envelope_zip_name "${platform}" "${remote_ver}")
+  release_dir=$(_resolve_release_dir "${ref_path}")
+
+  local -a inner_purge_globs
+  if [ "${platform}" = "windows" ]; then
+    inner_purge_globs=("chromium-[0-9]*-x64.7z")
+  else
+    inner_purge_globs=("chromium-[0-9]*-ungoogled-x86_64_linux.tar.xz" "chromium-[0-9]*-x86_64_linux.tar.xz")
+  fi
+
+  if [ "${DRY_RUN}" = "true" ]; then
+    log_info "[DRY-RUN] Would stage inner archive to --archive-path: $(to_mixed_path "${arch_path}")/${pkg_filename}"
+    _purge_glob_except "${posix_arch_dir}" "staged archive" "${pkg_filename}" "true" "${inner_purge_globs[@]}"
+    if [ "${UPDATE_SOURCE}" = "true" ] && [ -n "${release_dir}" ]; then
+      log_info "[DRY-RUN] Would wrap ${pkg_filename} into ${outer_zip_name}"
+      log_info "[DRY-RUN] Would publish release envelope to --release-path: $(to_mixed_path "${release_dir}")/${outer_zip_name}"
+      _purge_release_envelopes "${ref_path}" "${platform}" "${outer_zip_name}" "true"
+    elif [ "${UPDATE_SOURCE}" != "true" ]; then
+      log_info "[DRY-RUN] --no-update-source set; would leave --release-path unchanged."
+    fi
+    return 0
+  fi
+
+  local posix_ws envelope_stage outer_zip_path=""
+  posix_ws=$(to_posix_path "${TEMP_WORKSPACE}")
+  if [ "${UPDATE_SOURCE}" = "true" ] && [ -n "${release_dir}" ]; then
+    envelope_stage="${posix_ws}/envelope_${plat_suffix}"
+    safe_rm_rf "${envelope_stage}"
+    mkdir -p "${envelope_stage}" || exit 6
+    if ! cp -f -- "${output_archive}" "${envelope_stage}/${pkg_filename}"; then
+      log_error "Failed copying inner archive for envelope zip: ${pkg_filename}"
+      exit 6
+    fi
+    chmod 644 "${envelope_stage}/${pkg_filename}" 2> /dev/null || true
+    outer_zip_path="${posix_ws}/${outer_zip_name}"
+    log_info "Creating normalized release envelope: ${outer_zip_name}..."
+    if ! repack_directory_to_zip "${envelope_stage}" "${outer_zip_path}"; then
+      safe_rm_rf "${envelope_stage}"
+      exit 6
+    fi
+    safe_rm_rf "${envelope_stage}"
+  fi
 
   if ! atomic_publish_file "${output_archive}" "${posix_arch_dir}/${pkg_filename}" "archive" true; then
     exit 6
   fi
+  log_info "Inner archive staged to --archive-path:"
+  log_info "  -> $(to_mixed_path "${posix_arch_dir}/${pkg_filename}")"
+  _purge_glob_except "${posix_arch_dir}" "staged archive" "${pkg_filename}" "false" "${inner_purge_globs[@]}"
 
-  log_info "Package successfully created and moved to target archive directory:"
-  log_info "  -> $(to_mixed_path "${arch_path}/${pkg_filename}")"
+  if [ "${UPDATE_SOURCE}" = "true" ]; then
+    if [ -z "${release_dir}" ]; then
+      log_warn "Skipping --release-path update; target is not a directory or .zip envelope: $(to_mixed_path "${ref_path}")"
+    else
+      if ! atomic_publish_file "${outer_zip_path}" "${release_dir}/${outer_zip_name}" "release envelope" true; then
+        exit 6
+      fi
+      log_info "Release envelope published to --release-path:"
+      log_info "  -> $(to_mixed_path "${release_dir}/${outer_zip_name}")"
+      _purge_release_envelopes "${ref_path}" "${platform}" "${outer_zip_name}" "false"
+    fi
+  else
+    log_info "--no-update-source set; leaving --release-path unchanged."
+  fi
 }
 
 # -----------------------------------------------------------------------------
@@ -760,82 +946,46 @@ function extract_package_archive() {
   local archive_path="$1"
   local target_dir="$2"
 
-  local posix_archive
+  local posix_archive posix_target
   posix_archive=$(to_posix_path "${archive_path}")
-  local posix_target
   posix_target=$(to_posix_path "${target_dir}")
 
   mkdir -p "${posix_target}"
 
   if [[ "${posix_archive}" == *.7z ]] || [[ "${posix_archive}" == *.zip ]]; then
-    if [ "${TARGET_PLATFORM}" = "windows" ]; then
-      log_info "Extracting archive using 7z..."
-      if ! exec_7z x -y "-o${posix_target}" "${posix_archive}" > /dev/null; then
-        log_error "Extraction of deployment archive failed."
-        exit 5
-      fi
+    if exec_7z x -y "-o${posix_target}" "${posix_archive}" > /dev/null 2>&1; then
+      return 0
+    elif [[ "${posix_archive}" == *.zip ]] && command -v unzip &> /dev/null; then
+      unzip -oq "${posix_archive}" -d "${posix_target}" > /dev/null
     else
-      if command -v 7z &> /dev/null; then
-        7z x -y "-o${posix_target}" "${posix_archive}" > /dev/null
-      elif command -v unzip &> /dev/null; then
-        unzip -o "${posix_archive}" -d "${posix_target}" > /dev/null
-      else
-        log_error "No extraction utility (7z/unzip) available."
-        exit 5
-      fi
+      log_error "Extraction of deployment archive failed."
+      exit 5
     fi
   elif [[ "${posix_archive}" == *.tar.xz ]] || [[ "${posix_archive}" == *.tar.gz ]]; then
-    if is_windows_platform || [ -n "${RESOLVED_7Z_BIN:-}" ] || command -v 7z &> /dev/null; then
-      log_info "Extracting tar archive using 7z..."
-      local extract_ok="false"
-      if is_windows_platform || [ -n "${RESOLVED_7Z_BIN:-}" ]; then
-        if exec_7z x -y "-o${posix_target}" "${posix_archive}" > /dev/null; then
-          extract_ok="true"
-        fi
+    if is_windows_platform && exec_7z x -y "-o${posix_target}" "${posix_archive}" > /dev/null 2>&1; then
+      local expected_tar intermediate_tar=""
+      expected_tar="${posix_target}/$(basename "${posix_archive%.*}")"
+      if [ -f "${expected_tar}" ]; then
+        intermediate_tar="${expected_tar}"
       else
-        if 7z x -y "-o${posix_target}" "${posix_archive}" > /dev/null; then
-          extract_ok="true"
-        fi
+        intermediate_tar=$(find "${posix_target}" -maxdepth 1 -type f -name "*.tar" | head -n 1 || true)
       fi
-
-      if [ "${extract_ok}" = "true" ]; then
-        local expected_tar
-        expected_tar="${posix_target}/$(basename "${posix_archive%.*}")"
-        local intermediate_tar=""
-        if [ -f "${expected_tar}" ]; then
-          intermediate_tar="${expected_tar}"
-        else
-          intermediate_tar=$(find "${posix_target}" -maxdepth 1 -type f -name "*.tar" | head -n 1 || true)
-        fi
-
-        if [ -n "${intermediate_tar}" ] && [ -f "${intermediate_tar}" ]; then
-          if is_windows_platform || [ -n "${RESOLVED_7Z_BIN:-}" ]; then
-            exec_7z x -y "-o${posix_target}" "${intermediate_tar}" > /dev/null
-          else
-            7z x -y "-o${posix_target}" "${intermediate_tar}" > /dev/null
-          fi
-          rm -f "${intermediate_tar}"
-        fi
-      else
-        log_warn "7z extraction failed, falling back to tar..."
-        if ! tar -xf "${posix_archive}" -C "${posix_target}"; then
+      if [ -n "${intermediate_tar}" ] && [ -f "${intermediate_tar}" ]; then
+        if ! exec_7z x -y "-o${posix_target}" "${intermediate_tar}" > /dev/null; then
           log_error "Extraction of tar archive failed."
           exit 5
         fi
+        rm -f "${intermediate_tar}"
       fi
-    else
-      log_info "Extracting archive using tar..."
-      if ! tar -xf "${posix_archive}" -C "${posix_target}"; then
-        log_error "Extraction of tar archive failed."
-        exit 5
-      fi
+    elif ! extract_archive "${posix_archive}" "${posix_target}"; then
+      log_error "Extraction of tar archive failed."
+      exit 5
     fi
   else
-    # Fallback extraction attempt
     if [ "${TARGET_PLATFORM}" = "windows" ]; then
       exec_7z x -y "-o${posix_target}" "${posix_archive}" > /dev/null
     else
-      tar -xf "${posix_archive}" -C "${posix_target}"
+      extract_archive "${posix_archive}" "${posix_target}"
     fi
   fi
 }
@@ -844,51 +994,45 @@ function extract_package_archive() {
 #  ACTION: PACKAGE
 # =============================================================================
 
-# -----------------------------------------------------------------------------
-# Function: do_package_windows
-# Objective: Orchestrates the Windows Chromium packaging workflow: downloads chrome.7z
-#            from Hibbiki/chromium-win64, normalizes tree layout to 'chromium',
-#            prunes non-English locales, repacks with 7z -mx=9 maximum compression,
-#            and finalizes archive to --archive-path.
-# Data Flow: Remote URL -> Download chrome.7z -> Extract & Normalize -> Prune Locales -> 7z repacked archive -> Stage archive.
-# -----------------------------------------------------------------------------
-function do_package_windows() {
-  local url="${FROM_URL:-${DEFAULT_WIN_FROM_URL}}"
-  local ref_path="${RELEASE_PATH:-${DEFAULT_RELEASE_PATH}}"
-  local arch_path="${ARCHIVE_PATH:-${DEFAULT_ARCHIVE_PATH}}"
+# Pure-POSIX helper shared by native Linux and WSL Linux packaging:
+# normalizes extracted tree to chromium/, prunes locales, sets permissions, and packs .tar.xz.
+function _linux_build_chromium_tar_xz() {
+  local ws_dir="$1"
+  local pkg_filename="$2"
+  local log_prefix="${3:-[LNX]}"
 
-  log_info "Executing Windows packaging workflow..."
-  log_info "Source URL: ${url}"
-  log_info "Reference Path: $(to_mixed_path "${ref_path}")"
-  log_info "Target Archive Directory: $(to_mixed_path "${arch_path}")"
+  normalize_extracted_layout "${ws_dir}"
 
-  log_info "Inspecting remote release details from ${url}..."
-  local release_meta
-  release_meta=$(fetch_github_release_asset "Hibbiki/chromium-win64" "chrome\.7z" "${url}")
-  local download_url="${release_meta%%|*}"
-  local tag_name="${release_meta#*|}"
+  echo "${log_prefix} Pruning non-English locales..."
+  local loc_dir
+  while IFS= read -r loc_dir; do
+    [ -z "${loc_dir}" ] || [ ! -d "${loc_dir}" ] && continue
+    find "${loc_dir}" -maxdepth 1 -type f ! -iname "en-US*" -delete
+  done < <(find "${ws_dir}/chromium" -type d \( -iname "locales" -o -iname "Locales" \) || true)
 
-  if [ -z "${download_url}" ]; then
-    log_error "Failed to locate chrome.7z download URL from ${url}"
-    exit 4
+  echo "${log_prefix} Enforcing POSIX executable attributes and permissions on Linux binaries..."
+  chmod 755 "${ws_dir}/chromium" 2> /dev/null || true
+  find "${ws_dir}/chromium" -type d -exec chmod 755 {} + 2> /dev/null || true
+  find "${ws_dir}/chromium" -type f -exec chmod 644 {} + 2> /dev/null || true
+
+  local bin
+  for bin in chrome chromium chrome_crashpad_handler chrome-sandbox nacl_helper nacl_helper_bootstrap; do
+    [ -f "${ws_dir}/chromium/${bin}" ] && chmod 755 "${ws_dir}/chromium/${bin}"
+  done
+  find "${ws_dir}/chromium" -type f -name "*.so*" -exec chmod 755 {} + 2> /dev/null || true
+
+  echo "${log_prefix} Repacking package with tar.xz maximum compression: ${pkg_filename}..."
+  if ! XZ_OPT="-9 -T0" tar -cJf "${ws_dir}/${pkg_filename}" -C "${ws_dir}" chromium; then
+    echo "${log_prefix} [ERROR] Failed to compress tar.xz package." >&2
+    return 6
   fi
+}
 
-  local remote_ver
-  remote_ver=$(extract_version_from_string "${tag_name:-${download_url}}")
-  local build_num
-  build_num=$(echo "${tag_name:-${download_url}}" | grep -oE 'r[0-9]+' | sed 's/r//' || echo "")
-  [ -z "${build_num}" ] && build_num="1639810"
-
-  log_info "Latest remote version detected: ${remote_ver} (Build: ${build_num})"
-  log_info "Download URL: ${download_url}"
-
-  if ! check_packaging_version_gate "${ref_path}" "windows" "${remote_ver}"; then
-    return 0
-  fi
-
-  create_temp_workspace
-  local posix_ws
-  posix_ws=$(to_posix_path "${TEMP_WORKSPACE}")
+# Builds the Windows inner 7z payload in <posix_ws>/<pkg_filename>.
+function _build_windows_inner_7z() {
+  local download_url="$1"
+  local posix_ws="$2"
+  local pkg_filename="$3"
 
   log_info "Downloading chrome.7z..."
   local allow_file=false
@@ -907,28 +1051,19 @@ function do_package_windows() {
   normalize_extracted_layout "${posix_ws}"
   prune_locales "${posix_ws}/chromium"
 
-  local pkg_filename="chromium-${remote_ver}_${build_num}-x64.7z"
   local output_archive="${posix_ws}/${pkg_filename}"
-
   log_info "Repacking package with 7z maximum compression: ${pkg_filename}..."
   if ! exec_7z a -t7z -m0=lzma2 -mx=9 "${output_archive}" "${posix_ws}/chromium" > /dev/null; then
     log_error "Failed to create 7z compressed package archive."
     exit 6
   fi
-
-  finalize_package_archive "${output_archive}" "${arch_path}"
 }
 
-# -----------------------------------------------------------------------------
-# Function: do_package_linux_wsl
-# Objective: Executes the Linux packaging pipeline within WSL to guarantee native
-#            Linux ext4 POSIX permissions, executable bits, and symlinks are preserved.
-# -----------------------------------------------------------------------------
+# Executes the Linux packaging pipeline within WSL to preserve POSIX permissions.
 function do_package_linux_wsl() {
   local download_url="$1"
-  local remote_ver="$2"
-  local arch_path="$3"
-  local pkg_filename="$4"
+  local stage_dir="$2"
+  local pkg_filename="$3"
 
   local wsl_bin="${RESOLVED_WSL_BIN:-wsl.exe}"
   if ! "${wsl_bin}" -e true 2> /dev/null; then
@@ -936,24 +1071,24 @@ function do_package_linux_wsl() {
     exit 3
   fi
 
-  local wsl_arch_dest
-  wsl_arch_dest=$(to_wsl_path "${arch_path}" || true)
+  local wsl_stage_dest fn_defs wsl_script
+  wsl_stage_dest=$(to_wsl_path "${stage_dir}" || true)
+  fn_defs=$(declare -f normalize_extracted_layout _linux_build_chromium_tar_xz)
 
   log_info "Delegating Linux packaging to WSL to preserve POSIX executable attributes..."
-  log_info "WSL Destination: ${wsl_arch_dest}"
+  log_info "WSL Staging Destination: ${wsl_stage_dest}"
   log_info "Target Package: ${pkg_filename}"
 
-  local wsl_script
-  wsl_script=$(cat << 'EOF_WSL'
+  # shellcheck disable=SC2016
+  wsl_script="${fn_defs}"$'\n''
 set -euo pipefail
 
 DOWNLOAD_URL="$1"
-REMOTE_VER="$2"
-WSL_DEST_DIR="$3"
-PKG_FILENAME="$4"
+WSL_DEST_DIR="$2"
+PKG_FILENAME="$3"
 
 WSL_WS="$(mktemp -d /tmp/chromium-linux-pkg-XXXXXX)"
-trap 'rm -rf "${WSL_WS}"' EXIT INT TERM
+trap '\''rm -rf "${WSL_WS}"'\'' EXIT INT TERM
 
 echo "[WSL] Created isolated Linux workspace: ${WSL_WS}"
 echo "[WSL] Downloading Linux release archive from ${DOWNLOAD_URL}..."
@@ -964,150 +1099,125 @@ fi
 
 echo "[WSL] Extracting Linux release archive with native Linux tar..."
 mkdir -p "${WSL_WS}/extracted"
-if ! tar -xf "${WSL_WS}/chromium.tar.xz" -C "${WSL_WS}/extracted"; then
+if ! tar --warning=no-unknown-keyword -xf "${WSL_WS}/chromium.tar.xz" -C "${WSL_WS}/extracted"; then
   echo "[WSL ERROR] Extraction failed." >&2
   exit 5
 fi
 
-mkdir -p "${WSL_WS}/chromium"
-SRC_DIR=""
-if [ -d "${WSL_WS}/extracted/chromium" ]; then
-  SRC_DIR="${WSL_WS}/extracted/chromium"
-else
-  ROOT_DIR="$(find "${WSL_WS}/extracted" -mindepth 1 -maxdepth 1 -type d | head -n 1 || true)"
-  while [ -n "${ROOT_DIR}" ]; do
-    SUB_COUNT="$(find "${ROOT_DIR}" -mindepth 1 -maxdepth 1 | wc -l || echo 0)"
-    INNER_DIR="$(find "${ROOT_DIR}" -mindepth 1 -maxdepth 1 -type d | head -n 1 || true)"
-    if [ "${SUB_COUNT}" -eq 1 ] && [ -n "${INNER_DIR}" ]; then
-      ROOT_DIR="${INNER_DIR}"
-    else
-      break
-    fi
-  done
-  SRC_DIR="${ROOT_DIR:-${WSL_WS}/extracted}"
-fi
+_linux_build_chromium_tar_xz "${WSL_WS}" "${PKG_FILENAME}" "[WSL]" || exit $?
 
-cp -af "${SRC_DIR}/." "${WSL_WS}/chromium/"
-
-echo "[WSL] Pruning non-English locales..."
-while IFS= read -r loc_dir; do
-  [ -z "${loc_dir}" ] || [ ! -d "${loc_dir}" ] && continue
-  find "${loc_dir}" -maxdepth 1 -type f ! -iname "en-US*" -delete
-done < <(find "${WSL_WS}/chromium" -type d \( -iname "locales" -o -iname "Locales" \) || true)
-
-echo "[WSL] Enforcing POSIX executable attributes and permissions on Linux binaries..."
-chmod 755 "${WSL_WS}/chromium" 2>/dev/null || true
-find "${WSL_WS}/chromium" -type d -exec chmod 755 {} + 2>/dev/null || true
-find "${WSL_WS}/chromium" -type f -exec chmod 644 {} + 2>/dev/null || true
-
-for bin in chrome chromium chrome_crashpad_handler chrome-sandbox nacl_helper nacl_helper_bootstrap; do
-  [ -f "${WSL_WS}/chromium/${bin}" ] && chmod 755 "${WSL_WS}/chromium/${bin}"
-done
-find "${WSL_WS}/chromium" -type f -name "*.so*" -exec chmod 755 {} + 2>/dev/null || true
-
-echo "[WSL] Repacking package with native Linux tar.xz maximum compression: ${PKG_FILENAME}..."
-if ! XZ_OPT="-9 -T0" tar -cJf "${WSL_WS}/${PKG_FILENAME}" -C "${WSL_WS}" chromium; then
-  echo "[WSL ERROR] Failed to compress tar.xz package." >&2
-  exit 6
-fi
-
-echo "[WSL] Moving finalized archive to staging destination: ${WSL_DEST_DIR}..."
+echo "[WSL] Moving finalized archive to host workspace staging: ${WSL_DEST_DIR}..."
 mkdir -p "${WSL_DEST_DIR}"
 cp -f "${WSL_WS}/${PKG_FILENAME}" "${WSL_DEST_DIR}/${PKG_FILENAME}"
 
 echo "[WSL] Linux package build and attribute preservation completed successfully."
-EOF_WSL
-)
+'
 
-  if ! "${wsl_bin}" -e bash -c "${wsl_script}" -- "${download_url}" "${remote_ver}" "${wsl_arch_dest}" "${pkg_filename}"; then
+  if ! "${wsl_bin}" -e bash -c "${wsl_script}" -- "${download_url}" "${wsl_stage_dest}" "${pkg_filename}"; then
     log_error "Linux packaging in WSL failed."
     exit 6
   fi
 
-  log_info "Package successfully created via WSL and staged to destination:"
-  log_info "  -> $(to_mixed_path "${arch_path}/${pkg_filename}")"
+  log_info "Linux package built via WSL in workspace: $(to_mixed_path "${stage_dir}/${pkg_filename}")"
 }
 
-# -----------------------------------------------------------------------------
-# Function: do_package_linux
-# Objective: Orchestrates the Linux Chromium packaging workflow: downloads Portable
-#            Linux tar.xz from ungoogled-software/ungoogled-chromium-portablelinux,
-#            normalizes tree layout to 'chromium', prunes non-English locales,
-#            repacks with tar.xz maximum compression (XZ_OPT="-9 -T0"), and finalizes archive.
-#            Delegates to WSL on Windows hosts to ensure POSIX attributes are preserved.
-# Data Flow: Remote URL -> Download tar.xz -> Extract & Normalize -> Prune Locales -> tar.xz repacked archive -> Stage archive.
-# -----------------------------------------------------------------------------
-function do_package_linux() {
-  local url="${FROM_URL:-${DEFAULT_LNX_FROM_URL}}"
-  local ref_path="${RELEASE_PATH:-${DEFAULT_RELEASE_PATH}}"
-  local arch_path="${ARCHIVE_PATH:-${DEFAULT_ARCHIVE_PATH}}"
+# Builds the Linux inner .tar.xz payload in <posix_ws>/<pkg_filename>.
+function _build_linux_inner_tar_xz() {
+  local download_url="$1"
+  local posix_ws="$2"
+  local pkg_filename="$3"
 
-  log_info "Executing Linux packaging workflow..."
-  log_info "Source URL: ${url}"
-  log_info "Reference Path: $(to_mixed_path "${ref_path}")"
-  log_info "Target Archive Directory: $(to_mixed_path "${arch_path}")"
-
-  log_info "Inspecting remote release details from ${url}..."
-  local release_meta
-  release_meta=$(fetch_github_release_asset "ungoogled-software/ungoogled-chromium-portablelinux" "x86_64_linux\.tar\.xz" "${url}")
-  local download_url="${release_meta%%|*}"
-  local tag_name="${release_meta#*|}"
-
-  if [ -z "${download_url}" ]; then
-    log_error "Failed to locate Portable Linux tar.xz download URL from ${url}"
-    exit 4
-  fi
-
-  local remote_ver
-  remote_ver=$(extract_version_from_string "${tag_name:-${download_url}}")
-  log_info "Latest remote version detected: ${remote_ver}"
-  log_info "Download URL: ${download_url}"
-
-  if ! check_packaging_version_gate "${ref_path}" "linux" "${remote_ver}"; then
+  if is_windows_platform; then
+    do_package_linux_wsl "${download_url}" "${posix_ws}" "${pkg_filename}"
     return 0
   fi
 
-  local pkg_filename="chromium-${remote_ver}-ungoogled-x86_64_linux.tar.xz"
-
-  if is_windows_platform; then
-    do_package_linux_wsl "${download_url}" "${remote_ver}" "${arch_path}" "${pkg_filename}"
-  else
-    create_temp_workspace
-    local posix_ws
-    posix_ws=$(to_posix_path "${TEMP_WORKSPACE}")
-
-    log_info "Downloading Linux tar.xz archive..."
-    local allow_file=false
-    [[ "${download_url}" == file://* ]] && allow_file=true
-    if ! download_asset "${download_url}" "${posix_ws}/chromium.tar.xz" "" "sha256" "${allow_file}"; then
-      log_error "Failed to download tar.xz from ${download_url}"
-      exit 4
-    fi
-
-    log_info "Extracting archive..."
-    extract_package_archive "${posix_ws}/chromium.tar.xz" "${posix_ws}/extracted"
-
-    normalize_extracted_layout "${posix_ws}"
-    prune_locales "${posix_ws}/chromium"
-
-    chmod 755 "${posix_ws}/chromium" 2>/dev/null || true
-    find "${posix_ws}/chromium" -type d -exec chmod 755 {} + 2>/dev/null || true
-    find "${posix_ws}/chromium" -type f -exec chmod 644 {} + 2>/dev/null || true
-    for bin in chrome chromium chrome_crashpad_handler chrome-sandbox nacl_helper nacl_helper_bootstrap; do
-      [ -f "${posix_ws}/chromium/${bin}" ] && chmod 755 "${posix_ws}/chromium/${bin}"
-    done
-    find "${posix_ws}/chromium" -type f -name "*.so*" -exec chmod 755 {} + 2>/dev/null || true
-
-    local output_archive="${posix_ws}/${pkg_filename}"
-
-    log_info "Repacking package with tar.xz maximum compression: ${pkg_filename}..."
-    if ! XZ_OPT="-9 -T0" tar -cJf "${output_archive}" -C "${posix_ws}" chromium; then
-      log_error "Failed to create tar.xz compressed package archive."
-      exit 6
-    fi
-
-    finalize_package_archive "${output_archive}" "${arch_path}"
+  log_info "Downloading Linux tar.xz archive..."
+  local allow_file=false
+  [[ "${download_url}" == file://* ]] && allow_file=true
+  if ! download_asset "${download_url}" "${posix_ws}/chromium.tar.xz" "" "sha256" "${allow_file}"; then
+    log_error "Failed to download tar.xz from ${download_url}"
+    exit 4
   fi
+
+  log_info "Extracting archive..."
+  extract_package_archive "${posix_ws}/chromium.tar.xz" "${posix_ws}/extracted"
+
+  if ! _linux_build_chromium_tar_xz "${posix_ws}" "${pkg_filename}" "[INFO]"; then
+    exit 6
+  fi
+}
+
+# Shared packaging orchestrator across Windows and Linux targets.
+function _run_package_platform() {
+  local platform="$1"
+  local url="$2"
+  local gh_repo="$3"
+  local asset_regex="$4"
+  local ref_path="${RELEASE_PATH:-${DEFAULT_RELEASE_PATH}}"
+  local arch_path="${ARCHIVE_PATH:-${DEFAULT_ARCHIVE_PATH}}"
+
+  log_info "Executing ${platform^} packaging workflow..."
+  log_info "Source URL: ${url}"
+  log_info "Reference Path: $(to_mixed_path "${ref_path}")"
+  log_info "Target Archive Directory: $(to_mixed_path "${arch_path}")"
+  log_info "Update Release Path: ${UPDATE_SOURCE}"
+  log_info "Dry Run: ${DRY_RUN}"
+
+  log_info "Inspecting remote release details from ${url}..."
+  local release_meta download_url tag_name
+  release_meta=$(fetch_github_release_asset "${gh_repo}" "${asset_regex}" "${url}")
+  download_url="${release_meta%%|*}"
+  tag_name="${release_meta#*|}"
+
+  if [ -z "${download_url}" ]; then
+    log_error "Failed to locate ${platform} release download URL from ${url}"
+    exit 4
+  fi
+
+  local remote_ver pkg_filename
+  remote_ver=$(extract_version_from_string "${tag_name:-${download_url}}")
+  if [ "${platform}" = "windows" ]; then
+    local build_num
+    build_num=$(echo "${tag_name:-${download_url}}" | grep -oE 'r[0-9]+' | sed 's/r//' || echo "")
+    [ -z "${build_num}" ] && build_num="1639810"
+    log_info "Latest remote version detected: ${remote_ver} (Build: ${build_num})"
+    pkg_filename="chromium-${remote_ver}_${build_num}-x64.7z"
+  else
+    log_info "Latest remote version detected: ${remote_ver}"
+    pkg_filename="chromium-${remote_ver}-ungoogled-x86_64_linux.tar.xz"
+  fi
+  log_info "Download URL: ${download_url}"
+
+  if ! check_packaging_version_gate "${ref_path}" "${platform}" "${remote_ver}"; then
+    return 0
+  fi
+
+  if [ "${DRY_RUN}" = "true" ]; then
+    log_info "[DRY-RUN] Would download: ${download_url}"
+    log_info "[DRY-RUN] Would normalize layout, prune locales (keep en-US*), and repack ${pkg_filename}"
+    finalize_package_archive "${pkg_filename}" "${arch_path}" "${ref_path}" "${platform}" "${remote_ver}"
+    return 0
+  fi
+
+  create_temp_workspace
+  local posix_ws
+  posix_ws=$(to_posix_path "${TEMP_WORKSPACE}")
+
+  if [ "${platform}" = "windows" ]; then
+    _build_windows_inner_7z "${download_url}" "${posix_ws}" "${pkg_filename}"
+  else
+    _build_linux_inner_tar_xz "${download_url}" "${posix_ws}" "${pkg_filename}"
+  fi
+  finalize_package_archive "${posix_ws}/${pkg_filename}" "${arch_path}" "${ref_path}" "${platform}" "${remote_ver}"
+}
+
+function do_package_windows() {
+  _run_package_platform "windows" "${FROM_URL:-${DEFAULT_WIN_FROM_URL}}" "Hibbiki/chromium-win64" "chrome\.7z"
+}
+
+function do_package_linux() {
+  _run_package_platform "linux" "${FROM_URL:-${DEFAULT_LNX_FROM_URL}}" "ungoogled-software/ungoogled-chromium-portablelinux" "x86_64_linux\.tar\.xz"
 }
 
 # =============================================================================
@@ -1133,21 +1243,24 @@ function do_deploy() {
   posix_target="${posix_target%/}"
   log_info "Executing deployment to target folder: $(to_mixed_path "${posix_target}")"
 
-  create_temp_workspace
-  local posix_ws
-  posix_ws=$(to_posix_path "${TEMP_WORKSPACE}")
-  local archive_file=""
+  local archive_file="" posix_ws=""
 
   if [ -n "${FROM_URL}" ]; then
     local raw_name
     raw_name=$(basename "${FROM_URL%%#*}" | cut -d? -f1)
-    archive_file="${posix_ws}/${raw_name:-downloaded_package}"
-    log_info "Downloading package from URL: ${FROM_URL}"
-    local allow_file=false
-    [[ "${FROM_URL}" == file://* ]] && allow_file=true
-    if ! download_asset "${FROM_URL}" "${archive_file}" "" "sha256" "${allow_file}"; then
-      log_error "Failed to download deployment package from ${FROM_URL}"
-      exit 4
+    if [ "${DRY_RUN}" = "true" ]; then
+      archive_file="${raw_name:-downloaded_package}"
+    else
+      create_temp_workspace
+      posix_ws=$(to_posix_path "${TEMP_WORKSPACE}")
+      archive_file="${posix_ws}/${raw_name:-downloaded_package}"
+      log_info "Downloading package from URL: ${FROM_URL}"
+      local allow_file=false
+      [[ "${FROM_URL}" == file://* ]] && allow_file=true
+      if ! download_asset "${FROM_URL}" "${archive_file}" "" "sha256" "${allow_file}"; then
+        log_error "Failed to download deployment package from ${FROM_URL}"
+        exit 4
+      fi
     fi
   elif [ -n "${FROM_FOLDER}" ]; then
     local posix_src
@@ -1170,6 +1283,10 @@ function do_deploy() {
       log_error "Specified --from-folder does not exist: $(to_mixed_path "${FROM_FOLDER}")"
       exit 2
     fi
+    if [ "${DRY_RUN}" != "true" ]; then
+      create_temp_workspace
+      posix_ws=$(to_posix_path "${TEMP_WORKSPACE}")
+    fi
   else
     log_error "Deployment requires either --from-folder or --from-url."
     exit 2
@@ -1189,6 +1306,15 @@ function do_deploy() {
       log_error "Cross-platform deployment prohibited: Cannot install Windows package '$(basename "${archive_file}")' on Linux environment."
       exit 2
     fi
+  fi
+
+  if [ "${DRY_RUN}" = "true" ]; then
+    local dry_src="${FROM_URL:-${archive_file}}"
+    log_info "[DRY-RUN] Would deploy ${dry_src} to $(to_mixed_path "${posix_target}")"
+    if [ "${PURGE}" = "true" ] && [ -z "${FROM_URL}" ] && [ -n "${archive_file}" ] && [ -f "${archive_file}" ]; then
+      log_info "[DRY-RUN] Would purge source archive: $(to_mixed_path "${archive_file}")"
+    fi
+    return 0
   fi
 
   local extract_stage="${posix_ws}/deploy_stage"
