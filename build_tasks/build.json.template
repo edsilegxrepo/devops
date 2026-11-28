@@ -55,7 +55,10 @@
   "_install_path_doc": "Target filesystem installation directory for the compiled binary in DEB/RPM. Default: /usr/bin.",
 
   "cgo": false,
-  "_cgo_doc": "Specifies whether CGO is disabled (false = 100% static compilation CGO_ENABLED=0). Default: false.",
+  "_cgo_doc": "Specifies whether CGO is disabled (false = 100% static compilation CGO_ENABLED=0; true = zig cc CGO_ENABLED=1). Default: false.",
+
+  "glibc": "2.28",
+  "_glibc_doc": "Target Linux glibc version passed to zig cc (-target <arch>-linux-gnu.<glibc>) when cgo is true. Assumed '2.28' (EL8+) if omitted.",
 
   "history": [
     "* Wed Oct 28 2026 Mis Center <support@criticalsys.net> - <version>-<release>",

@@ -8,8 +8,9 @@
 # ==============================================================================
 #  Objective:
 #    Hardened, cross-platform Go build and quality assurance engine with
-#    orthogonal target platform and packaging controls. Compiles 100% static
-#    binaries (CGO_ENABLED=0) for universal Linux compatibility across release
+#    orthogonal target platform and packaging controls. Compiles static
+#    binaries (CGO_ENABLED=0) by default or portable CGO binaries via zig cc
+#    (targeting glibc 2.28+ on Linux and windows-gnu on Windows) for release
 #    Tarballs, RPMs, and DEB packages, and builds Windows executables and Zip
 #    archives under Cygwin/MSYS2 environments. Generates parallel-safe per-archive
 #    .sha256 checksums and optional Ed25519 SSH digital signatures.
@@ -216,10 +217,21 @@ check_dependencies() {
     fi
   fi
 
-  # C compiler dependency when CGO is enabled on Windows host
-  if [ "${USE_CGO:-false}" = true ] && [ "${TARGET_WIN}" = true ] && [ "${HOST_OS}" == "WIN" ]; then
-    if ! command -v gcc &> /dev/null; then
-      missing+=("gcc (MinGW-w64 required for Windows CGO compilation)")
+  # Zig C/C++ compiler dependency when CGO is enabled (Windows and Linux/WSL)
+  if [ "${USE_CGO:-false}" = true ]; then
+    if [ "${TARGET_WIN}" = true ] && [ "${HOST_OS}" == "WIN" ]; then
+      if ! command -v zig &> /dev/null; then
+        missing+=("zig (required for Windows CGO compilation)")
+      fi
+    fi
+    if [ "${TARGET_LINUX}" = true ]; then
+      if [ "${DELEGATE_LINUX_TO_WSL:-false}" = true ]; then
+        if ! run_in_wsl / command -v zig &> /dev/null; then
+          missing+=("zig (required in WSL for portable Linux CGO compilation)")
+        fi
+      elif ! command -v zig &> /dev/null; then
+        missing+=("zig (required for portable Linux CGO compilation)")
+      fi
     fi
   fi
 
@@ -227,6 +239,41 @@ check_dependencies() {
     log_error "Missing required CLI build tool(s): ${missing[*]}"
     exit "${EXIT_DEPENDENCY}"
   fi
+}
+
+# ------------------------------------------------------------------------------
+# Function: resolve_zig_cgo_target
+# Objective: Resolves the Zig cross-compilation target triple for the requested
+#            OS and Go architecture.
+# Arguments:
+#   $1 - Target operating system ('linux' or 'windows').
+#   $2 - Target Go architecture (e.g. 'amd64', 'arm64', '386').
+# Outputs  : Prints Zig target triple to stdout (e.g. 'x86_64-linux-gnu.2.28').
+# Exit Code: Halts with EXIT_COMPILE (7) if the architecture/OS is unsupported.
+# ------------------------------------------------------------------------------
+resolve_zig_cgo_target() {
+  local target_os="$1"
+  local target_arch="$2"
+  local zig_arch=""
+
+  case "${target_arch}" in
+    amd64 | x86_64) zig_arch="x86_64" ;;
+    arm64 | aarch64) zig_arch="aarch64" ;;
+    386 | i386) zig_arch="x86" ;;
+    *)
+      log_error "Unsupported CGO architecture '${target_arch}' for zig cc."
+      exit "${EXIT_COMPILE}"
+      ;;
+  esac
+
+  case "${target_os}" in
+    linux) echo "${zig_arch}-linux-gnu.${LINUX_GLIBC_VERSION:-2.28}" ;;
+    windows) echo "${zig_arch}-windows-gnu" ;;
+    *)
+      log_error "Unsupported CGO target OS '${target_os}' for zig cc."
+      exit "${EXIT_COMPILE}"
+      ;;
+  esac
 }
 
 # ------------------------------------------------------------------------------
@@ -297,12 +344,10 @@ EOF
 # ------------------------------------------------------------------------------
 if [ "${HOST_OS}" == "WIN" ]; then
   # Windows toolchain path normalization
-  if [ -n "${CC:-}" ] && [[ "${CC}" == *[/\\]* ]]; then
-    normalize_and_add_to_path "$(dirname "${CC}")" || true
-  elif [ -n "${MINGW_HOME:-}" ]; then
-    normalize_and_add_to_path "${MINGW_HOME}/bin" || true
-  else
-    for p in "${DEFAULT_MINGW_SEARCH_PATHS[@]}"; do
+  if [ -n "${ZIG_HOME:-}" ]; then
+    normalize_and_add_to_path "${ZIG_HOME}" || true
+  elif ! command -v zig &> /dev/null; then
+    for p in "d:/dev/zig" "c:/zig"; do
       normalize_and_add_to_path "${p}" && break || true
     done
   fi
@@ -654,6 +699,12 @@ USE_CGO=false
 if [ "${RAW_CGO,,}" = "true" ] || [ "${RAW_CGO}" = "1" ]; then
   USE_CGO=true
 fi
+LINUX_GLIBC_VERSION="$(parse_json_field "${CONFIG_FILE}" "glibc" "2.28")"
+[ -z "${LINUX_GLIBC_VERSION}" ] && LINUX_GLIBC_VERSION="2.28"
+if [ "${USE_CGO}" = true ] && ! [[ "${LINUX_GLIBC_VERSION}" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+  log_error "Invalid 'glibc' version '${LINUX_GLIBC_VERSION}' in ${CONFIG_FILE}; expected quoted string such as '2.28'."
+  exit "${EXIT_CONFIG}"
+fi
 
 if [ -n "${MAIN_PATH_OVERRIDE}" ]; then
   MAIN_PATH="${MAIN_PATH_OVERRIDE}"
@@ -724,10 +775,22 @@ fi
 #        unless overridden by --ignore-audit.
 # ------------------------------------------------------------------------------
 if [ "${COMPILE_ONLY}" = false ]; then
+  QA_CGO_ENV=()
+  if [ "${USE_CGO}" = true ]; then
+    if ! command -v zig &> /dev/null; then
+      log_error "zig compiler not found on PATH; required for CGO tests and static analysis."
+      exit "${EXIT_DEPENDENCY}"
+    fi
+    QA_HOST_OS="linux"
+    [ "${HOST_OS}" == "WIN" ] && QA_HOST_OS="windows"
+    QA_ZIG_TARGET="$(resolve_zig_cgo_target "${QA_HOST_OS}" "${ARCH}")"
+    QA_CGO_ENV=(CC="zig cc -target ${QA_ZIG_TARGET}" CXX="zig c++ -target ${QA_ZIG_TARGET}" CGO_ENABLED=1)
+  fi
+
   # 1. Automated Test Suite Execution (Unit Tests & Code Coverage)
   if [ "${RUN_TESTSUITE}" = true ]; then
     log_info "Running automated test suite"
-    if ! go test -v -cover ./...; then
+    if ! env ${QA_CGO_ENV[@]+"${QA_CGO_ENV[@]}"} go test -v -cover ./...; then
       log_error "Automated test suite failed."
       exit "${EXIT_TEST}"
     fi
@@ -757,7 +820,7 @@ if [ "${COMPILE_ONLY}" = false ]; then
     gofumpt -l -w -extra . 2> /dev/null || true
   fi
 
-  if ! go vet ./...; then
+  if ! env ${QA_CGO_ENV[@]+"${QA_CGO_ENV[@]}"} go vet ./...; then
     log_error "go vet detected issues."
     LINT_ERR=1
   fi
@@ -777,7 +840,7 @@ if [ "${COMPILE_ONLY}" = false ]; then
     local tool="$1"
     shift
     if command -v "${tool}" &> /dev/null; then
-      if ! "$@"; then
+      if ! env ${QA_CGO_ENV[@]+"${QA_CGO_ENV[@]}"} "$@"; then
         log_error "${tool} detected issues."
         LINT_ERR=1
       fi
@@ -812,8 +875,8 @@ fi
 
 # ------------------------------------------------------------------------------
 # Compilation Phase
-# All Linux binaries are 100% static (CGO_ENABLED=0) for single-binary parity
-# across all distros, archives, RPMs, and DEBs.
+# Static binaries (CGO_ENABLED=0) by default; CGO_ENABLED=1 routes through
+# zig cc (targeting x86_64-linux-gnu.<glibc> on Linux, <arch>-windows-gnu on Windows).
 # ------------------------------------------------------------------------------
 LDFLAGS="${DEFAULT_GO_LDFLAGS} -X ${VERSION_PKG}=${GO_VERSION}"
 if [ -n "${BUILD_PKG}" ]; then
@@ -867,10 +930,13 @@ prepare_gosanitize() {
 #   $3 - (Optional) Extra linker or compiler flags (e.g. '-tags netgo').
 # Architecture & Security:
 #   - Configures CGO_ENABLED (defaults to 0 for static binaries; 1 when "cgo": true in build.json).
+#   - When CGO is enabled, uses 'zig cc' uniformly on both Windows (<arch>-windows-gnu) and
+#     Linux (<arch>-linux-gnu.<glibc>, default 2.28) with '-O2 -g0' and '-extldflags -s',
+#     failing fast if zig is unavailable.
 #   - Applies -trimpath to remove developer machine filesystem paths from binary stack traces.
 #   - Injects semantic version and Git commit hash via -ldflags -X symbols.
 #   - Compiles to a temporary file (${tmp_bin}) before atomically moving into ${BINDIR}.
-# Exit Code: Halts with EXIT_COMPILE (7) if the Go compilation command fails.
+# Exit Code: Halts with EXIT_COMPILE (7) or EXIT_DEPENDENCY (4) if compilation/toolchain fails.
 # ------------------------------------------------------------------------------
 compile_target_binary() {
   local target_os="$1"
@@ -884,21 +950,43 @@ compile_target_binary() {
     host_match="WIN"
   fi
 
-  log_info "Compiling ${target_desc}: ${bin_name} (Version: ${GO_VERSION}, Entrypoint: ${MAIN_PATH})"
+  local cgo_setting="0"
+  local cc_env=()
+  local cc_note=""
+  local target_ldflags="${LDFLAGS}"
+  if [ "${USE_CGO}" = true ]; then
+    cgo_setting="1"
+    if ! command -v zig &> /dev/null; then
+      log_error "zig compiler not found on PATH; required for ${target_os} CGO compilation."
+      exit "${EXIT_DEPENDENCY}"
+    fi
+    local zig_target
+    zig_target="$(resolve_zig_cgo_target "${target_os}" "${ARCH}")"
+    if [ "${target_os}" == "linux" ]; then
+      target_desc="Portable Linux CGO Binary (${zig_target})"
+    else
+      target_desc="Windows CGO Binary (${zig_target})"
+    fi
+    cc_env=(
+      CC="zig cc -target ${zig_target}"
+      CXX="zig c++ -target ${zig_target}"
+      CGO_CFLAGS="${CGO_CFLAGS:--O2 -g0}"
+      CGO_CXXFLAGS="${CGO_CXXFLAGS:--O2 -g0}"
+    )
+    target_ldflags="${target_ldflags} -extldflags -s"
+    cc_note=", CC: zig cc -target ${zig_target}"
+  fi
+
+  log_info "Compiling ${target_desc}: ${bin_name} (Version: ${GO_VERSION}, Entrypoint: ${MAIN_PATH}${cc_note})"
   local bin_path="${BINDIR}/${bin_name}"
   local tmp_bin="${BINDIR}/${bin_name}.tmp.$$"
 
-  local cmd=(go build -v -trimpath -buildmode=pie -buildvcs=false -ldflags "${LDFLAGS}")
+  local cmd=(go build -v -trimpath -buildmode=pie -buildvcs=false -ldflags "${target_ldflags}")
   [ -n "${extra_flags}" ] && cmd+=("${extra_flags}")
   cmd+=(-o "${tmp_bin}")
   [ -n "${MAIN_PATH}" ] && cmd+=("${MAIN_PATH}")
 
-  local cgo_setting="0"
-  if [ "${USE_CGO}" = true ]; then
-    cgo_setting="1"
-  fi
-
-  if ! CGO_ENABLED="${cgo_setting}" GOOS="${target_os}" GOARCH="${ARCH}" "${cmd[@]}"; then
+  if ! env ${cc_env[@]+"${cc_env[@]}"} CGO_ENABLED="${cgo_setting}" GOOS="${target_os}" GOARCH="${ARCH}" "${cmd[@]}"; then
     rm -f "${tmp_bin}" 2> /dev/null || true
     log_error "${target_desc} compilation failed."
     exit "${EXIT_COMPILE}"

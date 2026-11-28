@@ -27,7 +27,7 @@ This document provides the architectural specification, operational sequence bre
 ### Core Objectives
 * **Single Static Binary Parity:** Compiles 100% static binaries (`CGO_ENABLED=0`) on Linux, eliminating external `glibc`/`musl` dependencies and reusing a single binary across Tarball archives, Debian packages, and RPM packages.
 * **Windows Feature Parity via WSL Delegation:** Native Windows execution with full Linux packaging and compilation parity. Standalone Windows compilation and zipball packaging run on the Windows host, while Linux packaging actions (`--rpm`, `--deb`, `--archive`, `--all-pkg`) and CGO-enabled Linux builds (`"cgo": true` in `build.json`) are transparently delegated to the default WSL distribution (`AlmaLinuxOS-9`). Paths are normalized to canonical mixed format (`drive:/path/sub`) and WSL mount paths (`/mnt/drive/path/sub`).
-* **CGO Cross-Platform Delegation:** Enables full CGO support (`CGO_ENABLED=1`) when `"cgo": true` is defined in `build.json`. When invoked on Windows, Linux CGO builds automatically route through WSL to compile against the native Linux C toolchain (`gcc`), eliminating complex cross-compilers.
+* **CGO Cross-Platform Delegation:** Enables full CGO support (`CGO_ENABLED=1`) when `"cgo": true` is defined in `build.json`. Uses **`zig cc`** uniformly across both Windows (`<arch>-windows-gnu`) and Linux (`<arch>-linux-gnu.<glibc>`, default `2.28`, routed via WSL from Windows) with `-O2 -g0` and `-extldflags -s`, failing fast if `zig` is absent and keeping binaries stripped and EL8+ portable without standalone MinGW-w64 `gcc`.
 * **Metadata Autodetection via `build.json`:** Extracts application settings, semantic versions, entrypoints, and packaging metadata dynamically from `build.json`, backed by a robust multi-engine fallback parser.
 * **Zero-Trust Quality Assurance & Testing:** Enforces automated test suites with coverage (`--testsuite`), formatting (`gofumpt`), static analysis (`go vet`, `golangci-lint`), and security vulnerability detection (`govulncheck`, `gosec`).
 * **Orthogonal Platform & Packaging Controls:** Decouples platform targets (`--windows`, `--linux`, `--all-platform`) from packaging formats (`--archive`, `--rpm`, `--deb`, `--all-pkg`), allowing flexible matrix builds.
@@ -163,7 +163,8 @@ The build engine dynamically discovers project and compiler metadata from `build
 | `section` | String | `utils` | Debian package repository classification. |
 | `priority` | String | `optional` | Debian package priority level. |
 | `install_path` | String | `/usr/bin` | Destination directory where the binary is installed in DEB and RPM packages. |
-| `cgo` | Boolean | `false` | When `true`, enables CGO compilation (`CGO_ENABLED=1`). On Windows hosts, Linux compilation is transparently delegated to WSL to use native GCC. When `false`, enforces pure static compilation (`CGO_ENABLED=0`). |
+| `cgo` | Boolean | `false` | When `true`, enables CGO compilation (`CGO_ENABLED=1`) via **`zig cc`** for both Windows (`<arch>-windows-gnu`) and Linux (`<arch>-linux-gnu.<glibc>`, via WSL on Windows hosts). When `false`, enforces pure static compilation (`CGO_ENABLED=0`). |
+| `glibc` | String | `2.28` | Optional target glibc version passed to `zig cc` (`-target <arch>-linux-gnu.<glibc>`) when `cgo` is `true` on Linux (`2.28` = EL8+ compatibility). |
 | `history` | Array / String | *(Default changelog)* | Packaging changelog history. Dynamically formats RPM `%changelog` and Debian RFC 822 `/usr/share/doc/<app>/changelog.Debian.gz`. Tokens `<version>` and `<release>` substitute strictly with `${VERSION}` and `${RELEASE}` (e.g. `0.2.1-1`). |
 
 ### Go Code Variable Injection Example
@@ -241,7 +242,7 @@ When packaging flags are supplied, artifacts are staged in isolated temporary di
   - Generates standalone RPM spec file in `${RPM_TOPDIR}/SPECS/${APP_NAME}.spec`
   - Sanitizes `%` macros in summary, group, description, URL, and license
   - Generates `%changelog` dynamically from `build.json` history (or default release entry) with `<version>` and `<release>` substituted strictly as `${VERSION}-${RELEASE}` (e.g. `0.2.1-1`)
-  - Sets `AutoReqProv: no` (100% static binary requires no dynamic glibc package dependencies)
+  - Sets `AutoReqProv: no` (static `CGO_ENABLED=0` binaries require no shared dependencies, and CGo builds via `zig cc` target `glibc 2.28` without host-distro RPM coupling)
   - Sets `%define _build_id_links none` and `%define debug_package %{nil}`
 * **Builder:** `rpmbuild --define "_topdir ${RPM_TOPDIR}" -bb ${SPEC_FILE}`
 
@@ -310,6 +311,7 @@ checkcert (0.2.1-1) stable; urgency=low
 | **dpkg-deb** | Packager | Required for `--deb` | Debian package generator (Linux native; executed via WSL on Windows). |
 | **rpmbuild** | Packager | Required for `--rpm` | Red Hat package generator (Linux native; executed via WSL on Windows). |
 | **wsl** | Subsystem Bridge | Required on Windows | Executes Linux packaging workflows transparently via default distro on Windows. |
+| **zig** | C/C++ Cross Compiler | Required for CGO | Compiles both Windows (`<arch>-windows-gnu`) and Linux (`<arch>-linux-gnu.<glibc>`, `2.28` default, natively or in WSL) CGO builds (`"cgo": true`) with `-O2 -g0` and `-extldflags -s`; fails fast with `EXIT_DEPENDENCY` (`4`) if missing. |
 | **sha256sum / shasum** | Cryptographic Hash | Required for packaging | Computes per-archive SHA256 checksums. |
 | **ssh-keygen** | Code Signer | Required for `--sign` | OpenSSH digital signature generation. |
 
@@ -325,7 +327,7 @@ checkcert (0.2.1-1) stable; urgency=low
 | **1** | `EXIT_GENERAL` | General / unclassified runtime error | Unexpected execution failure |
 | **2** | `EXIT_USAGE` | Invalid CLI arguments or syntax | Unknown or malformed flag passed |
 | **3** | `EXIT_CONFIG` | `build.json` missing or SSH signing key missing | `build.json` not found in current directory |
-| **4** | `EXIT_DEPENDENCY` | Missing prerequisite host tools | `go`, `tar`, `dpkg-deb`, or `rpmbuild` missing |
+| **4** | `EXIT_DEPENDENCY` | Missing prerequisite host tools | `go`, `zig`, `tar`, `dpkg-deb`, or `rpmbuild` missing |
 | **5** | `EXIT_AUDIT` | Code quality, lint, or security vulnerability failure | `govulncheck`, `gosec`, or `go vet` failed |
 | **6** | `EXIT_TEST` | Automated test suite failed | `go test` unit test assertion failed |
 | **7** | `EXIT_COMPILE` | Go compiler failure | Syntax error in Go code during `go build` |
@@ -528,7 +530,7 @@ Validate existing distribution packages or enforce a post-build verification gat
 
 The verification engine verifies SHA256 checksums, validates RPM spec headers against `build.json` (routed through WSL on Windows), checks Debian control metadata, and validates archive contents.
 
-### 9.13. CGO Linux Builds via WSL on Windows
+### 9.13. CGO Builds via `zig cc` (Windows & Linux)
 When Go projects require CGO (e.g. SQLite, hardware bindings, or native C libraries), set `"cgo": true` in `build.json`:
 
 ```json
@@ -541,10 +543,13 @@ When Go projects require CGO (e.g. SQLite, hardware bindings, or native C librar
 
 When building on Windows:
 ```bash
-# Automatically detects "cgo": true and routes the Linux compilation to WSL
+# Windows target compiles natively with zig cc -target <arch>-windows-gnu (no MinGW-w64 required)
+../../build_go.sh --windows --compile-only
+
+# Linux target routes automatically through WSL with zig cc -target <arch>-linux-gnu.<glibc>
 ../../build_go.sh --linux --compile-only
 ```
-WSL uses its native Linux `gcc` toolchain to compile the binary, producing a genuine Linux ELF binary and saving it into `../bin/` without needing Windows-hosted cross-compilers.
+Both Windows and Linux targets use **`zig cc`** (`x86_64-windows-gnu` on Windows, `x86_64-linux-gnu.2.28` default on Linux, with `CGO_CFLAGS="-O2 -g0"` and `-extldflags -s`), failing fast with `EXIT_DEPENDENCY` (`4`) if `zig` is not installed. This strips C/Zig debug info, removes standalone MinGW-w64 requirements on Windows, and caps dynamic Linux glibc symbol requirements at EL8+ (`2.28`).
 
 ---
 
